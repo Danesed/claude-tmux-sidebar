@@ -1,0 +1,8 @@
+.git/**
+.gitignore
+.vscode/**
+*.vsix
+USER_GUIDE.md
+PUBLISHING.md
+**/*.map
+.DS_Store

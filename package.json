@@ -1,0 +1,127 @@
+{
+  "name": "claude-tmux-sidebar",
+  "displayName": "Claude Tmux Sidebar",
+  "description": "Run Claude Code in a persistent tmux session inside the side bar, next to your other agentic chats. Survives SSH drops and works headless.",
+  "version": "0.5.2",
+  "publisher": "Danesed",
+  "license": "MIT",
+  "icon": "icon.png",
+  "engines": { "vscode": "^1.80.0" },
+  "categories": ["Other", "AI", "Machine Learning"],
+  "keywords": ["claude", "claude-code", "tmux", "terminal", "sidebar", "ai", "remote-ssh", "agent"],
+  "galleryBanner": { "color": "#0e1b2a", "theme": "dark" },
+  "repository": { "type": "git", "url": "https://github.com/Danesed/claude-tmux-sidebar" },
+  "bugs": { "url": "https://github.com/Danesed/claude-tmux-sidebar/issues" },
+  "homepage": "https://github.com/Danesed/claude-tmux-sidebar#readme",
+  "activationEvents": [],
+  "main": "./extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "claudeTmux",
+          "title": "Claude Tmux",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "claudeTmux": [
+        {
+          "id": "claudeTmux.view",
+          "name": "Claude",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "claudeTmux.attach",
+        "title": "Attach to an existing session…",
+        "category": "Claude Tmux",
+        "icon": "$(history)"
+      },
+      {
+        "command": "claudeTmux.restart",
+        "title": "Restart Claude in this session",
+        "category": "Claude Tmux",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "claudeTmux.kill",
+        "title": "Kill this folder's session",
+        "category": "Claude Tmux",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "claudeTmux.killPick",
+        "title": "Manage / kill tmux sessions…",
+        "category": "Claude Tmux",
+        "icon": "$(list-selection)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        { "command": "claudeTmux.attach", "when": "view == claudeTmux.view", "group": "navigation@1" },
+        { "command": "claudeTmux.restart", "when": "view == claudeTmux.view", "group": "navigation@2" },
+        { "command": "claudeTmux.kill", "when": "view == claudeTmux.view", "group": "navigation@3" },
+        { "command": "claudeTmux.killPick", "when": "view == claudeTmux.view", "group": "1_manage@1" }
+      ],
+      "commandPalette": [
+        { "command": "claudeTmux.attach" },
+        { "command": "claudeTmux.restart" },
+        { "command": "claudeTmux.kill" },
+        { "command": "claudeTmux.killPick" }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "claudeTmux.view.focus",
+        "key": "ctrl+shift+a",
+        "mac": "cmd+shift+a"
+      }
+    ],
+    "configuration": {
+      "title": "Claude Tmux Sidebar",
+      "properties": {
+        "claudeTmux.refreshMs": {
+          "type": "number",
+          "default": 250,
+          "minimum": 80,
+          "description": "How often (ms) the side-bar mirror refreshes the tmux pane."
+        },
+        "claudeTmux.claudeArgs": {
+          "type": "string",
+          "default": "--dangerously-skip-permissions --ide",
+          "description": "Arguments passed to `claude` when starting or resuming a session."
+        },
+        "claudeTmux.sessionPrefix": {
+          "type": "string",
+          "default": "tmux_",
+          "description": "tmux session name prefix. Session = <prefix><folder name> (e.g. tmux_my-project)."
+        },
+        "claudeTmux.fontFamily": {
+          "type": "string",
+          "default": "",
+          "description": "Font for the mirror. Empty = inherit terminal.integrated.fontFamily (so Nerd Font / Powerline glyphs match your real terminal)."
+        },
+        "claudeTmux.fontSize": {
+          "type": "number",
+          "default": 0,
+          "description": "Font size for the mirror in px. 0 = inherit terminal.integrated.fontSize (fallback 12)."
+        },
+        "claudeTmux.cursorStyle": {
+          "type": "string",
+          "enum": ["block", "bar", "underline"],
+          "default": "block",
+          "description": "Cursor shape in the mirror."
+        },
+        "claudeTmux.autoResume": {
+          "type": "boolean",
+          "default": true,
+          "description": "When the view opens and no session is running, automatically resume the folder's most recent conversation. Turn off to always show the chooser."
+        }
+      }
+    }
+  }
+}

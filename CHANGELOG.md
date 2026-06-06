@@ -1,0 +1,40 @@
+# Changelog
+
+## 0.5.2
+- Auto-resume the folder's most recent conversation on open is now the default
+  (set `claudeTmux.autoResume` to false to always show the chooser).
+
+## 0.5.1
+- Final app icon (iOS-style terracotta logo).
+
+## 0.5.0
+- **Manage / kill tmux sessions…** command — multi-select any of your tmux
+  sessions and kill them (only your own are ever listed).
+- **Activity badge**: when Claude updates while the view is hidden, the
+  activity-bar icon shows an unread count.
+- **Search filter** in the session chooser (appears with 6+ sessions) and
+  **relative timestamps** ("2h ago").
+- **Copy-friendly**: the mirror no longer refreshes while you have text selected,
+  so you can select and copy output.
+- **Richer status footer**: session name · pane size · uptime · live/idle/stopped.
+- **Configurable cursor** (`block` / `bar` / `underline`) and **auto-resume** of
+  the most recent conversation on open.
+- New keybinding to focus the view (`Cmd/Ctrl+Shift+A`, rebindable).
+- More iconic logo.
+
+## 0.4.0
+- Renamed sessions to **`tmux_<folder>`**.
+- In-side-bar **session chooser**: pick a past conversation to resume on open.
+- Mirror now **inherits your terminal font** (Nerd Font / Powerline glyphs render
+  correctly).
+
+## 0.3.0
+- Fixed the "attach to existing session" picker (correct project-path encoding).
+- Status footer, redesigned empty state, blinking cursor, focus ring.
+
+## 0.2.0
+- Added "Attach to an existing session…" (resume past conversations).
+
+## 0.1.0
+- First version: mirror the folder's Claude tmux session in a Secondary Side Bar
+  view via `tmux capture-pane` + `tmux send-keys`.
