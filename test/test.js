@@ -154,6 +154,12 @@ async function run() {
   assert.strictEqual(decodeSendCalls(sendCalls()), burst, 'batched input must preserve bytes and target agent');
 
   calls.length = 0;
+  provider.queueInput('codex', 'y');
+  await waitForFlush(provider, 'codex');
+  assert.strictEqual(sendCalls().length, 1, 'a warm-cache keystroke must still be delivered');
+  assert.strictEqual(calls[0].args[0], 'send-keys', 'a keystroke with a warm session cache must go straight to tmux send-keys, with no per-key session lookups');
+
+  calls.length = 0;
   provider.queueInput('codex', 'must-not-cross-workspaces');
   vscode.workspace.workspaceFolders[0].uri.fsPath = workspace + '-other';
   await waitForFlush(provider, 'codex');

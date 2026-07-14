@@ -2,7 +2,7 @@
   "name": "claude-tmux-sidebar",
   "displayName": "Claude & Codex Tmux Sidebar",
   "description": "Switch and hand off work between workspace-scoped Claude Code and Codex tmux sessions in one VS Code side bar.",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "publisher": "Danesed",
   "license": "MIT",
   "icon": "icon.png",

@@ -38,10 +38,25 @@ const AGENTS = {
   codex: { label: 'Codex', command: 'codex', prefixSetting: 'codexSessionPrefix', defaultPrefix: 'codex_' },
 };
 
+// normalizedPath runs on every keystroke (queueInput/sendInputData), so cache
+// the realpath lookup briefly instead of hitting the filesystem each time.
+const REALPATH_TTL_MS = 10000;
+const realpathCache = new Map();
 function normalizedPath(value) {
   if (!value) return '';
-  try { return fs.realpathSync.native(value); } catch { return path.resolve(value); }
+  const hit = realpathCache.get(value);
+  const now = Date.now();
+  if (hit && now - hit.ts < REALPATH_TTL_MS) return hit.path;
+  let resolved;
+  try { resolved = fs.realpathSync.native(value); } catch { resolved = path.resolve(value); }
+  realpathCache.set(value, { path: resolved, ts: now });
+  return resolved;
 }
+
+// How long a verified (name, ready) session identity may be reused by the input
+// hot path before it must be re-verified against tmux. The presence loop
+// refreshes it every ~900ms, so entries are normally always fresh.
+const SESSION_CACHE_TTL_MS = 3000;
 
 function baseSessionName(agent, cwd = workspaceFolder()) {
   if (!cwd || !AGENTS[agent]) return '';
@@ -214,6 +229,7 @@ class ClaudeTmuxView {
       claude: this.newInputQueue(),
       codex: this.newInputQueue(),
     };
+    this.sessionCache = { claude: null, codex: null };
     this.unseen = 0;   // changes seen while the view was hidden (badge count)
     this._bg = 0;      // throttle counter for background polling
     this._tickRunning = false;
@@ -240,6 +256,26 @@ class ClaudeTmuxView {
 
   newInputQueue() {
     return { data: '', cwd: null, paste: false, timer: null, chain: Promise.resolve(), suspended: false };
+  }
+
+  cachedSessionEntry(agent, cwd) {
+    const entry = this.sessionCache[agent];
+    if (entry && entry.cwd === cwd && Date.now() - entry.ts < SESSION_CACHE_TTL_MS) return entry;
+    return null;
+  }
+
+  cachedReadySession(agent, cwd) {
+    const entry = this.cachedSessionEntry(agent, cwd);
+    return entry && entry.ready ? entry.name : null;
+  }
+
+  rememberSession(agent, cwd, name, ready) {
+    this.sessionCache[agent] = { name, cwd, ready, ts: Date.now() };
+  }
+
+  invalidateSessionCache(agent) {
+    if (agent) this.sessionCache[agent] = null;
+    else this.sessionCache = { claude: null, codex: null };
   }
 
   resolveWebviewView(view) {
@@ -329,10 +365,12 @@ class ClaudeTmuxView {
         this.postAgents();
         return;
       }
+      const cwd = normalizedPath(workspaceFolder());
       for (const agent of Object.keys(AGENTS)) {
         const state = this.agentState[agent];
         const name = await sessionName(agent);
         const info = await agentSessionInfo(agent, name);
+        this.rememberSession(agent, cwd, name, info.ready);
         const present = info.ready;
         if (state.present !== present) {
           state.present = present;
@@ -493,7 +531,6 @@ class ClaudeTmuxView {
     queue.data = '';
     queue.cwd = null;
     queue.paste = false;
-    queue.paste = false;
     if (!data) return queue.chain;
     queue.chain = queue.chain.then(() => this.sendInputData(agent, data, cwd, paste));
     return queue.chain;
@@ -501,9 +538,18 @@ class ClaudeTmuxView {
 
   async sendInputData(agent, data, cwd = normalizedPath(workspaceFolder()), paste = false) {
     if (!cwd || normalizedPath(workspaceFolder()) !== cwd) return false;
-    const s = await sessionName(agent);
-    const info = await agentSessionInfo(agent, s);
-    if (!info.ready) return false;
+    // Hot path: reuse the session identity the presence loop verified moments
+    // ago, so a keystroke flush costs one tmux process instead of four.
+    let s = this.cachedReadySession(agent, cwd);
+    if (!s) {
+      s = await sessionName(agent);
+      const info = await agentSessionInfo(agent, s);
+      if (!info.ready) {
+        this.invalidateSessionCache(agent);
+        return false;
+      }
+      this.rememberSession(agent, cwd, s, true);
+    }
     const bytes = Buffer.from(data, 'utf8');
     if (paste && !data.includes('\0')) {
       const bufferName = `claude-tmux-${process.pid}-${crypto.randomBytes(6).toString('hex')}`;
@@ -512,6 +558,7 @@ class ClaudeTmuxView {
       const pasted = await tmux(['paste-buffer', '-dpr', '-b', bufferName, '-t', tmuxPaneTarget(s)]);
       if (!pasted.ok) {
         await tmux(['delete-buffer', '-b', bufferName]);
+        this.invalidateSessionCache(agent);
         return false;
       }
       this.tick(false);
@@ -521,7 +568,10 @@ class ClaudeTmuxView {
       const chunk = bytes.subarray(start, start + 1024);
       const hex = [...chunk].map((b) => b.toString(16).padStart(2, '0'));
       const sent = await tmux(['send-keys', '-t', tmuxPaneTarget(s), '-H', ...hex]);
-      if (!sent.ok) return false;
+      if (!sent.ok) {
+        this.invalidateSessionCache(agent);
+        return false;
+      }
     }
     this.tick(false);
     return true;
@@ -676,6 +726,7 @@ class ClaudeTmuxView {
       if (go !== action) return;
       return this.withInputSuspended(agent, async () => {
         await tmux(['kill-session', '-t', tmuxSessionTarget(s)]);
+        this.invalidateSessionCache(agent);
         await this.createSession(agent, command);
       });
     }
@@ -749,7 +800,9 @@ class ClaudeTmuxView {
       return;
     }
     const state = this.agentState[agent];
-    const s = await sessionName(agent);
+    const cwdNorm = normalizedPath(cwd);
+    const cachedEntry = this.cachedSessionEntry(agent, cwdNorm);
+    const s = cachedEntry ? cachedEntry.name : await sessionName(agent);
     const configuredScrollback = cfg().get('scrollbackLines');
     const scrollback = Math.trunc(Math.max(0, Math.min(5000, configuredScrollback == null ? 1000 : configuredScrollback)));
     const historyMode = state.historyMode;
@@ -763,6 +816,7 @@ class ClaudeTmuxView {
     if (state.historyMode !== historyMode || state.historyPending !== historyPending) return;
 
     if (!frame.ok) {
+      this.invalidateSessionCache(agent);
       state.lastFrame = null;
       state.present = false;
       this.postAgents();
@@ -771,8 +825,14 @@ class ClaudeTmuxView {
       if (!state.sessionsSent) { state.sessionsSent = true; this.pushSessions(agent); }
       return;
     }
-    const sessionInfo = await agentSessionInfo(agent, s);
-    if (!sessionInfo.ready) {
+    // The presence loop re-verifies readiness every ~900ms; only fall back to a
+    // direct check when the cache has nothing fresh for this pane.
+    let sessionReady = this.cachedReadySession(agent, cwdNorm) === s;
+    if (!sessionReady) {
+      sessionReady = (await agentSessionInfo(agent, s)).ready;
+      if (sessionReady) this.rememberSession(agent, cwdNorm, s, true);
+    }
+    if (!sessionReady) {
       state.lastFrame = null;
       state.lastLiveFrame = null;
       state.present = false;
@@ -833,6 +893,7 @@ class ClaudeTmuxView {
     const command = `${AGENTS[agent].command}${args ? ' ' + args : ''}`;
     await this.withInputSuspended(agent, async () => {
       await tmux(['kill-session', '-t', tmuxSessionTarget(s)]);
+      this.invalidateSessionCache(agent);
       await this.createSession(agent, command);
     });
   }
@@ -850,6 +911,7 @@ class ClaudeTmuxView {
     );
     if (pick !== 'Kill') return;
     await this.withInputSuspended(agent, () => tmux(['kill-session', '-t', tmuxSessionTarget(s)]));
+    this.invalidateSessionCache(agent);
     this.agentState[agent] = this.newAgentState();
     if (this.writerAgent === agent) {
       this.writerAgent = null;
@@ -895,6 +957,7 @@ class ClaudeTmuxView {
     for (const it of picked) {
       if (await sessionBelongsToWorkspace(it.session)) {
         await this.withInputSuspended(it.agent, () => tmux(['kill-session', '-t', tmuxSessionTarget(it.session)]));
+        this.invalidateSessionCache(it.agent);
       }
     }
     vscode.window.showInformationMessage(`Killed ${picked.length} tmux session(s).`);
@@ -1211,6 +1274,7 @@ function activate(context) {
     vscode.workspace.onDidChangeWorkspaceFolders(() => {
       for (const agent of Object.keys(AGENTS)) provider.agentState[agent] = provider.newAgentState();
       provider.resetInputQueues();
+      provider.invalidateSessionCache();
       provider.writerAgent = null;
       provider.context.workspaceState.update('claudeTmux.pairWriter', undefined);
       provider.pollPresence(true);

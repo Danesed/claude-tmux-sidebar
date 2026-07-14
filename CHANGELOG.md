@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.1
+- Fix sluggish typing introduced in 0.6.0/0.7.0: keystrokes no longer re-verify the tmux session identity on every flush. The presence loop keeps a short-lived verified-session cache, so the input hot path is back to a single `tmux send-keys` per flush (as in 0.5.x) while keeping the workspace-isolation safety checks.
+- Reuse the cached session identity in the refresh tick, cutting background tmux process spawns roughly in half.
+- Cache workspace realpath lookups briefly instead of hitting the filesystem on every keystroke.
+
 ## 0.7.0
 - Start and resume Codex in Full Access by default, with an explicit safety setting.
 - Instruct Codex to read every Markdown rule recursively under workspace `.claude/` by default.
