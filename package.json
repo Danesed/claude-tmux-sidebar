@@ -1,8 +1,8 @@
 {
   "name": "claude-tmux-sidebar",
   "displayName": "Claude & Codex Tmux Sidebar",
-  "description": "Switch between workspace-scoped Claude Code and Codex tmux sessions in one persistent VS Code side bar.",
-  "version": "0.6.0",
+  "description": "Switch and hand off work between workspace-scoped Claude Code and Codex tmux sessions in one VS Code side bar.",
+  "version": "0.7.0",
   "publisher": "Danesed",
   "license": "MIT",
   "icon": "icon.png",
@@ -16,7 +16,8 @@
   "activationEvents": [],
   "main": "./extension.js",
   "scripts": {
-    "check": "node --check extension.js && node --check media/main.js",
+    "check": "node --check extension.js && node --check media/main.js && node test/test.js",
+    "test": "node test/test.js",
     "package": "npx @vscode/vsce package"
   },
   "contributes": {
@@ -62,18 +63,26 @@
         "title": "Manage this workspace's tmux sessions…",
         "category": "Tmux Agents",
         "icon": "$(list-selection)"
+      },
+      {
+        "command": "claudeTmux.handoff",
+        "title": "Hand off to the other agent…",
+        "category": "Tmux Agents",
+        "icon": "$(arrow-swap)"
       }
     ],
     "menus": {
       "view/title": [
         { "command": "claudeTmux.attach", "when": "view == claudeTmux.view", "group": "navigation@1" },
         { "command": "claudeTmux.restart", "when": "view == claudeTmux.view", "group": "navigation@2" },
-        { "command": "claudeTmux.kill", "when": "view == claudeTmux.view", "group": "navigation@3" },
+        { "command": "claudeTmux.handoff", "when": "view == claudeTmux.view", "group": "navigation@3" },
+        { "command": "claudeTmux.kill", "when": "view == claudeTmux.view", "group": "navigation@4" },
         { "command": "claudeTmux.killPick", "when": "view == claudeTmux.view", "group": "1_manage@1" }
       ],
       "commandPalette": [
         { "command": "claudeTmux.attach" },
         { "command": "claudeTmux.restart" },
+        { "command": "claudeTmux.handoff" },
         { "command": "claudeTmux.kill" },
         { "command": "claudeTmux.killPick" }
       ]
@@ -103,6 +112,16 @@
           "type": "string",
           "default": "--no-alt-screen",
           "description": "Arguments passed to `codex` when starting or resuming a session. `--no-alt-screen` preserves terminal scrollback."
+        },
+        "claudeTmux.codexFullAccess": {
+          "type": "boolean",
+          "default": true,
+          "description": "Start and resume Codex with Full Access (`--dangerously-bypass-approvals-and-sandbox`). This disables approval prompts and sandbox protection; turn it off when working in an untrusted repository."
+        },
+        "claudeTmux.codexReadClaudeRules": {
+          "type": "boolean",
+          "default": true,
+          "description": "Use per-launch developer instructions to make Codex recursively read every Markdown file under workspace `.claude`. The files are not modified. An explicit developer_instructions value in codexArgs takes precedence."
         },
         "claudeTmux.sessionPrefix": {
           "type": "string",
@@ -139,8 +158,8 @@
         },
         "claudeTmux.autoResume": {
           "type": "boolean",
-          "default": true,
-          "description": "When the Claude tab opens and no Claude session is running, automatically resume the folder's most recent Claude conversation."
+          "default": false,
+          "description": "When the side bar opens and no Claude session is running, automatically resume the folder's most recent Claude conversation. Disabled by default so tabs only appear after an explicit start or an existing tmux session is detected."
         }
       }
     }

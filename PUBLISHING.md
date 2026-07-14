@@ -9,7 +9,7 @@
 
 ```bash
 cd claude-tmux-sidebar
-git add -A && git commit -m "Claude & Codex Tmux Sidebar v0.6.0"
+git add -A && git commit -m "Claude & Codex Tmux Sidebar v0.7.0"
 git branch -M main
 git remote add origin https://github.com/Danesed/claude-tmux-sidebar.git
 git push -u origin main

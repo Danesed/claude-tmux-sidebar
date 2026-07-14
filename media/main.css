@@ -18,15 +18,17 @@ html, body {
 /* ---- agent tabs ---------------------------------------------------------- */
 #agent-tabs {
   flex: 0 0 auto;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
+  position: relative;
+  display: flex;
+  align-items: flex-end;
   padding: 5px 6px 0;
   gap: 4px;
   background: var(--vscode-sideBar-background, var(--vscode-editor-background));
   border-bottom: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.08));
 }
 .agent-tab {
-  min-width: 0;
+  flex: 1 1 0;
+  min-width: 68px;
   padding: 5px 8px 6px;
   border: 0;
   border-bottom: 2px solid transparent;
@@ -35,6 +37,10 @@ html, body {
   background: transparent;
   font-size: 12px;
   font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
 }
 .agent-tab:hover { background: var(--vscode-list-hoverBackground, rgba(255,255,255,0.06)); }
 .agent-tab.active {
@@ -43,6 +49,69 @@ html, body {
   background: var(--vscode-list-activeSelectionBackground, rgba(255,255,255,0.08));
 }
 .agent-tab:focus-visible { outline: 1px solid var(--vscode-focusBorder, #0e639c); outline-offset: -1px; }
+.agent-state {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: var(--vscode-descriptionForeground, #777);
+  opacity: .65;
+}
+.writer-mark { display: none; font-size: 7px; color: var(--vscode-focusBorder, #4daafc); }
+.agent-tab.writer .writer-mark { display: inline; }
+.agent-tab.state-working .agent-state {
+  background: #58c7d5;
+  opacity: 1;
+  animation: workingGlow 1.8s ease-in-out infinite;
+}
+.agent-tab.state-done .agent-state {
+  background: var(--vscode-testing-iconPassed, #3fb950);
+  opacity: 1;
+  animation: doneShimmer 1.3s ease-out 1;
+}
+.agent-tab.state-needs-input .agent-state {
+  background: var(--vscode-charts-yellow, #d7a838);
+  opacity: 1;
+  animation: inputBreath 2.2s ease-in-out infinite;
+}
+@keyframes workingGlow {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(88,199,213,.05); transform: scale(.9); }
+  50% { box-shadow: 0 0 0 4px rgba(88,199,213,.14); transform: scale(1); }
+}
+@keyframes doneShimmer {
+  0% { box-shadow: 0 0 0 0 rgba(63,185,80,.4); transform: scale(.7); }
+  55% { box-shadow: 0 0 0 5px rgba(63,185,80,.12); transform: scale(1.15); }
+  100% { box-shadow: none; transform: scale(1); }
+}
+@keyframes inputBreath { 0%, 100% { opacity: .55; } 50% { opacity: 1; box-shadow: 0 0 5px rgba(215,168,56,.35); } }
+.tab-add {
+  flex: 0 0 28px;
+  padding: 5px 4px 6px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--vscode-descriptionForeground, #999);
+  font-size: 16px;
+  line-height: 1;
+}
+.tab-add:hover { background: var(--vscode-list-hoverBackground, rgba(255,255,255,.06)); }
+.launch-menu {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 2px);
+  right: 5px;
+  width: 150px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border: 1px solid var(--vscode-widget-border, rgba(255,255,255,.15));
+  border-radius: 5px;
+  background: var(--vscode-menu-background, #252526);
+  box-shadow: 0 5px 16px rgba(0,0,0,.28);
+}
+.launch-menu button { text-align: left; padding: 6px 8px; border: 0; background: transparent; }
+.launch-menu button:hover { background: var(--vscode-menu-selectionBackground, #094771); }
 
 /* ---- terminal mirror area ------------------------------------------------ */
 #screen-wrap {
@@ -82,6 +151,7 @@ html, body {
 
 /* subtle focus ring so you know keystrokes are captured */
 #screen:focus { box-shadow: inset 0 0 0 1px var(--vscode-focusBorder, #0e639c); }
+#screen.input-locked { cursor: default; opacity: .88; }
 
 #cursor {
   position: absolute;
@@ -209,6 +279,7 @@ button {
   transition: background .12s;
 }
 button:hover { background: var(--vscode-button-secondaryHoverBackground, #45494e); }
+button:disabled { opacity: .4; cursor: default; }
 button.primary {
   color: var(--vscode-button-foreground, #fff);
   background: var(--vscode-button-background, #0e639c);
@@ -249,3 +320,78 @@ button.primary:hover { background: var(--vscode-button-hoverBackground, #1177bb)
 .dot.live { background: var(--vscode-testing-iconPassed, #3fb950); box-shadow: 0 0 5px var(--vscode-testing-iconPassed, #3fb950); }
 .dot.idle { background: var(--vscode-charts-yellow, #d7a838); }
 .dot.dead { background: var(--vscode-testing-iconFailed, #f14c4c); }
+.dot.working { background: #58c7d5; animation: workingGlow 1.8s ease-in-out infinite; }
+.dot.done { background: var(--vscode-testing-iconPassed, #3fb950); }
+.dot.needs-input { background: var(--vscode-charts-yellow, #d7a838); animation: inputBreath 2.2s ease-in-out infinite; }
+
+.footer-action {
+  width: 20px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--vscode-descriptionForeground, #999);
+  font-size: 13px;
+  line-height: 18px;
+}
+.footer-action:hover { color: var(--vscode-foreground, #ddd); background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,.08)); }
+
+/* ---- editable Pair Mode handoff ----------------------------------------- */
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  box-sizing: border-box;
+  background: rgba(0,0,0,.48);
+}
+.modal-card {
+  width: min(620px, 100%);
+  height: min(78vh, 720px);
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 13px;
+  box-sizing: border-box;
+  border: 1px solid var(--vscode-widget-border, rgba(255,255,255,.16));
+  border-radius: 7px;
+  background: var(--vscode-editorWidget-background, #252526);
+  box-shadow: 0 12px 40px rgba(0,0,0,.42);
+  font-family: var(--vscode-font-family);
+}
+.modal-title { font-weight: 600; font-size: 13px; margin-bottom: 2px; }
+.modal-card label { font-size: 11px; color: var(--vscode-descriptionForeground, #aaa); }
+.modal-card select,
+.modal-card textarea {
+  color: var(--vscode-input-foreground, #ddd);
+  background: var(--vscode-input-background, #2a2d2e);
+  border: 1px solid var(--vscode-input-border, rgba(255,255,255,.14));
+  border-radius: 4px;
+  outline: none;
+}
+.modal-card select { padding: 5px 7px; }
+.modal-card textarea {
+  flex: 1 1 auto;
+  min-height: 180px;
+  resize: none;
+  padding: 8px;
+  font: 11px/1.35 ui-monospace, "SF Mono", Menlo, Monaco, Consolas, monospace;
+  white-space: pre-wrap;
+}
+.modal-card select:focus,
+.modal-card textarea:focus { border-color: var(--vscode-focusBorder, #0e639c); }
+.modal-actions { display: flex; justify-content: flex-end; gap: 7px; }
+.modal-error {
+  padding: 6px 8px;
+  border-radius: 4px;
+  color: var(--vscode-errorForeground, #f48771);
+  background: var(--vscode-inputValidation-errorBackground, rgba(90,20,20,.35));
+  font-size: 11px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-state, .dot, #cursor { animation: none !important; }
+}

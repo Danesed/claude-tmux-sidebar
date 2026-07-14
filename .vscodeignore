@@ -4,5 +4,6 @@
 *.vsix
 PUBLISHING.md
 tasks/**
+test/**
 **/*.map
 .DS_Store

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.7.0
+- Start and resume Codex in Full Access by default, with an explicit safety setting.
+- Instruct Codex to read every Markdown rule recursively under workspace `.claude/` by default.
+- Batch and serialize per-agent input, preserve the keydown target, and update terminal rows incrementally to remove Codex input lag.
+- Capture only the live pane during polling and load bounded scrollback on demand.
+- Show Claude and Codex tabs only for matching live workspace sessions, with launcher controls for absent agents.
+- Add discreet heuristic animations for working, finished, needs-input and idle states, including reduced-motion support.
+- Add sequential Pair Mode with an editable handoff, Review only / Review & Fix modes, source context, git summaries and a single-writer input lock.
+- Disable implicit Claude auto-resume by default so opening the view does not create a tab unexpectedly.
+- Add automated coverage for launch flags, batched input, UTF-8 paste, lazy history, state detection and exact editable handoff text.
+
 ## 0.6.0
 - Added Claude and Codex tabs backed by independent persistent tmux sessions.
 - Added workspace-path validation and exact tmux targets to prevent cross-project attach, input or kill.

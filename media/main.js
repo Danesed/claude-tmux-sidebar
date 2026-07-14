@@ -10,6 +10,17 @@
   const sessionFilter = document.getElementById('session-filter');
   const btnStart = document.getElementById('btn-start');
   const btnResume = document.getElementById('btn-resume');
+  const launcherActions = document.getElementById('launcher-actions');
+  const tabAdd = document.getElementById('tab-add');
+  const launchMenu = document.getElementById('agent-launch-menu');
+  const btnPair = document.getElementById('btn-pair');
+  const btnUnlock = document.getElementById('btn-unlock');
+  const handoffModal = document.getElementById('handoff-modal');
+  const handoffMode = document.getElementById('handoff-mode');
+  const handoffText = document.getElementById('handoff-text');
+  const handoffSend = document.getElementById('handoff-send');
+  const handoffCancel = document.getElementById('handoff-cancel');
+  const handoffError = document.getElementById('handoff-error');
   const statusName = document.getElementById('status-name');
   const statusMeta = document.getElementById('status-meta');
   const statusDot = document.getElementById('status-dot');
@@ -18,9 +29,16 @@
   const tabs = [...document.querySelectorAll('.agent-tab')];
   const cursorStyle = (app && app.dataset.cursor) || 'block';
   let activeAgent = 'claude';
+  let writerAgent = null;
+  let handoffDraft = null;
+  let handoffCurrentMode = 'reviewFix';
+  const agentPresence = {
+    claude: { present: false, status: 'idle' },
+    codex: { present: false, status: 'idle' },
+  };
   const scrollState = {
-    claude: { top: 0, follow: true },
-    codex: { top: 0, follow: true },
+    claude: { top: 0, follow: true, historyMode: false, historyAvailable: 0, pendingHistory: false },
+    codex: { top: 0, follow: true, historyMode: false, historyAvailable: 0, pendingHistory: false },
   };
   let renderedLineCount = 0;
   let programmaticScroll = false;
@@ -149,16 +167,32 @@
   function render(frame) {
     const lines = frame.split('\n');
     if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
-    let out = '';
-    for (const ln of lines) out += `<div class="row">${renderLine(ln) || '&nbsp;'}</div>`;
-    screen.innerHTML = out;
+    for (let i = 0; i < lines.length; i++) {
+      let row = screen.children[i];
+      if (!row) {
+        row = document.createElement('div');
+        row.className = 'row';
+        screen.appendChild(row);
+      }
+      if (row._raw !== lines[i]) {
+        row._raw = lines[i];
+        row.innerHTML = renderLine(lines[i]) || '&nbsp;';
+      }
+    }
+    while (screen.children.length > lines.length) screen.lastElementChild.remove();
     renderedLineCount = lines.length;
     const agentAtRender = activeAgent;
     const state = scrollState[agentAtRender];
     programmaticScroll = true;
     requestAnimationFrame(() => {
       if (agentAtRender === activeAgent) {
-        wrap.scrollTop = state.follow ? wrap.scrollHeight : Math.min(state.top, wrap.scrollHeight);
+        if (state.pendingHistory && state.historyMode) {
+          state.pendingHistory = false;
+          state.follow = false;
+          wrap.scrollTop = Math.max(0, wrap.scrollHeight - wrap.clientHeight * 1.8);
+        } else {
+          wrap.scrollTop = state.follow ? wrap.scrollHeight : Math.min(state.top, wrap.scrollHeight);
+        }
         state.top = wrap.scrollTop;
       }
       programmaticScroll = false;
@@ -191,8 +225,22 @@
   wrap.addEventListener('scroll', () => {
     if (programmaticScroll) return;
     saveScroll();
+    const state = scrollState[activeAgent];
+    if (state.historyMode && state.follow) {
+      state.historyMode = false;
+      vscode.postMessage({ type: 'historyMode', agent: activeAgent, enabled: false });
+    }
     updateCursorVisibility();
   });
+  function requestHistory() {
+    const state = scrollState[activeAgent];
+    if (state.historyMode || state.historyAvailable <= 0) return false;
+    state.historyMode = true;
+    state.pendingHistory = true;
+    state.follow = false;
+    vscode.postMessage({ type: 'historyMode', agent: activeAgent, enabled: true });
+    return true;
+  }
   let lastForwardedWheel = 0;
   wrap.addEventListener('wheel', (e) => {
     if (!overlay.classList.contains('hidden')) return;
@@ -201,7 +249,8 @@
     if (Math.abs(e.deltaY) < 4 || now - lastForwardedWheel < 80) return;
     e.preventDefault();
     lastForwardedWheel = now;
-    vscode.postMessage({ type: 'input', data: e.deltaY < 0 ? '\x1b[5~' : '\x1b[6~' });
+    if (e.deltaY < 0 && requestHistory()) return;
+    vscode.postMessage({ type: 'input', agent: activeAgent, data: e.deltaY < 0 ? '\x1b[5~' : '\x1b[6~' });
   }, { passive: false });
 
   // ---- selection-aware refresh (so you can copy text from the mirror) -------
@@ -232,14 +281,6 @@
     statusDot.className = 'dot ' + cls;
     statusLabel.textContent = label;
   }
-  setInterval(() => {
-    if (!overlay.classList.contains('hidden')) return; // dead state already shown
-    if (lastSeen && Date.now() - lastSeen > 2500) {
-      statusDot.className = 'dot idle';
-      statusLabel.textContent = 'idle';
-    }
-  }, 1000);
-
   // ---- input ---------------------------------------------------------------
   function keyToBytes(e) {
     const k = e.key;
@@ -272,22 +313,28 @@
     // Leave copy/paste/select-all to VS Code (Cmd on mac, Ctrl elsewhere).
     const mod = isMac ? e.metaKey : e.ctrlKey;
     if (mod && ['c', 'v', 'a', 'x'].includes(e.key.toLowerCase())) return;
+    if (writerAgent && activeAgent !== writerAgent && !['PageUp', 'PageDown'].includes(e.key)) {
+      e.preventDefault();
+      return;
+    }
     if (e.shiftKey && (e.key === 'PageUp' || e.key === 'PageDown')) {
       e.preventDefault();
+      if (e.key === 'PageUp' && wrap.scrollHeight <= wrap.clientHeight + charH && requestHistory()) return;
       scrollState[activeAgent].follow = false;
       wrap.scrollBy({ top: (e.key === 'PageUp' ? -1 : 1) * wrap.clientHeight * 0.85 });
       return;
     }
     const bytes = keyToBytes(e);
-    if (bytes !== null) { e.preventDefault(); vscode.postMessage({ type: 'input', data: bytes }); }
+    if (bytes !== null) { e.preventDefault(); vscode.postMessage({ type: 'input', agent: activeAgent, data: bytes }); }
   });
   screen.addEventListener('paste', (e) => {
+    if (writerAgent && activeAgent !== writerAgent) { e.preventDefault(); return; }
     const text = (e.clipboardData || window.clipboardData).getData('text');
-    if (text) { e.preventDefault(); vscode.postMessage({ type: 'paste', data: text }); }
+    if (text) { e.preventDefault(); vscode.postMessage({ type: 'paste', agent: activeAgent, data: text }); }
   });
   screen.addEventListener('mousedown', () => screen.focus());
-  btnStart.addEventListener('click', () => vscode.postMessage({ type: 'start' }));
-  btnResume.addEventListener('click', () => vscode.postMessage({ type: 'attach' }));
+  btnStart.addEventListener('click', () => vscode.postMessage({ type: 'start', agent: activeAgent }));
+  btnResume.addEventListener('click', () => vscode.postMessage({ type: 'attach', agent: activeAgent }));
 
   function setActiveAgent(agent) {
     if (!scrollState[agent]) return;
@@ -300,7 +347,7 @@
       tab.tabIndex = selected ? 0 : -1;
     });
     screen.setAttribute('aria-label', `${agent === 'claude' ? 'Claude' : 'Codex'} tmux terminal mirror`);
-    screen.innerHTML = '';
+    screen.replaceChildren();
     renderedLineCount = 0;
     cursorEl.style.visibility = 'hidden';
     overlay.classList.add('hidden');
@@ -310,6 +357,7 @@
     programmaticScroll = true;
     wrap.scrollTop = scrollState[agent].top;
     programmaticScroll = false;
+    applyPairLock();
   }
 
   tabs.forEach((tab) => {
@@ -317,10 +365,140 @@
     tab.addEventListener('keydown', (e) => {
       if (!['ArrowLeft', 'ArrowRight'].includes(e.key)) return;
       e.preventDefault();
-      const agent = tab.dataset.agent === 'claude' ? 'codex' : 'claude';
+      const visibleTabs = tabs.filter((item) => !item.classList.contains('hidden'));
+      if (visibleTabs.length < 2) return;
+      const index = visibleTabs.indexOf(tab);
+      const agent = visibleTabs[(index + (e.key === 'ArrowRight' ? 1 : -1) + visibleTabs.length) % visibleTabs.length].dataset.agent;
       vscode.postMessage({ type: 'switchAgent', agent });
       document.getElementById(`tab-${agent}`).focus();
     });
+  });
+
+  tabAdd.addEventListener('click', () => launchMenu.classList.toggle('hidden'));
+  launchMenu.addEventListener('click', (e) => {
+    const button = e.target.closest('button[data-agent]');
+    if (!button) return;
+    launchMenu.classList.add('hidden');
+    vscode.postMessage({ type: button.dataset.action, agent: button.dataset.agent });
+  });
+  document.addEventListener('click', (e) => {
+    if (!launchMenu.contains(e.target) && e.target !== tabAdd) launchMenu.classList.add('hidden');
+  });
+  launcherActions.addEventListener('click', (e) => {
+    const button = e.target.closest('button[data-launch-agent]');
+    if (button) vscode.postMessage({ type: 'start', agent: button.dataset.launchAgent });
+  });
+
+  const STATE_LABELS = {
+    working: 'working',
+    done: 'finished',
+    'needs-input': 'needs input',
+    idle: 'idle',
+  };
+
+  function applyPairLock() {
+    const locked = !!writerAgent && activeAgent !== writerAgent;
+    screen.classList.toggle('input-locked', locked);
+    screen.setAttribute('aria-readonly', locked ? 'true' : 'false');
+    document.getElementById('hint').textContent = locked
+      ? `Pair Mode · ${writerAgent === 'claude' ? 'Claude' : 'Codex'} is writer`
+      : 'click to type';
+    btnUnlock.classList.toggle('hidden', !writerAgent);
+  }
+
+  function renderAgents(message) {
+    writerAgent = message.writerAgent || null;
+    for (const agent of ['claude', 'codex']) {
+      Object.assign(agentPresence[agent], message.agents?.[agent] || { present: false, status: 'idle' });
+      const tab = document.getElementById(`tab-${agent}`);
+      const present = !!agentPresence[agent].present;
+      const status = agentPresence[agent].status || 'idle';
+      tab.classList.toggle('hidden', !present);
+      tab.classList.toggle('writer', writerAgent === agent);
+      for (const name of ['working', 'done', 'needs-input', 'idle']) tab.classList.toggle(`state-${name}`, status === name);
+      const label = `${agent === 'claude' ? 'Claude' : 'Codex'}: ${STATE_LABELS[status] || status}${writerAgent === agent ? ', Pair Mode writer' : ''}`;
+      tab.title = label;
+      tab.setAttribute('aria-label', label);
+      for (const button of launchMenu.querySelectorAll(`button[data-agent="${agent}"]`)) {
+        button.classList.toggle('hidden', present);
+      }
+    }
+    const presentAgents = ['claude', 'codex'].filter((agent) => agentPresence[agent].present);
+    const hasWorkspace = message.hasWorkspace !== false;
+    tabAdd.classList.toggle('hidden', !hasWorkspace || presentAgents.length === 2);
+    for (const button of launcherActions.querySelectorAll('button')) button.disabled = !hasWorkspace;
+    for (const button of launchMenu.querySelectorAll('button')) button.disabled = !hasWorkspace;
+    btnPair.disabled = !agentPresence[activeAgent].present;
+    applyPairLock();
+    if (!hasWorkspace) {
+      screen.replaceChildren();
+      overlay.classList.remove('hidden');
+      overlayTitle.textContent = 'Open a workspace folder';
+      overlayFolder.textContent = 'Claude and Codex tmux sessions are never created outside a workspace.';
+      sessionFilter.classList.add('hidden');
+      sessionList.innerHTML = '';
+      launcherActions.classList.remove('hidden');
+      btnStart.parentElement.classList.add('hidden');
+      statusName.textContent = '';
+      statusMeta.textContent = '';
+      setStatus('', 'dead', 'no workspace');
+      return;
+    }
+    if (!presentAgents.length) {
+      screen.replaceChildren();
+      overlay.classList.remove('hidden');
+      overlayTitle.textContent = 'Start a workspace agent';
+      overlayFolder.textContent = 'Tabs appear only after their tmux session exists.';
+      sessionFilter.classList.add('hidden');
+      sessionList.innerHTML = '';
+      launcherActions.classList.remove('hidden');
+      btnStart.parentElement.classList.add('hidden');
+      statusName.textContent = '';
+      statusMeta.textContent = '';
+      setStatus('', 'dead', 'no sessions');
+    } else {
+      launcherActions.classList.add('hidden');
+      btnStart.parentElement.classList.remove('hidden');
+    }
+    const activeStatus = agentPresence[activeAgent].status || 'idle';
+    if (agentPresence[activeAgent].present) setStatus('', activeStatus, STATE_LABELS[activeStatus] || activeStatus);
+  }
+
+  btnPair.addEventListener('click', () => vscode.postMessage({ type: 'prepareHandoff', source: activeAgent }));
+  btnUnlock.addEventListener('click', () => vscode.postMessage({ type: 'cancelPair' }));
+  handoffMode.addEventListener('change', () => {
+    if (!handoffDraft) return;
+    handoffDraft[handoffCurrentMode] = handoffText.value;
+    handoffCurrentMode = handoffMode.value;
+    handoffText.value = handoffDraft[handoffCurrentMode];
+  });
+  handoffText.addEventListener('input', () => {
+    if (handoffDraft) handoffDraft[handoffCurrentMode] = handoffText.value;
+  });
+  handoffCancel.addEventListener('click', () => {
+    handoffModal.classList.add('hidden');
+    handoffDraft = null;
+    handoffError.classList.add('hidden');
+  });
+  handoffSend.addEventListener('click', () => {
+    if (!handoffDraft) return;
+    handoffDraft[handoffCurrentMode] = handoffText.value;
+    handoffSend.disabled = true;
+    handoffSend.textContent = 'Sending…';
+    handoffError.classList.add('hidden');
+    vscode.postMessage({
+      type: 'confirmHandoff',
+      source: handoffDraft.source,
+      target: handoffDraft.target,
+      mode: handoffMode.value,
+      text: handoffText.value,
+    });
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !handoffModal.classList.contains('hidden')) {
+      e.preventDefault();
+      handoffCancel.click();
+    }
   });
 
   // ---- session chooser (rendered inside the overlay) -----------------------
@@ -360,7 +538,7 @@
   sessionFilter.addEventListener('input', renderSessions);
   sessionList.addEventListener('click', (e) => {
     const item = e.target.closest('.sess-item');
-    if (item && item.dataset.id) vscode.postMessage({ type: 'resume', id: item.dataset.id });
+    if (item && item.dataset.id) vscode.postMessage({ type: 'resume', agent: activeAgent, id: item.dataset.id });
   });
 
   // ---- messages from the extension ----------------------------------------
@@ -368,10 +546,48 @@
     const m = event.data;
     if (m.type === 'activeAgent') {
       setActiveAgent(m.agent);
+    } else if (m.type === 'agents') {
+      renderAgents(m);
+    } else if (m.type === 'handoffDraft') {
+      handoffDraft = {
+        source: m.source,
+        target: m.target,
+        reviewOnly: m.reviewOnly,
+        reviewFix: m.reviewFix,
+      };
+      handoffMode.value = 'reviewFix';
+      handoffCurrentMode = 'reviewFix';
+      handoffText.value = m.reviewFix;
+      handoffError.classList.add('hidden');
+      handoffSend.disabled = false;
+      handoffSend.textContent = 'Send handoff';
+      handoffModal.classList.remove('hidden');
+      handoffText.focus();
+      handoffText.setSelectionRange(0, 0);
+    } else if (m.type === 'inputLocked') {
+      applyPairLock();
+    } else if (m.type === 'inputSuspended') {
+      document.getElementById('hint').textContent = 'session operation in progress';
+      setTimeout(applyPairLock, 1200);
+    } else if (m.type === 'handoffResult') {
+      handoffSend.disabled = false;
+      handoffSend.textContent = 'Send handoff';
+      if (m.ok) {
+        handoffModal.classList.add('hidden');
+        handoffDraft = null;
+        handoffError.classList.add('hidden');
+      } else {
+        handoffError.textContent = m.error || 'Handoff failed.';
+        handoffError.classList.remove('hidden');
+        handoffText.focus();
+      }
     } else if (m.type === 'frame') {
       if (m.agent !== activeAgent) return;
       lastSeen = Date.now();
       overlay.classList.add('hidden');
+      const state = scrollState[activeAgent];
+      state.historyMode = !!m.historyMode;
+      state.historyAvailable = parseInt(m.historyAvailable, 10) || 0;
       if (m.frame != null) {
         if (hasSelection()) pendingFrame = { agent: m.agent, frame: m.frame }; // don't clobber a copy in progress
         else { render(m.frame); pendingFrame = null; }
@@ -381,12 +597,13 @@
       const pw = p[2], ph = p[3], created = parseInt(p[4], 10) || 0;
       const up = created ? fmtUptime(Date.now() / 1000 - created) : '';
       statusMeta.textContent = [pw && ph ? `${pw}×${ph}` : '', up ? `up ${up}` : ''].filter(Boolean).join(' · ');
-      setStatus(m.name, 'live', 'live');
+      const agentStatus = agentPresence[activeAgent].status || 'idle';
+      setStatus(m.name, agentStatus, STATE_LABELS[agentStatus] || agentStatus);
     } else if (m.type === 'nosession') {
       if (m.agent !== activeAgent) return;
-      screen.innerHTML = '';
+      screen.replaceChildren();
       renderedLineCount = 0;
-      scrollState[activeAgent] = { top: 0, follow: true };
+      scrollState[activeAgent] = { top: 0, follow: true, historyMode: false, historyAvailable: 0, pendingHistory: false };
       wrap.scrollTop = 0;
       overlay.classList.remove('hidden');
       overlayFolder.textContent = m.folder || '';
@@ -411,7 +628,7 @@
       }
     } else if (m.type === 'noWorkspace') {
       if (m.agent !== activeAgent) return;
-      screen.innerHTML = '';
+      screen.replaceChildren();
       overlay.classList.remove('hidden');
       overlayTitle.textContent = 'Open a workspace folder';
       overlayFolder.textContent = 'Claude and Codex tmux sessions are never created outside a workspace.';
@@ -419,6 +636,7 @@
       sessionList.innerHTML = '';
       btnResume.classList.add('hidden');
       btnStart.disabled = true;
+      for (const button of launcherActions.querySelectorAll('button')) button.disabled = true;
       statusName.textContent = '';
       statusMeta.textContent = '';
       setStatus('', 'dead', 'no workspace');
