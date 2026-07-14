@@ -9,12 +9,21 @@
   const sessionList = document.getElementById('session-list');
   const sessionFilter = document.getElementById('session-filter');
   const btnStart = document.getElementById('btn-start');
+  const btnResume = document.getElementById('btn-resume');
   const statusName = document.getElementById('status-name');
   const statusMeta = document.getElementById('status-meta');
   const statusDot = document.getElementById('status-dot');
   const statusLabel = document.getElementById('status-label');
   const app = document.getElementById('app');
+  const tabs = [...document.querySelectorAll('.agent-tab')];
   const cursorStyle = (app && app.dataset.cursor) || 'block';
+  let activeAgent = 'claude';
+  const scrollState = {
+    claude: { top: 0, follow: true },
+    codex: { top: 0, follow: true },
+  };
+  let renderedLineCount = 0;
+  let programmaticScroll = false;
 
   // ---- char metrics --------------------------------------------------------
   let charW = 7, charH = 14;
@@ -139,12 +148,26 @@
   }
   function render(frame) {
     const lines = frame.split('\n');
+    if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
     let out = '';
     for (const ln of lines) out += `<div class="row">${renderLine(ln) || '&nbsp;'}</div>`;
     screen.innerHTML = out;
+    renderedLineCount = lines.length;
+    const agentAtRender = activeAgent;
+    const state = scrollState[agentAtRender];
+    programmaticScroll = true;
+    requestAnimationFrame(() => {
+      if (agentAtRender === activeAgent) {
+        wrap.scrollTop = state.follow ? wrap.scrollHeight : Math.min(state.top, wrap.scrollHeight);
+        state.top = wrap.scrollTop;
+      }
+      programmaticScroll = false;
+      updateCursorVisibility();
+    });
   }
-  function placeCursor(cx, cy) {
-    const left = PAD_X + cx * charW, top = PAD_Y + cy * charH;
+  function placeCursor(cx, cy, paneHeight) {
+    const historyRows = Math.max(0, renderedLineCount - paneHeight);
+    const left = PAD_X + cx * charW, top = PAD_Y + (historyRows + cy) * charH;
     let w = charW, h = charH, t = top;
     if (cursorStyle === 'bar') { w = Math.max(1, Math.round(charW * 0.15)); }
     else if (cursorStyle === 'underline') { h = Math.max(1, Math.round(charH * 0.14)); t = top + charH - h; }
@@ -154,6 +177,33 @@
     cursorEl.style.height = h + 'px';
   }
 
+  function nearBottom() {
+    return wrap.scrollHeight - wrap.clientHeight - wrap.scrollTop <= charH * 2;
+  }
+  function updateCursorVisibility() {
+    cursorEl.style.visibility = scrollState[activeAgent].follow ? 'visible' : 'hidden';
+  }
+  function saveScroll() {
+    const state = scrollState[activeAgent];
+    state.top = wrap.scrollTop;
+    state.follow = nearBottom();
+  }
+  wrap.addEventListener('scroll', () => {
+    if (programmaticScroll) return;
+    saveScroll();
+    updateCursorVisibility();
+  });
+  let lastForwardedWheel = 0;
+  wrap.addEventListener('wheel', (e) => {
+    if (!overlay.classList.contains('hidden')) return;
+    if (wrap.scrollHeight > wrap.clientHeight + charH) return;
+    const now = Date.now();
+    if (Math.abs(e.deltaY) < 4 || now - lastForwardedWheel < 80) return;
+    e.preventDefault();
+    lastForwardedWheel = now;
+    vscode.postMessage({ type: 'input', data: e.deltaY < 0 ? '\x1b[5~' : '\x1b[6~' });
+  }, { passive: false });
+
   // ---- selection-aware refresh (so you can copy text from the mirror) -------
   let pendingFrame = null;
   function hasSelection() {
@@ -161,7 +211,10 @@
     return !!(sel && sel.toString().length > 0 && sel.anchorNode && screen.contains(sel.anchorNode));
   }
   document.addEventListener('selectionchange', () => {
-    if (!hasSelection() && pendingFrame != null) { render(pendingFrame); pendingFrame = null; }
+    if (!hasSelection() && pendingFrame != null) {
+      if (pendingFrame.agent === activeAgent) render(pendingFrame.frame);
+      pendingFrame = null;
+    }
   });
 
   function fmtUptime(sec) {
@@ -219,6 +272,12 @@
     // Leave copy/paste/select-all to VS Code (Cmd on mac, Ctrl elsewhere).
     const mod = isMac ? e.metaKey : e.ctrlKey;
     if (mod && ['c', 'v', 'a', 'x'].includes(e.key.toLowerCase())) return;
+    if (e.shiftKey && (e.key === 'PageUp' || e.key === 'PageDown')) {
+      e.preventDefault();
+      scrollState[activeAgent].follow = false;
+      wrap.scrollBy({ top: (e.key === 'PageUp' ? -1 : 1) * wrap.clientHeight * 0.85 });
+      return;
+    }
     const bytes = keyToBytes(e);
     if (bytes !== null) { e.preventDefault(); vscode.postMessage({ type: 'input', data: bytes }); }
   });
@@ -228,6 +287,41 @@
   });
   screen.addEventListener('mousedown', () => screen.focus());
   btnStart.addEventListener('click', () => vscode.postMessage({ type: 'start' }));
+  btnResume.addEventListener('click', () => vscode.postMessage({ type: 'attach' }));
+
+  function setActiveAgent(agent) {
+    if (!scrollState[agent]) return;
+    if (agent !== activeAgent) saveScroll();
+    activeAgent = agent;
+    tabs.forEach((tab) => {
+      const selected = tab.dataset.agent === agent;
+      tab.classList.toggle('active', selected);
+      tab.setAttribute('aria-selected', selected ? 'true' : 'false');
+      tab.tabIndex = selected ? 0 : -1;
+    });
+    screen.setAttribute('aria-label', `${agent === 'claude' ? 'Claude' : 'Codex'} tmux terminal mirror`);
+    screen.innerHTML = '';
+    renderedLineCount = 0;
+    cursorEl.style.visibility = 'hidden';
+    overlay.classList.add('hidden');
+    statusName.textContent = '';
+    statusMeta.textContent = '';
+    setStatus('', 'idle', 'connecting…');
+    programmaticScroll = true;
+    wrap.scrollTop = scrollState[agent].top;
+    programmaticScroll = false;
+  }
+
+  tabs.forEach((tab) => {
+    tab.addEventListener('click', () => vscode.postMessage({ type: 'switchAgent', agent: tab.dataset.agent }));
+    tab.addEventListener('keydown', (e) => {
+      if (!['ArrowLeft', 'ArrowRight'].includes(e.key)) return;
+      e.preventDefault();
+      const agent = tab.dataset.agent === 'claude' ? 'codex' : 'claude';
+      vscode.postMessage({ type: 'switchAgent', agent });
+      document.getElementById(`tab-${agent}`).focus();
+    });
+  });
 
   // ---- session chooser (rendered inside the overlay) -----------------------
   let allSessions = [];
@@ -272,30 +366,62 @@
   // ---- messages from the extension ----------------------------------------
   window.addEventListener('message', (event) => {
     const m = event.data;
-    if (m.type === 'frame') {
+    if (m.type === 'activeAgent') {
+      setActiveAgent(m.agent);
+    } else if (m.type === 'frame') {
+      if (m.agent !== activeAgent) return;
       lastSeen = Date.now();
       overlay.classList.add('hidden');
       if (m.frame != null) {
-        if (hasSelection()) pendingFrame = m.frame;     // don't clobber a copy in progress
+        if (hasSelection()) pendingFrame = { agent: m.agent, frame: m.frame }; // don't clobber a copy in progress
         else { render(m.frame); pendingFrame = null; }
       }
       const p = (m.meta || '').split(',');
-      placeCursor(parseInt(p[0], 10) || 0, parseInt(p[1], 10) || 0);
+      placeCursor(parseInt(p[0], 10) || 0, parseInt(p[1], 10) || 0, parseInt(p[3], 10) || lastRows || 24);
       const pw = p[2], ph = p[3], created = parseInt(p[4], 10) || 0;
       const up = created ? fmtUptime(Date.now() / 1000 - created) : '';
       statusMeta.textContent = [pw && ph ? `${pw}×${ph}` : '', up ? `up ${up}` : ''].filter(Boolean).join(' · ');
       setStatus(m.name, 'live', 'live');
     } else if (m.type === 'nosession') {
+      if (m.agent !== activeAgent) return;
+      screen.innerHTML = '';
+      renderedLineCount = 0;
+      scrollState[activeAgent] = { top: 0, follow: true };
+      wrap.scrollTop = 0;
       overlay.classList.remove('hidden');
       overlayFolder.textContent = m.folder || '';
       statusMeta.textContent = '';
       setStatus(m.name, 'dead', 'stopped');
       lastSeen = 0;
     } else if (m.type === 'sessions') {
-      overlayTitle.textContent = (m.list && m.list.length)
-        ? 'Attach to a Claude session'
-        : 'No Claude session here yet';
-      setSessions(m.list);
+      if (m.agent !== activeAgent) return;
+      btnStart.disabled = false;
+      btnStart.textContent = `＋ Start new ${m.agent === 'claude' ? 'Claude' : 'Codex'}`;
+      if (m.agent === 'codex') {
+        overlayTitle.textContent = 'Start or resume Codex';
+        sessionFilter.classList.add('hidden');
+        sessionList.innerHTML = '<div class="sess-empty">Codex resume is filtered to this workspace.</div>';
+        btnResume.classList.remove('hidden');
+      } else {
+        overlayTitle.textContent = (m.list && m.list.length)
+          ? 'Attach to a Claude session'
+          : 'No Claude session here yet';
+        btnResume.classList.add('hidden');
+        setSessions(m.list);
+      }
+    } else if (m.type === 'noWorkspace') {
+      if (m.agent !== activeAgent) return;
+      screen.innerHTML = '';
+      overlay.classList.remove('hidden');
+      overlayTitle.textContent = 'Open a workspace folder';
+      overlayFolder.textContent = 'Claude and Codex tmux sessions are never created outside a workspace.';
+      sessionFilter.classList.add('hidden');
+      sessionList.innerHTML = '';
+      btnResume.classList.add('hidden');
+      btnStart.disabled = true;
+      statusName.textContent = '';
+      statusMeta.textContent = '';
+      setStatus('', 'dead', 'no workspace');
     }
   });
 
@@ -304,5 +430,6 @@
   reportSize();
   if (window.ResizeObserver) new ResizeObserver(() => { measure(); reportSize(); }).observe(wrap);
   window.addEventListener('resize', () => { measure(); reportSize(); });
+  vscode.postMessage({ type: 'ready' });
   setTimeout(() => screen.focus(), 200);
 })();

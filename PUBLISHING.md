@@ -1,21 +1,17 @@
-# Publishing guide
+# Publishing guide — Claude & Codex Tmux Sidebar
 
-## 0. Before anything — replace the placeholders
+## 0. Verify package metadata
 
-In `package.json`:
-- `"publisher": "danilo-local"` → your **Marketplace publisher id** (see step 2).
-- `"repository"`, `"bugs"`, `"homepage"` → your real GitHub URLs
-  (replace `YOUR_GITHUB_USER`).
-- `"icon": "icon.png"` → keep, but swap `icon.png` for your real logo
-  (≥ 128×128 PNG; 256 or 512 recommended). See the logo prompt in the chat.
+`package.json` currently uses publisher `Danesed` and the
+`Danesed/claude-tmux-sidebar` repository. Confirm those values before release.
 
 ## 1. Publish the source on GitHub
 
 ```bash
 cd claude-tmux-sidebar
-git init && git add -A && git commit -m "Claude Tmux Sidebar v0.5.0"
+git add -A && git commit -m "Claude & Codex Tmux Sidebar v0.6.0"
 git branch -M main
-git remote add origin https://github.com/YOUR_GITHUB_USER/claude-tmux-sidebar.git
+git remote add origin https://github.com/Danesed/claude-tmux-sidebar.git
 git push -u origin main
 ```
 
@@ -60,6 +56,8 @@ ovsx publish claude-tmux-sidebar-<version>.vsix -p <openvsx-token>
 - [ ] `publisher`, `repository`, `homepage`, `bugs` updated
 - [ ] real `icon.png` (≥ 128×128) in place
 - [ ] `README.md` looks right (it's the Marketplace page)
+- [ ] `npm run check` passes
+- [ ] `TESTING.md` smoke test passes for both tabs and scrolling
 - [ ] `CHANGELOG.md` updated
 - [ ] `npx @vscode/vsce package` builds with no errors
 - [ ] installed the built `.vsix` and smoke-tested on a real remote machine

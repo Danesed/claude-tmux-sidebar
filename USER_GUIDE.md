@@ -1,133 +1,101 @@
-# Claude Tmux Sidebar — User Guide
+# Claude & Codex Tmux Sidebar — User Guide
 
-A side-bar view that runs **Claude Code inside a persistent tmux session**, so
-your agent survives SSH drops and VS Code restarts — and you can reach the exact
-same chat from the side bar, a terminal, or a bare SSH login on your phone.
+## Install
 
----
-
-## 1. Why
-
-The official Claude extension ties the agent to your VS Code/SSH connection: close
-it and the agent stops. Here, **tmux owns the Claude process** (it's a daemon), so:
-
-- a training-watch or long task keeps running when you disconnect;
-- you reattach from VS Code (this view) **or** from a plain SSH shell — same chat;
-- one tmux session per project folder, named **`tmux_<folder>`**.
-
-This view is a **mirror**: it reads the tmux pane with `tmux capture-pane` and
-sends your keys with `tmux send-keys`. It does not spawn its own terminal, which
-is why it can live in the Secondary Side Bar next to your other agentic chats.
-
----
-
-## 2. Requirements
-
-On the machine the extension runs on (the **remote** lab machine under Remote-SSH):
-
-- `tmux` ≥ 2.9 — `tmux -V`
-- `claude` (Claude Code CLI) on `PATH` — `claude --version`
-
----
-
-## 3. Install
-
-Build a VSIX and install it where tmux + claude live:
+Build the VSIX on a machine with Node.js:
 
 ```bash
 cd claude-tmux-sidebar
-npx @vscode/vsce package        # -> claude-tmux-sidebar-<version>.vsix
+npm run check
+npm run package
 ```
 
-- **Local:** `code --install-extension claude-tmux-sidebar-<version>.vsix`
-- **Remote-SSH:** copy the `.vsix` to the lab machine → in the Remote window,
-  Extensions → `…` → **Install from VSIX…** → **Developer: Reload Window**.
-
-**First run:** a **Claude Tmux** icon appears in the Activity Bar. **Drag the
-view into the Secondary Side Bar** (the right one) once; VS Code remembers it.
-
----
-
-## 4. Daily workflow
-
-1. Open your project folder over Remote-SSH.
-2. Open the **Claude Tmux** view on the right.
-3. You'll see the folder's past Claude conversations:
-   - **click one** to resume it (creates/attaches `tmux_<folder>` running
-     `claude --resume <id>`), or
-   - **＋ Start new session** for a fresh chat.
-   - With 6+ sessions, a **filter box** appears — type to narrow.
-4. Click the screen and type. Detaching is automatic — just close VS Code; the
-   tmux session (and Claude) keep running.
-
-### Toolbar buttons
-
-| Icon | Action |
-|---|---|
-| 🕘 | **Attach** — switch this folder to another conversation |
-| ↻ | **Restart** — relaunch `claude` in the current session |
-| 🗑 | **Kill** — stop this folder's `tmux_<folder>` session |
-| ☰ | **Manage / kill tmux sessions…** — multi-select any of *your* sessions to delete |
-
-### Status footer
-
-`tmux_<folder>` · `cols×rows` · `up <uptime>` · a dot that is **live** (green),
-**idle** (yellow, no updates), or **stopped** (red).
-
-### Activity badge
-
-If Claude updates while the view is hidden, the Activity-Bar icon shows an unread
-count; opening the view clears it.
-
----
-
-## 5. The headless companion (`ct`)
-
-For the phone → SSH path (no VS Code), install the `claude-tmux-remote.sh` helper
-on the lab machine and use the **same** `tmux_<folder>` sessions from a bare shell:
+Install `claude-tmux-sidebar-0.6.0.vsix` from **Extensions → … → Install from
+VSIX…**, then reload VS Code. From a shell you can instead run:
 
 ```bash
-cd /path/to/project && ct      # create/attach tmux_<folder>
-ct ls        # list your sessions
-ct menu      # pick one to attach
-ct stop      # pick one to kill
+code --install-extension claude-tmux-sidebar-0.6.0.vsix --force
 ```
 
-Detach with `Ctrl-b d`. Because the names match, the side bar and `ct` drive the
-same sessions.
+With Remote-SSH, perform the install from the connected VS Code window so the
+extension runs beside the remote `tmux`, `claude` and `codex` binaries.
 
----
+## Use both agents
 
-## 6. Settings
+Open a folder, then open the **Tmux Agents** Activity Bar view.
 
-| Setting | Default | Meaning |
-|---|---|---|
-| `claudeTmux.refreshMs` | `250` | Mirror refresh interval (ms). |
-| `claudeTmux.claudeArgs` | `--dangerously-skip-permissions --ide` | Args for `claude`. |
-| `claudeTmux.sessionPrefix` | `tmux_` | Session = `<prefix><folder>`. |
-| `claudeTmux.fontFamily` | `""` | Empty = inherit `terminal.integrated.fontFamily`. |
-| `claudeTmux.fontSize` | `0` | `0` = inherit `terminal.integrated.fontSize`. |
-| `claudeTmux.cursorStyle` | `block` | `block` / `bar` / `underline`. |
-| `claudeTmux.autoResume` | `true` | Resume the most recent conversation on open (off = always show chooser). |
+### Claude tab
 
----
+- **Start new Claude** creates `tmux_<folder>` in the workspace root.
+- Existing Claude conversations shown in the card come only from that folder's
+  `~/.claude/projects/...` directory.
+- **Resume / switch** in the toolbar opens the same folder-filtered list.
 
-## 7. Troubleshooting
+### Codex tab
 
-- **Prompt glyphs are boxes** → your terminal font is a Nerd Font not picked up.
-  Set `claudeTmux.fontFamily` to that font (it must be installed locally).
-- **The chooser is empty** → no Claude sessions for that folder yet, or a path
-  edge case. Check `ls ~/.claude/projects/ | grep -i <folder>` on that machine.
-- **Box looks cut off on the right** → tmux < 2.9 can't be resized to the side-bar
-  width. Upgrade tmux, or widen the side bar.
-- **`--ide` didn't connect** → type `/ide` inside Claude once VS Code is open.
-- **Typing does nothing** → click the screen first (focus ring appears).
+- **Start new Codex** creates `codex_<folder>` in the workspace root.
+- **Resume previous session** or the toolbar resume action replaces the current
+  Codex tmux session and starts `codex resume` in the workspace root.
+- Codex's own picker filters sessions by cwd because the extension never passes
+  `--all`.
 
----
+Clicking the other tab changes only the mirror target. It does not stop, detach
+or restart either agent. The last selected tab is restored after reload.
 
-## 8. Limits
+## Scroll and input
 
-It's a mirror, not a full PTY: no native scrollback (use Claude's own scrolling),
-no mouse forwarding, refresh is polled. For typing + reading Claude it's smooth;
-for a 1:1 terminal you'd want the xterm.js + node-pty route (heavier, native
-module — not ideal over Remote-SSH on arbitrary machines).
+- Mouse wheel and the scrollbar navigate up to `claudeTmux.scrollbackLines`.
+- If tmux history is empty, wheel movement forwards page navigation to the agent TUI.
+- `Shift+PageUp` and `Shift+PageDown` scroll the mirror by one viewport.
+- Plain `PageUp` and `PageDown` go to the active agent.
+- While the view is at the bottom, new output auto-follows.
+- After scrolling up, refreshes preserve the reading position.
+- Each agent has an independent scroll position.
+- Click the terminal mirror before typing; the focus border confirms input.
+- Text selection pauses visual replacement until the selection is released,
+  making copy reliable during frequent refreshes.
+
+## Workspace isolation
+
+The name is not the security boundary. Before capture, input, resize, restart or
+kill, the extension checks that tmux reports `session_path` equal to the current
+workspace root. Tmux targets also use exact-name syntax.
+
+If another project with the same basename already owns `tmux_<folder>` or
+`codex_<folder>`, this project uses `<name>-<path-hash>`. Unrelated sessions are
+never shown by **Manage this workspace's tmux sessions…**.
+
+No workspace means no operation: the view asks you to open a folder and does not
+use the home directory as a fallback. Multi-root workspaces use the first root.
+
+## Status and toolbar
+
+The footer shows the selected tmux name, pane size, uptime and one of:
+
+- **live**: the tmux session exists and is updating;
+- **idle**: no frame arrived recently;
+- **stopped**: no matching workspace session exists.
+
+`live` describes tmux, not the child process. If Claude or Codex exits back to a
+shell, the tmux session remains live and you can use **Restart**.
+
+Toolbar actions are scoped to the active tab. The manage action shows zero, one
+or two entries and rechecks the workspace path immediately before killing.
+
+## Troubleshooting
+
+- **No workspace**: open a folder, not only an individual file.
+- **Typing does nothing**: click the mirror and verify the focus border.
+- **Codex has no history**: keep the default `--no-alt-screen` in
+  `claudeTmux.codexArgs`; older output is still limited by tmux history.
+- **Claude or Codex command not found**: install the CLI on the extension host
+  and ensure it is on the environment `PATH` visible to VS Code.
+- **Remote-SSH starts local tmux**: reinstall the VSIX in the SSH-connected
+  window under the remote extension host.
+- **Prompt glyphs are boxes**: set `claudeTmux.fontFamily` to the local Nerd Font
+  used by the integrated terminal.
+- **Wrong size or clipped layout**: use tmux 2.9+ and widen the side bar.
+- **Resume replaces a running agent**: this is intentional and requires a modal
+  confirmation; the other agent's tmux session is untouched.
+
+For a clean end-to-end check after installing, follow [TESTING.md](TESTING.md).

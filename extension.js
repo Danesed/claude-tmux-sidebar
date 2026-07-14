@@ -22,14 +22,59 @@ function cfg() {
 }
 
 function workspaceFolder() {
-  return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.env.HOME;
+  return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || null;
 }
 
-// Session name == <prefix><basename(folder)>, identical to the ct CLI and the
-// Focus extension, so all three drive the SAME tmux session.
-function sessionName() {
-  const prefix = cfg().get('sessionPrefix') || 'Claude_';
-  return prefix + path.basename(workspaceFolder());
+const AGENTS = {
+  claude: { label: 'Claude', command: 'claude', prefixSetting: 'sessionPrefix', defaultPrefix: 'tmux_' },
+  codex: { label: 'Codex', command: 'codex', prefixSetting: 'codexSessionPrefix', defaultPrefix: 'codex_' },
+};
+
+function normalizedPath(value) {
+  if (!value) return '';
+  try { return fs.realpathSync.native(value); } catch { return path.resolve(value); }
+}
+
+function baseSessionName(agent, cwd = workspaceFolder()) {
+  if (!cwd || !AGENTS[agent]) return '';
+  const spec = AGENTS[agent];
+  const prefix = cfg().get(spec.prefixSetting) || spec.defaultPrefix;
+  return prefix + path.basename(cwd).replace(/[:.]/g, '_');
+}
+
+function pathHash(cwd) {
+  return crypto.createHash('sha256').update(normalizedPath(cwd)).digest('hex').slice(0, 8);
+}
+
+// Keep the legacy, readable name whenever it belongs to this workspace. If a
+// same-basename project already owns it, add a stable path hash instead of ever
+// attaching to another folder's tmux session.
+async function sessionName(agent) {
+  const cwd = workspaceFolder();
+  const base = baseSessionName(agent, cwd);
+  if (!base) return '';
+  const found = await tmux(['display-message', '-p', '-t', tmuxPaneTarget(base), '#{session_path}']);
+  if (!found.ok || normalizedPath(found.out.trim()) === normalizedPath(cwd)) return base;
+  return `${base}-${pathHash(cwd)}`;
+}
+
+async function sessionBelongsToWorkspace(name) {
+  const cwd = workspaceFolder();
+  if (!name || !cwd) return false;
+  const found = await tmux(['display-message', '-p', '-t', tmuxPaneTarget(name), '#{session_path}']);
+  return found.ok && normalizedPath(found.out.trim()) === normalizedPath(cwd);
+}
+
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, `'"'"'`)}'`;
+}
+
+function tmuxSessionTarget(name) {
+  return `=${name}`;
+}
+
+function tmuxPaneTarget(name) {
+  return `=${name}:`;
 }
 
 // Claude stores per-folder transcripts at ~/.claude/projects/<encoded-cwd>/<id>.jsonl
@@ -85,10 +130,16 @@ class ClaudeTmuxView {
     this.timer = null;
     this.cols = 80;
     this.rows = 24;
-    this.lastFrame = null;
-    this.sessionsSent = false;
+    const savedAgent = context.workspaceState.get('claudeTmux.activeAgent');
+    this.activeAgent = AGENTS[savedAgent] ? savedAgent : 'claude';
+    this.agentState = {
+      claude: { lastFrame: null, sessionsSent: false },
+      codex: { lastFrame: null, sessionsSent: false },
+    };
     this.unseen = 0;   // changes seen while the view was hidden (badge count)
     this._bg = 0;      // throttle counter for background polling
+    this._tickRunning = false;
+    this._tickQueued = false;
   }
 
   resolveWebviewView(view) {
@@ -103,11 +154,10 @@ class ClaudeTmuxView {
     view.onDidChangeVisibility(() => {
       if (view.visible) { this.clearBadge(); this.tick(true); }
     });
-    view.onDidDispose(() => this.stopLoop());
+    view.onDidDispose(() => { this.stopLoop(); this.view = null; });
 
     this.startLoop();
     this.maybeAutoResume();
-    this.tick(true);
   }
 
   clearBadge() {
@@ -117,34 +167,63 @@ class ClaudeTmuxView {
 
   // Optionally resume the folder's most recent conversation on open.
   async maybeAutoResume() {
-    if (!cfg().get('autoResume')) return;
-    const s = sessionName();
-    const has = await tmux(['has-session', '-t', s]);
+    if (this.activeAgent !== 'claude' || !cfg().get('autoResume')) return;
+    const cwd = workspaceFolder();
+    if (!cwd) return;
+    const s = await sessionName('claude');
+    const has = await tmux(['has-session', '-t', tmuxSessionTarget(s)]);
     if (has.ok) return; // already running
-    const list = await listSessions(getProjectDir(workspaceFolder()));
+    const list = await listSessions(getProjectDir(cwd));
     if (list.length) await this.startResumed(list[0].id);
   }
 
   onMessage(m) {
     switch (m.type) {
+      case 'ready':   this.postActiveAgent(); return this.tick(true);
+      case 'switchAgent': return this.switchAgent(m.agent);
       case 'input':   return this.sendKeys(m.data);
       case 'resize':  return this.setSize(m.cols, m.rows);
       case 'start':   return this.startSession();
       case 'attach':  return this.attachExisting();
       case 'resume':  return this.startResumed(m.id);
-      case 'refresh': this.sessionsSent = false; return this.tick(true);
+      case 'refresh': this.agentState[this.activeAgent].sessionsSent = false; return this.tick(true);
       case 'paste':   return this.sendKeys(m.data);
     }
   }
 
+  postActiveAgent() {
+    if (!this.view) return;
+    this.view.webview.postMessage({
+      type: 'activeAgent',
+      agent: this.activeAgent,
+      label: AGENTS[this.activeAgent].label,
+    });
+  }
+
+  switchAgent(agent) {
+    if (!AGENTS[agent] || agent === this.activeAgent) return;
+    this.activeAgent = agent;
+    this.context.workspaceState.update('claudeTmux.activeAgent', agent);
+    this.clearBadge();
+    this.postActiveAgent();
+    this.maybeAutoResume();
+    this.setSize(this.cols, this.rows);
+  }
+
   // Push the folder's past conversations to the webview list (once per
   // disconnected state, to avoid re-reading JSONL every tick).
-  async pushSessions() {
+  async pushSessions(agent = this.activeAgent) {
     if (!this.view) return;
     const cwd = workspaceFolder();
+    if (!cwd) return;
+    if (agent === 'codex') {
+      this.view.webview.postMessage({ type: 'sessions', agent, folder: cwd, list: [] });
+      return;
+    }
     const list = await listSessions(getProjectDir(cwd));
     this.view.webview.postMessage({
       type: 'sessions',
+      agent,
       folder: cwd,
       list: list.map((s) => ({ id: s.id, name: s.name, lastTs: s.lastTs })),
     });
@@ -152,32 +231,21 @@ class ClaudeTmuxView {
 
   // Create (or replace) the folder's tmux session running `claude --resume <id>`.
   async startResumed(id) {
-    if (!id) return;
-    const s = sessionName();
-    const cwd = workspaceFolder();
-    const running = await tmux(['has-session', '-t', s]);
-    if (running.ok) {
-      const go = await vscode.window.showWarningMessage(
-        `Replace the current "${s}" session with the selected conversation? The running one will stop.`,
-        { modal: true }, 'Resume'
-      );
-      if (go !== 'Resume') return;
-      await tmux(['kill-session', '-t', s]);
-    }
+    if (!id || this.activeAgent !== 'claude') return;
     const args = (cfg().get('claudeArgs') || '').trim();
-    await tmux(['new-session', '-d', '-s', s, '-x', String(this.cols || 80), '-y', String(this.rows || 24), '-c', cwd]);
-    await tmux(['set-option', '-t', s, 'window-size', 'manual']);
-    await tmux(['send-keys', '-t', s, `claude --resume ${id}${args ? ' ' + args : ''}`, 'Enter']);
-    this.sessionsSent = false;
-    this.tick(true);
+    const command = `claude --resume ${shellQuote(id)}${args ? ' ' + args : ''}`;
+    await this.replaceSession('claude', command, 'Resume');
   }
 
   async sendKeys(data) {
     if (!data) return;
+    const agent = this.activeAgent;
+    const s = await sessionName(agent);
+    if (!await sessionBelongsToWorkspace(s)) return;
     const bytes = Buffer.from(data, 'utf8');
     if (!bytes.length) return;
     const hex = [...bytes].map((b) => b.toString(16).padStart(2, '0'));
-    await tmux(['send-keys', '-t', sessionName(), '-H', ...hex]);
+    await tmux(['send-keys', '-t', tmuxPaneTarget(s), '-H', ...hex]);
     this.tick(true); // refresh immediately so typing feels responsive
   }
 
@@ -187,21 +255,61 @@ class ClaudeTmuxView {
     if (!cols || !rows) return;
     this.cols = cols;
     this.rows = rows;
-    const s = sessionName();
+    const s = await sessionName(this.activeAgent);
+    if (!await sessionBelongsToWorkspace(s)) {
+      this.tick(true);
+      return;
+    }
     // Detach window size from any attached client and force our size.
-    await tmux(['set-option', '-t', s, 'window-size', 'manual']);
-    await tmux(['resize-window', '-t', s, '-x', String(cols), '-y', String(rows)]);
+    await tmux(['set-window-option', '-t', tmuxPaneTarget(s), 'window-size', 'manual']);
+    await tmux(['resize-window', '-t', tmuxPaneTarget(s), '-x', String(cols), '-y', String(rows)]);
     this.tick(true);
   }
 
   async startSession() {
-    const s = sessionName();
+    const agent = this.activeAgent;
+    const argsSetting = agent === 'claude' ? 'claudeArgs' : 'codexArgs';
+    const args = (cfg().get(argsSetting) || '').trim();
+    const command = `${AGENTS[agent].command}${args ? ' ' + args : ''}`;
+    await this.createSession(agent, command);
+  }
+
+  async createSession(agent, command) {
     const cwd = workspaceFolder();
-    await tmux(['new-session', '-d', '-s', s, '-x', String(this.cols || 80), '-y', String(this.rows || 24), '-c', cwd]);
-    await tmux(['set-option', '-t', s, 'window-size', 'manual']);
-    const args = (cfg().get('claudeArgs') || '').trim();
-    await tmux(['send-keys', '-t', s, args ? `claude ${args}` : 'claude', 'Enter']);
+    if (!cwd) {
+      vscode.window.showWarningMessage('Open a folder before starting a tmux agent.');
+      return;
+    }
+    const s = await sessionName(agent);
+    const created = await tmux([
+      'new-session', '-d', '-s', s,
+      '-x', String(this.cols || 80), '-y', String(this.rows || 24), '-c', cwd,
+    ]);
+    if (!created.ok) {
+      if (await sessionBelongsToWorkspace(s)) return this.tick(true);
+      vscode.window.showErrorMessage(`Cannot create tmux session "${s}" for this workspace.`);
+      return;
+    }
+    await tmux(['set-window-option', '-t', tmuxPaneTarget(s), 'window-size', 'manual']);
+    await tmux(['send-keys', '-t', tmuxPaneTarget(s), command, 'Enter']);
+    this.agentState[agent].lastFrame = null;
+    this.agentState[agent].sessionsSent = false;
     this.tick(true);
+  }
+
+  async replaceSession(agent, command, action) {
+    const cwd = workspaceFolder();
+    if (!cwd) return;
+    const s = await sessionName(agent);
+    if (await sessionBelongsToWorkspace(s)) {
+      const go = await vscode.window.showWarningMessage(
+        `Replace this workspace's "${s}" session? The running ${AGENTS[agent].label} process will stop.`,
+        { modal: true }, action
+      );
+      if (go !== action) return;
+      await tmux(['kill-session', '-t', tmuxSessionTarget(s)]);
+    }
+    await this.createSession(agent, command);
   }
 
   startLoop() {
@@ -215,6 +323,23 @@ class ClaudeTmuxView {
   }
 
   async tick(force) {
+    if (this._tickRunning) {
+      this._tickQueued = this._tickQueued || force;
+      return;
+    }
+    this._tickRunning = true;
+    try {
+      await this.tickOnce(force);
+    } finally {
+      this._tickRunning = false;
+      if (this._tickQueued) {
+        this._tickQueued = false;
+        setTimeout(() => this.tick(true), 0);
+      }
+    }
+  }
+
+  async tickOnce(force) {
     if (!this.view) return;
     const visible = this.view.visible;
 
@@ -226,38 +351,53 @@ class ClaudeTmuxView {
       this._bg = 0;
     }
 
-    const s = sessionName();
-    const frame = await tmux(['capture-pane', '-p', '-e', '-t', s]);
-
-    if (!frame.ok) {
-      this.lastFrame = null;
-      if (!visible) return;
-      this.view.webview.postMessage({ type: 'nosession', name: s, folder: workspaceFolder() });
-      if (!this.sessionsSent) { this.sessionsSent = true; this.pushSessions(); }
+    const cwd = workspaceFolder();
+    const agent = this.activeAgent;
+    if (!cwd) {
+      if (visible) this.view.webview.postMessage({ type: 'noWorkspace', agent });
       return;
     }
-    this.sessionsSent = false;
+    const state = this.agentState[agent];
+    const s = await sessionName(agent);
+    const configuredScrollback = cfg().get('scrollbackLines');
+    const scrollback = Math.trunc(Math.max(0, Math.min(5000, configuredScrollback == null ? 1000 : configuredScrollback)));
+    const frame = await tmux([
+      'capture-pane', '-p', '-e', '-S', `-${scrollback}`, '-t', tmuxPaneTarget(s),
+    ]);
+    if (agent !== this.activeAgent) return;
 
-    const changed = force || frame.out !== this.lastFrame;
-    this.lastFrame = frame.out;
+    if (!frame.ok) {
+      state.lastFrame = null;
+      if (!visible) return;
+      this.view.webview.postMessage({ type: 'nosession', agent, name: s, folder: cwd });
+      if (!state.sessionsSent) { state.sessionsSent = true; this.pushSessions(agent); }
+      return;
+    }
+    if (!await sessionBelongsToWorkspace(s)) return;
+    state.sessionsSent = false;
+
+    const changed = force || frame.out !== state.lastFrame;
+    state.lastFrame = frame.out;
 
     if (!visible) {
       if (changed) {
         this.unseen++;
-        this.view.badge = { value: this.unseen, tooltip: `Claude: ${this.unseen} new update(s)` };
+        this.view.badge = { value: this.unseen, tooltip: `${AGENTS[agent].label}: ${this.unseen} new update(s)` };
       }
       return;
     }
 
     const meta = await tmux([
-      'display-message', '-p', '-t', s,
-      '#{cursor_x},#{cursor_y},#{pane_width},#{pane_height},#{session_created}',
+      'display-message', '-p', '-t', tmuxPaneTarget(s),
+      '#{cursor_x},#{cursor_y},#{pane_width},#{pane_height},#{session_created},#{history_size}',
     ]);
+    if (agent !== this.activeAgent) return;
 
     // Always send a tiny status (keeps the live dot + cursor + footer fresh even
     // on a static screen); send the heavy frame text only when it changed.
     this.view.webview.postMessage({
       type: 'frame',
+      agent,
       frame: changed ? frame.out : null,
       meta: (meta.out || '').trim(),
       name: s,
@@ -266,46 +406,60 @@ class ClaudeTmuxView {
 
   // public actions used by commands
   async restart() {
-    const s = sessionName();
-    const has = await tmux(['has-session', '-t', s]);
-    if (!has.ok) return this.startSession();
-    await tmux(['send-keys', '-t', s, 'C-c']);
-    const args = (cfg().get('claudeArgs') || '').trim();
-    await tmux(['send-keys', '-t', s, args ? `claude ${args}` : 'claude', 'Enter']);
+    const agent = this.activeAgent;
+    const s = await sessionName(agent);
+    if (!await sessionBelongsToWorkspace(s)) return this.startSession();
+    await tmux(['send-keys', '-t', tmuxPaneTarget(s), 'C-c']);
+    const argsSetting = agent === 'claude' ? 'claudeArgs' : 'codexArgs';
+    const args = (cfg().get(argsSetting) || '').trim();
+    const command = `${AGENTS[agent].command}${args ? ' ' + args : ''}`;
+    await tmux(['send-keys', '-t', tmuxPaneTarget(s), command, 'Enter']);
+    this.agentState[agent].lastFrame = null;
     this.tick(true);
   }
 
   async kill() {
-    const s = sessionName();
+    const agent = this.activeAgent;
+    const s = await sessionName(agent);
+    if (!await sessionBelongsToWorkspace(s)) {
+      vscode.window.showInformationMessage(`No ${AGENTS[agent].label} tmux session for this workspace.`);
+      return;
+    }
     const pick = await vscode.window.showWarningMessage(
-      `Kill tmux session "${s}"? Claude and anything running in it will stop.`,
+      `Kill tmux session "${s}"? ${AGENTS[agent].label} and anything running in it will stop.`,
       { modal: true }, 'Kill'
     );
     if (pick !== 'Kill') return;
-    await tmux(['kill-session', '-t', s]);
+    await tmux(['kill-session', '-t', tmuxSessionTarget(s)]);
+    this.agentState[agent].lastFrame = null;
+    this.agentState[agent].sessionsSent = false;
     this.tick(true);
   }
 
-  // Manage / delete ANY of your tmux sessions (multi-select). tmux is per-user,
-  // so this can only ever list and kill your own sessions.
+  // Manage only the Claude and Codex sessions whose session_path is this root.
   async killPick() {
-    const list = await tmux(['ls', '-F', '#{session_name}\t#{session_windows}\t#{?session_attached,attached,detached}']);
-    if (!list.ok || !list.out.trim()) {
-      vscode.window.showInformationMessage('No tmux sessions for your user.');
+    const items = [];
+    for (const agent of Object.keys(AGENTS)) {
+      const name = await sessionName(agent);
+      if (!await sessionBelongsToWorkspace(name)) continue;
+      const info = await tmux([
+        'display-message', '-p', '-t', tmuxPaneTarget(name),
+        '#{session_windows}\t#{?session_attached,attached,detached}',
+      ]);
+      const [wins, state] = (info.out || '').trim().split('\t');
+      items.push({
+        label: `${AGENTS[agent].label}: ${name}`,
+        description: `${wins || 1} window(s) · ${state || 'detached'}`,
+        session: name,
+      });
+    }
+    if (!items.length) {
+      vscode.window.showInformationMessage('No Claude or Codex tmux sessions for this workspace.');
       return;
     }
-    const mine = sessionName();
-    const items = list.out.trim().split('\n').map((line) => {
-      const [name, wins, state] = line.split('\t');
-      return {
-        label: name === mine ? `$(star-full) ${name}` : name,
-        description: `${wins} window(s) · ${state}`,
-        session: name,
-      };
-    });
     const picked = await vscode.window.showQuickPick(items, {
       canPickMany: true,
-      placeHolder: 'Select tmux session(s) to kill (only yours are listed)',
+      placeHolder: 'Select this workspace\'s tmux session(s) to kill',
     });
     if (!picked || !picked.length) return;
     const go = await vscode.window.showWarningMessage(
@@ -313,14 +467,31 @@ class ClaudeTmuxView {
       { modal: true }, 'Kill'
     );
     if (go !== 'Kill') return;
-    for (const it of picked) await tmux(['kill-session', '-t', it.session]);
+    for (const it of picked) {
+      if (await sessionBelongsToWorkspace(it.session)) {
+        await tmux(['kill-session', '-t', tmuxSessionTarget(it.session)]);
+      }
+    }
     vscode.window.showInformationMessage(`Killed ${picked.length} tmux session(s).`);
+    for (const state of Object.values(this.agentState)) {
+      state.lastFrame = null;
+      state.sessionsSent = false;
+    }
     this.tick(true);
   }
 
-  // Pick one of the folder's past Claude conversations and resume it here.
+  // Claude uses the extension picker; Codex opens its cwd-filtered native picker.
   async attachExisting() {
     const cwd = workspaceFolder();
+    if (!cwd) {
+      vscode.window.showWarningMessage('Open a folder before resuming an agent session.');
+      return;
+    }
+    if (this.activeAgent === 'codex') {
+      const args = (cfg().get('codexArgs') || '').trim();
+      await this.replaceSession('codex', `codex resume${args ? ' ' + args : ''}`, 'Resume');
+      return;
+    }
     const sessions = await vscode.window.withProgress(
       { location: { viewId: 'claudeTmux.view' }, title: 'Loading Claude sessions…' },
       () => listSessions(getProjectDir(cwd))
@@ -378,9 +549,15 @@ class ClaudeTmuxView {
 </head>
 <body>
   <div id="app" data-cursor="${cursorStyle}">
+    <div id="agent-tabs" role="tablist" aria-label="Tmux agent">
+      <button id="tab-claude" class="agent-tab" role="tab" data-agent="claude" aria-selected="false">Claude</button>
+      <button id="tab-codex" class="agent-tab" role="tab" data-agent="codex" aria-selected="false">Codex</button>
+    </div>
     <div id="screen-wrap">
-      <div id="screen" tabindex="0" aria-label="Claude terminal mirror"></div>
-      <div id="cursor"></div>
+      <div id="terminal">
+        <div id="screen" tabindex="0" aria-label="Tmux terminal mirror"></div>
+        <div id="cursor"></div>
+      </div>
       <div id="hint">click to type</div>
 
       <div id="overlay" class="hidden">
@@ -397,6 +574,7 @@ class ClaudeTmuxView {
           <div id="session-list" aria-label="Existing Claude sessions"></div>
           <div class="card-actions">
             <button id="btn-start" class="primary">＋ Start new session</button>
+            <button id="btn-resume" class="hidden">↩ Resume previous session</button>
           </div>
         </div>
       </div>
@@ -431,6 +609,17 @@ function activate(context) {
     vscode.commands.registerCommand('claudeTmux.killPick', () => provider.killPick()),
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('claudeTmux.refreshMs')) provider.startLoop();
+      if (e.affectsConfiguration('claudeTmux')) {
+        for (const state of Object.values(provider.agentState)) state.lastFrame = null;
+        provider.tick(true);
+      }
+    }),
+    vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      for (const state of Object.values(provider.agentState)) {
+        state.lastFrame = null;
+        state.sessionsSent = false;
+      }
+      provider.tick(true);
     }),
   );
 }

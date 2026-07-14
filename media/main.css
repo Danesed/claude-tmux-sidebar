@@ -15,19 +15,57 @@ html, body {
   overflow: hidden;
 }
 
+/* ---- agent tabs ---------------------------------------------------------- */
+#agent-tabs {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  padding: 5px 6px 0;
+  gap: 4px;
+  background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.08));
+}
+.agent-tab {
+  min-width: 0;
+  padding: 5px 8px 6px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 3px 3px 0 0;
+  color: var(--vscode-descriptionForeground, #999);
+  background: transparent;
+  font-size: 12px;
+  font-weight: 600;
+}
+.agent-tab:hover { background: var(--vscode-list-hoverBackground, rgba(255,255,255,0.06)); }
+.agent-tab.active {
+  color: var(--vscode-foreground, #ddd);
+  border-bottom-color: var(--vscode-focusBorder, #0e639c);
+  background: var(--vscode-list-activeSelectionBackground, rgba(255,255,255,0.08));
+}
+.agent-tab:focus-visible { outline: 1px solid var(--vscode-focusBorder, #0e639c); outline-offset: -1px; }
+
 /* ---- terminal mirror area ------------------------------------------------ */
 #screen-wrap {
   position: relative;
   flex: 1 1 auto;
-  overflow: hidden;
+  overflow: auto;
   min-height: 0;
+  scrollbar-color: var(--vscode-scrollbarSlider-background, #5558) transparent;
 }
 
+#terminal {
+  position: relative;
+  min-width: 100%;
+  min-height: 100%;
+  width: max-content;
+  box-sizing: border-box;
+}
 #screen {
-  position: absolute;
-  inset: 0;
+  position: relative;
   padding: 6px 8px;
   box-sizing: border-box;
+  min-width: 100%;
+  min-height: 100%;
   /* Explicit monospace stack — never trust --vscode-editor-font-family here:
      in a webview it can resolve to empty and fall back to a serif font, which
      destroys all column alignment. */
@@ -38,7 +76,6 @@ html, body {
   white-space: pre;
   tab-size: 8;
   outline: none;
-  overflow: hidden;
   cursor: text;
 }
 #screen .row { display: block; height: 1.15em; }
@@ -68,7 +105,7 @@ html, body {
   font-family: var(--vscode-font-family);
   transition: opacity .2s;
 }
-#screen:focus ~ #hint { opacity: 0; }
+#screen-wrap:focus-within #hint { opacity: 0; }
 
 /* ---- empty-state card ---------------------------------------------------- */
 #overlay {
@@ -80,6 +117,7 @@ html, body {
   padding: 18px;
   box-sizing: border-box;
   background: var(--vscode-editor-background, #1e1e1e);
+  z-index: 5;
 }
 #overlay.hidden { display: none; }
 

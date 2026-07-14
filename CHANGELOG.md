@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.0
+- Added Claude and Codex tabs backed by independent persistent tmux sessions.
+- Added workspace-path validation and exact tmux targets to prevent cross-project attach, input or kill.
+- Added stable path-hash disambiguation for projects sharing the same basename.
+- Added bounded scrollback, mouse/scrollbar navigation, keyboard scrolling, auto-follow and per-tab scroll positions.
+- Added Codex start and cwd-filtered native resume flow with configurable arguments.
+- Restricted the manage command to the current workspace's Claude and Codex sessions.
+- Removed the unsafe `$HOME` fallback when no workspace folder is open.
+- Updated names, commands, settings, install documentation and the VSIX smoke-test checklist.
+
 ## 0.5.2
 - Auto-resume the folder's most recent conversation on open is now the default
   (set `claudeTmux.autoResume` to false to always show the chooser).

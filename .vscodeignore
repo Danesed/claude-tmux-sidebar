@@ -2,7 +2,7 @@
 .gitignore
 .vscode/**
 *.vsix
-USER_GUIDE.md
 PUBLISHING.md
+tasks/**
 **/*.map
 .DS_Store

@@ -1,26 +1,30 @@
 {
   "name": "claude-tmux-sidebar",
-  "displayName": "Claude Tmux Sidebar",
-  "description": "Run Claude Code in a persistent tmux session inside the side bar, next to your other agentic chats. Survives SSH drops and works headless.",
-  "version": "0.5.2",
+  "displayName": "Claude & Codex Tmux Sidebar",
+  "description": "Switch between workspace-scoped Claude Code and Codex tmux sessions in one persistent VS Code side bar.",
+  "version": "0.6.0",
   "publisher": "Danesed",
   "license": "MIT",
   "icon": "icon.png",
   "engines": { "vscode": "^1.80.0" },
   "categories": ["Other", "AI", "Machine Learning"],
-  "keywords": ["claude", "claude-code", "tmux", "terminal", "sidebar", "ai", "remote-ssh", "agent"],
+  "keywords": ["claude", "claude-code", "codex", "gpt", "tmux", "terminal", "sidebar", "ai", "remote-ssh", "agent"],
   "galleryBanner": { "color": "#0e1b2a", "theme": "dark" },
   "repository": { "type": "git", "url": "https://github.com/Danesed/claude-tmux-sidebar" },
   "bugs": { "url": "https://github.com/Danesed/claude-tmux-sidebar/issues" },
   "homepage": "https://github.com/Danesed/claude-tmux-sidebar#readme",
   "activationEvents": [],
   "main": "./extension.js",
+  "scripts": {
+    "check": "node --check extension.js && node --check media/main.js",
+    "package": "npx @vscode/vsce package"
+  },
   "contributes": {
     "viewsContainers": {
       "activitybar": [
         {
           "id": "claudeTmux",
-          "title": "Claude Tmux",
+          "title": "Tmux Agents",
           "icon": "media/icon.svg"
         }
       ]
@@ -29,7 +33,7 @@
       "claudeTmux": [
         {
           "id": "claudeTmux.view",
-          "name": "Claude",
+          "name": "Claude / Codex",
           "type": "webview"
         }
       ]
@@ -37,26 +41,26 @@
     "commands": [
       {
         "command": "claudeTmux.attach",
-        "title": "Attach to an existing session…",
-        "category": "Claude Tmux",
+        "title": "Resume / switch active agent session…",
+        "category": "Tmux Agents",
         "icon": "$(history)"
       },
       {
         "command": "claudeTmux.restart",
-        "title": "Restart Claude in this session",
-        "category": "Claude Tmux",
+        "title": "Restart active agent in this session",
+        "category": "Tmux Agents",
         "icon": "$(refresh)"
       },
       {
         "command": "claudeTmux.kill",
-        "title": "Kill this folder's session",
-        "category": "Claude Tmux",
+        "title": "Kill active agent session",
+        "category": "Tmux Agents",
         "icon": "$(trash)"
       },
       {
         "command": "claudeTmux.killPick",
-        "title": "Manage / kill tmux sessions…",
-        "category": "Claude Tmux",
+        "title": "Manage this workspace's tmux sessions…",
+        "category": "Tmux Agents",
         "icon": "$(list-selection)"
       }
     ],
@@ -82,7 +86,7 @@
       }
     ],
     "configuration": {
-      "title": "Claude Tmux Sidebar",
+      "title": "Claude & Codex Tmux Sidebar",
       "properties": {
         "claudeTmux.refreshMs": {
           "type": "number",
@@ -95,10 +99,27 @@
           "default": "--dangerously-skip-permissions --ide",
           "description": "Arguments passed to `claude` when starting or resuming a session."
         },
+        "claudeTmux.codexArgs": {
+          "type": "string",
+          "default": "--no-alt-screen",
+          "description": "Arguments passed to `codex` when starting or resuming a session. `--no-alt-screen` preserves terminal scrollback."
+        },
         "claudeTmux.sessionPrefix": {
           "type": "string",
           "default": "tmux_",
           "description": "tmux session name prefix. Session = <prefix><folder name> (e.g. tmux_my-project)."
+        },
+        "claudeTmux.codexSessionPrefix": {
+          "type": "string",
+          "default": "codex_",
+          "description": "Codex tmux session prefix. Session = <prefix><folder name> (e.g. codex_my-project)."
+        },
+        "claudeTmux.scrollbackLines": {
+          "type": "number",
+          "default": 1000,
+          "minimum": 0,
+          "maximum": 5000,
+          "description": "Maximum tmux history lines captured for scrolling in the side-bar mirror."
         },
         "claudeTmux.fontFamily": {
           "type": "string",
@@ -119,7 +140,7 @@
         "claudeTmux.autoResume": {
           "type": "boolean",
           "default": true,
-          "description": "When the view opens and no session is running, automatically resume the folder's most recent conversation. Turn off to always show the chooser."
+          "description": "When the Claude tab opens and no Claude session is running, automatically resume the folder's most recent Claude conversation."
         }
       }
     }
