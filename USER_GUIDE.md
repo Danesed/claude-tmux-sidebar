@@ -1,4 +1,4 @@
-# Claude & Codex Tmux Sidebar — User Guide
+# AgentMux — User Guide
 
 ## Install
 
@@ -10,11 +10,11 @@ npm run check
 npm run package
 ```
 
-Install `claude-tmux-sidebar-0.7.0.vsix` from **Extensions → … → Install from
+Install `claude-tmux-sidebar-0.9.0.vsix` from **Extensions → … → Install from
 VSIX…**, then reload VS Code. From a shell you can instead run:
 
 ```bash
-code --install-extension claude-tmux-sidebar-0.7.0.vsix --force
+code --install-extension claude-tmux-sidebar-0.9.0.vsix --force
 ```
 
 With Remote-SSH, perform the install from the connected VS Code window so the
@@ -22,7 +22,7 @@ extension runs beside the remote `tmux`, `claude` and `codex` binaries.
 
 ## Use both agents
 
-Open a folder, then open the **Tmux Agents** Activity Bar view. Tabs are not
+Open a folder, then open the **AgentMux** Activity Bar view. Tabs are not
 placeholders: each one appears only after the matching tmux session has been
 detected for this workspace. Use the initial launcher or `+` to start an absent
 agent.
@@ -50,17 +50,18 @@ or restart either agent. The last selected tab is restored after reload.
 ## Pair Mode: exact workflow
 
 1. Finish or pause the current agent and select its tab.
-2. Press `⇄` in the footer or run **Tmux Agents: Hand off to the other agent…**.
-3. If the source still looks active, confirm that you want to prepare the
-   handoff. If the target tmux is absent, allow the extension to start it.
-4. The dialog contains an automatically prepared message with git status,
-   staged and unstaged diff summaries, and the last 60 source-pane lines.
-5. Select **Review only** or **Review & Fix**. The entire textarea is editable:
+2. Press `⇄` in the footer or run **AgentMux: Hand off to the other agent…**.
+3. Add any optional context for the other agent, then press **Create handoff**.
+   Opening this step does not send anything to either agent.
+4. AgentMux asks the source agent to create a concise, standalone handoff
+   specifically for the target. No raw chat tail is used as the summary.
+5. The dialog shows that authored briefing plus fresh, separate Git facts.
+6. Select **Continue task**, **Review only** or **Review & Fix**. The entire textarea is editable:
    add, delete or replace anything before pressing **Send handoff**.
-6. The edited text is sent unchanged and submitted to the target. That agent is
-   marked with a small diamond and becomes the only tab accepting input through
-   this extension. The source remains readable and scrollable.
-7. Press `⇄` from the writer to hand the work back, or `◇` to unlock both tabs.
+7. The edited text is sent unchanged. AgentMux waits for the target's transaction
+   acknowledgement before moving the writer diamond. On timeout, accept manually
+   or cancel; AgentMux never resends the work automatically.
+8. Press `⇄` from the writer to hand the work back, or `◇` to unlock both tabs.
 
 Pair Mode never commits, resets or reverts the working tree. Its lock applies to
 this VS Code view only; another tmux client can still type into either session.
@@ -95,8 +96,10 @@ project constraints in `.claude`, or disable the bridge and merge them manually.
 - Plain `PageUp` and `PageDown` go to the active agent.
 - While the view is at the bottom, new output auto-follows.
 - After scrolling up, refreshes preserve the reading position.
-- Each agent has an independent scroll position.
+- Switching agents returns to the cached live frame; history remains available on demand.
 - Click the terminal mirror before typing; the focus border confirms input.
+- Terminal control keys reach tmux; on Windows/Linux `Ctrl+C` copies only when
+  text is selected and otherwise interrupts the active agent.
 - Text selection pauses visual replacement until the selection is released,
   making copy reliable during frequent refreshes.
 
@@ -128,6 +131,11 @@ These states are terminal-output heuristics, not private Claude/Codex APIs.
 stable for four seconds. A silent long-running tool or an external tmux client
 can still make the result imperfect. Motion is reduced automatically when the
 OS requests reduced motion.
+
+The same compact footer shows pane size and tmux uptime. When available it adds
+`hist` for scrollback lines, attached tmux client count, and `lag` only when a
+capture takes at least 200 ms. These fields reuse the existing metadata/capture
+calls and do not add another polling process.
 
 Toolbar actions are scoped to the active tab. The manage action shows zero, one
 or two entries and rechecks the workspace path immediately before killing.

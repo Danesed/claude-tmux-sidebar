@@ -1,8 +1,8 @@
 {
   "name": "claude-tmux-sidebar",
-  "displayName": "Claude & Codex Tmux Sidebar",
-  "description": "Switch and hand off work between workspace-scoped Claude Code and Codex tmux sessions in one VS Code side bar.",
-  "version": "0.7.1",
+  "displayName": "AgentMux — Claude & Codex in tmux",
+  "description": "Two agents, one terminal flow: switch fast and hand off work intelligently between Claude Code and Codex in tmux.",
+  "version": "0.9.0",
   "publisher": "Danesed",
   "license": "MIT",
   "icon": "icon.png",
@@ -25,7 +25,7 @@
       "activitybar": [
         {
           "id": "claudeTmux",
-          "title": "Tmux Agents",
+          "title": "AgentMux",
           "icon": "media/icon.svg"
         }
       ]
@@ -34,7 +34,7 @@
       "claudeTmux": [
         {
           "id": "claudeTmux.view",
-          "name": "Claude / Codex",
+          "name": "AgentMux",
           "type": "webview"
         }
       ]
@@ -43,31 +43,31 @@
       {
         "command": "claudeTmux.attach",
         "title": "Resume / switch active agent session…",
-        "category": "Tmux Agents",
+        "category": "AgentMux",
         "icon": "$(history)"
       },
       {
         "command": "claudeTmux.restart",
         "title": "Restart active agent in this session",
-        "category": "Tmux Agents",
+        "category": "AgentMux",
         "icon": "$(refresh)"
       },
       {
         "command": "claudeTmux.kill",
         "title": "Kill active agent session",
-        "category": "Tmux Agents",
+        "category": "AgentMux",
         "icon": "$(trash)"
       },
       {
         "command": "claudeTmux.killPick",
         "title": "Manage this workspace's tmux sessions…",
-        "category": "Tmux Agents",
+        "category": "AgentMux",
         "icon": "$(list-selection)"
       },
       {
         "command": "claudeTmux.handoff",
         "title": "Hand off to the other agent…",
-        "category": "Tmux Agents",
+        "category": "AgentMux",
         "icon": "$(arrow-swap)"
       }
     ],
@@ -95,11 +95,11 @@
       }
     ],
     "configuration": {
-      "title": "Claude & Codex Tmux Sidebar",
+      "title": "AgentMux",
       "properties": {
         "claudeTmux.refreshMs": {
           "type": "number",
-          "default": 250,
+          "default": 120,
           "minimum": 80,
           "description": "How often (ms) the side-bar mirror refreshes the tmux pane."
         },

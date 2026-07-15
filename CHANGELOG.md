@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.9.0
+- Rename the public extension to **AgentMux — Claude & Codex in tmux**, preserving the installed extension ID and `claudeTmux.*` settings.
+- Add an optional user-details step before source-agent handoff generation; the initial click no longer contacts either agent.
+- Preserve the generated full-message review before delivery and rehydrate the preliminary details after a webview reload.
+- Extend the footer with scrollback size, attached tmux clients and a lag warning without adding a live-path process.
+
+## 0.8.0
+- Rebrand the public extension as **PairMux — Claude & Codex in tmux** while preserving the installed extension ID and `claudeTmux.*` settings.
+- Replace generic terminal-tail handoffs with source-authored, target-specific briefings, fresh repository facts, editable Continue/Review modes and transaction validation.
+- Add best-effort target acknowledgement with a manual-accept timeout path and no automatic resend.
+- Replace chained input batches with a one-in-flight pump that merges pending input under tmux/SSH backpressure and reports delivery failures.
+- Restore terminal control keys, improve Unicode/IME handling and preserve byte order for UTF-8 input.
+- Reduce idle tmux churn with combined session verification, cached metadata, slower hidden polling and lazy background capture.
+- Coalesce resize requests, cache the last frame per agent for instant tab switches and avoid repeated font measurement during sidebar drags.
+- Add persistent per-agent completion attention, restart confirmation, session-stop feedback and focused keyboard/ARIA improvements without adding visual chrome.
+
 ## 0.7.1
 - Fix sluggish typing introduced in 0.6.0/0.7.0: keystrokes no longer re-verify the tmux session identity on every flush. The presence loop keeps a short-lived verified-session cache, so the input hot path is back to a single `tmux send-keys` per flush (as in 0.5.x) while keeping the workspace-isolation safety checks.
 - Reuse the cached session identity in the refresh tick, cutting background tmux process spawns roughly in half.

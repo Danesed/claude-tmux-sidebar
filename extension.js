@@ -111,6 +111,48 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function extractMarkedBlock(value, prefix, id) {
+  const begin = `${prefix}_BEGIN:${id}`;
+  const end = `${prefix}_END:${id}`;
+  const start = String(value || '').lastIndexOf(begin);
+  if (start < 0) return null;
+  const contentStart = start + begin.length;
+  const finish = String(value).indexOf(end, contentStart);
+  if (finish < 0) return null;
+  const content = String(value).slice(contentStart, finish).trim();
+  return content || null;
+}
+
+function sourceHandoffPrompt(source, target, id, details = '') {
+  const userDetails = String(details || '');
+  return [
+    `Prepare a standalone handoff specifically from ${AGENTS[source].label} to ${AGENTS[target].label}.`,
+    'Do not continue implementation and do not modify files. Report only verified facts and label uncertainty.',
+    `${AGENTS[target].label} must be able to continue without reading this chat or terminal history.`,
+    ...(userDetails.trim() ? [
+      '',
+      'The user supplied these additional details. Treat them as requirements/context and reflect every relevant point in the handoff:',
+      '<USER_HANDOFF_DETAILS>',
+      userDetails,
+      '</USER_HANDOFF_DETAILS>',
+    ] : []),
+    '',
+    'Include these concise sections:',
+    '- Objective and acceptance criteria',
+    '- Completed work',
+    '- Files and symbols involved',
+    '- Decisions and constraints',
+    '- Verification already run',
+    '- Open risks or questions',
+    '- Recommended next action',
+    '',
+    'Return only one delimited block. Build each marker by joining the prefix, a colon, and the transaction ID.',
+    'Begin prefix: HANDOFF_BEGIN',
+    'End prefix: HANDOFF_END',
+    `Transaction ID: ${id}`,
+  ].join('\n');
+}
+
 const CODEX_CLAUDE_RULES = [
   'Before doing any work, recursively discover and read every Markdown file under the workspace .claude directory.',
   'Treat those Markdown files as the canonical project instructions and respect any path-specific scopes they declare.',
@@ -142,25 +184,25 @@ function isShellCommand(command) {
 }
 
 async function agentSessionInfo(agent, name) {
-  if (!await sessionBelongsToWorkspace(name)) return { exists: false, ready: false };
   const result = await tmux([
     'display-message', '-p', '-t', tmuxPaneTarget(name),
-    '#{@claude_tmux_agent}\t#{@claude_tmux_running}\t#{pane_current_command}',
+    '#{session_path}\t#{@claude_tmux_agent}\t#{@claude_tmux_running}\t#{pane_current_command}\t#{session_created}\t#{@claude_tmux_generation}',
   ]);
   if (!result.ok) return { exists: false, ready: false };
-  const [marker, running, command = ''] = result.out.replace(/\r?\n$/, '').split('\t');
+  const [sessionPath, marker, running, command = '', created = '', generation = ''] = result.out.replace(/\r?\n$/, '').split('\t');
+  if (normalizedPath(sessionPath) !== normalizedPath(workspaceFolder())) return { exists: false, ready: false };
   const shell = isShellCommand(command);
   if (marker === agent) {
     if (running === 'starting' && !shell) {
       await tmux(['set-option', '-p', '-t', tmuxPaneTarget(name), '@claude_tmux_running', '1']);
-      return { exists: true, ready: true, shell, command };
+      return { exists: true, ready: true, shell, command, created, generation };
     }
-    return { exists: true, ready: running === '1', shell, command };
+    return { exists: true, ready: running === '1', shell, command, created, generation };
   }
   const direct = agent === 'codex'
     ? /(?:^|-)codex(?:$|-)/i.test(path.basename(command))
     : /claude/i.test(path.basename(command)) || path.basename(command) === 'node';
-  return { exists: true, ready: direct, shell, command };
+  return { exists: true, ready: direct, shell, command, created, generation };
 }
 
 // Claude stores per-folder transcripts at ~/.claude/projects/<encoded-cwd>/<id>.jsonl
@@ -231,11 +273,16 @@ class ClaudeTmuxView {
     };
     this.sessionCache = { claude: null, codex: null };
     this.unseen = 0;   // changes seen while the view was hidden (badge count)
-    this._bg = 0;      // throttle counter for background polling
+    this._lastHiddenTickAt = 0;
     this._tickRunning = false;
     this._tickQueued = false;
     this._tickForce = false;
     this._presenceRunning = false;
+    this._presenceHiddenSkips = 0;
+    this._resizeRunning = false;
+    this._resizeQueued = false;
+    this._resizePromise = Promise.resolve();
+    this.handoff = null;
   }
 
   newAgentState() {
@@ -251,11 +298,17 @@ class ClaudeTmuxView {
       historyPending: false,
       historySize: 0,
       lastLiveFrame: null,
+      lastMeta: '',
+      lastMetaAt: 0,
+      lastName: '',
+      metaPending: true,
+      backgroundPollAt: 0,
+      attention: null,
     };
   }
 
   newInputQueue() {
-    return { data: '', cwd: null, paste: false, timer: null, chain: Promise.resolve(), suspended: false };
+    return { data: '', cwd: null, paste: false, timer: null, chain: Promise.resolve(), inFlight: false, suspended: false };
   }
 
   cachedSessionEntry(agent, cwd) {
@@ -300,6 +353,11 @@ class ClaudeTmuxView {
   clearBadge() {
     this.unseen = 0;
     if (this.view) this.view.badge = undefined;
+    const state = this.agentState[this.activeAgent];
+    if (state?.attention) {
+      state.attention = null;
+      this.postAgents();
+    }
   }
 
   postAgents() {
@@ -307,13 +365,14 @@ class ClaudeTmuxView {
     const agents = {};
     for (const agent of Object.keys(AGENTS)) {
       const state = this.agentState[agent];
-      agents[agent] = { present: state.present, status: state.status };
+      agents[agent] = { present: state.present, status: state.status, attention: state.attention };
     }
     this.view.webview.postMessage({
       type: 'agents',
       agents,
       activeAgent: this.activeAgent,
       writerAgent: this.writerAgent,
+      handoffPhase: this.handoff?.phase || null,
       hasWorkspace: !!workspaceFolder(),
     });
   }
@@ -323,6 +382,10 @@ class ClaudeTmuxView {
     if (state.status === status) return false;
     state.status = status;
     state.statusSince = Date.now();
+    if (status === 'working') state.attention = null;
+    if (['done', 'needs-input'].includes(status) && (agent !== this.activeAgent || !this.view?.visible)) {
+      state.attention = status;
+    }
     this.postAgents();
     return true;
   }
@@ -330,13 +393,13 @@ class ClaudeTmuxView {
   updateActivity(agent, frame, changed) {
     const state = this.agentState[agent];
     const now = Date.now();
-    const tail = stripAnsi(frame).split('\n').slice(-12).join('\n');
-    const needsInput = /(?:do you want to|would you like to|allow\s+.+\?|permission required|approval required|press enter to continue|\[[yY]\/[nN]\])/i.test(tail);
-    if (needsInput) {
-      this.setAgentStatus(agent, 'needs-input');
-      return;
-    }
     if (changed) {
+      const tail = stripAnsi(frame).split('\n').slice(-12).join('\n');
+      const needsInput = /(?:do you want to|would you like to|allow\s+.+\?|permission required|approval required|press enter to continue|\[[yY]\/[nN]\])/i.test(tail);
+      if (needsInput) {
+        this.setAgentStatus(agent, 'needs-input');
+        return;
+      }
       state.lastChange = now;
       if (state.status === 'working') {
         state.lastActivity = now;
@@ -357,6 +420,12 @@ class ClaudeTmuxView {
 
   async pollPresence(force) {
     if (this._presenceRunning || !this.view) return;
+    if (!force && !this.view.visible) {
+      this._presenceHiddenSkips = (this._presenceHiddenSkips + 1) % 3;
+      if (this._presenceHiddenSkips !== 0) return;
+    } else {
+      this._presenceHiddenSkips = 0;
+    }
     this._presenceRunning = true;
     let changed = false;
     try {
@@ -368,11 +437,13 @@ class ClaudeTmuxView {
       const cwd = normalizedPath(workspaceFolder());
       for (const agent of Object.keys(AGENTS)) {
         const state = this.agentState[agent];
-        const name = await sessionName(agent);
+        const cached = this.sessionCache[agent];
+        const name = cached?.cwd === cwd ? cached.name : await sessionName(agent);
         const info = await agentSessionInfo(agent, name);
         this.rememberSession(agent, cwd, name, info.ready);
         const present = info.ready;
         if (state.present !== present) {
+          const stopped = state.present && !present;
           state.present = present;
           state.lastFrame = null;
           state.lastLiveFrame = null;
@@ -380,8 +451,15 @@ class ClaudeTmuxView {
           state.historyPending = false;
           changed = true;
           if (!present) this.setAgentStatus(agent, 'idle');
+          if (stopped) {
+            vscode.window.showInformationMessage(`${AGENTS[agent].label} stopped in this workspace.`, 'Start again')
+              .then((choice) => { if (choice === 'Start again') this.startSession(agent); });
+          }
         }
-        if (present && agent !== this.activeAgent) {
+        const now = Date.now();
+        const backgroundDue = state.status === 'working' || now - state.backgroundPollAt >= 1800;
+        if (this.view.visible && present && agent !== this.activeAgent && backgroundDue) {
+          state.backgroundPollAt = now;
           const tail = await tmux(['capture-pane', '-p', '-e', '-t', tmuxPaneTarget(name)]);
           if (tail.ok) {
             const frameChanged = tail.out !== state.backgroundFrame;
@@ -427,9 +505,14 @@ class ClaudeTmuxView {
 
   onMessage(m) {
     switch (m.type) {
-      case 'ready':   this.postActiveAgent(); this.pollPresence(true); return this.tick(true);
+      case 'ready':
+        this.postActiveAgent();
+        this.postAgents();
+        this.postHandoffState();
+        this.pollPresence(true);
+        return this.tick(true);
       case 'switchAgent': return this.switchAgent(m.agent);
-      case 'input':   return this.queueInput(m.agent, m.data);
+      case 'input':   return this.queueInput(m.agent, m.data, !!m.immediate);
       case 'resize':  return this.setSize(m.cols, m.rows);
       case 'start':   return this.startSession(m.agent);
       case 'attach':  return this.attachExisting(m.agent);
@@ -438,23 +521,37 @@ class ClaudeTmuxView {
       case 'paste':   return this.queueInput(m.agent, m.data, true);
       case 'historyMode': return this.setHistoryMode(m.agent, m.enabled);
       case 'prepareHandoff': return this.prepareHandoff(m.source);
+      case 'createHandoff': return this.createHandoff(m);
       case 'confirmHandoff': return this.confirmHandoff(m);
+      case 'updateHandoffDetails': return this.updateHandoffDetails(m);
+      case 'updateHandoffDraft': return this.updateHandoffDraft(m);
+      case 'acceptHandoff': return this.acceptHandoff(m.id);
+      case 'cancelHandoff': return this.cancelHandoff(m.id);
       case 'cancelPair': return this.cancelPairMode();
     }
   }
 
   postActiveAgent() {
     if (!this.view) return;
+    const state = this.agentState[this.activeAgent];
     this.view.webview.postMessage({
       type: 'activeAgent',
       agent: this.activeAgent,
       label: AGENTS[this.activeAgent].label,
+      cachedFrame: state.lastFrame,
+      cachedMeta: state.lastMeta,
+      cachedName: state.lastName,
+      historyMode: state.historyMode,
     });
   }
 
   switchAgent(agent) {
     if (!AGENTS[agent] || !this.agentState[agent].present || agent === this.activeAgent) return;
     this.activeAgent = agent;
+    const state = this.agentState[agent];
+    state.historyMode = false;
+    state.historyPending = false;
+    state.lastLiveFrame = null;
     this.context.workspaceState.update('claudeTmux.activeAgent', agent);
     this.clearBadge();
     this.postActiveAgent();
@@ -492,16 +589,20 @@ class ClaudeTmuxView {
   queueInput(agent, data, immediate = false, system = false) {
     if (!AGENTS[agent] || !data) return Promise.resolve();
     const queue = this.inputQueues[agent];
+    if (!system && this.handoff && ['drafting', 'delivering', 'awaitingAck', 'ackTimeout'].includes(this.handoff.phase)) {
+      if (this.view) this.view.webview.postMessage({ type: 'inputSuspended', agent, reason: 'handoff' });
+      return Promise.resolve(false);
+    }
     if (queue.suspended && !system) {
       if (this.view) this.view.webview.postMessage({ type: 'inputSuspended', agent });
-      return Promise.resolve();
+      return Promise.resolve(false);
     }
     if (!system && this.writerAgent && agent !== this.writerAgent) {
       if (this.view) this.view.webview.postMessage({ type: 'inputLocked', agent, writerAgent: this.writerAgent });
-      return Promise.resolve();
+      return Promise.resolve(false);
     }
     const cwd = normalizedPath(workspaceFolder());
-    if (!cwd) return Promise.resolve();
+    if (!cwd) return Promise.resolve(false);
     if (queue.data && queue.cwd !== cwd) {
       if (queue.timer) clearTimeout(queue.timer);
       queue.data = '';
@@ -525,14 +626,33 @@ class ClaudeTmuxView {
   flushInput(agent) {
     const queue = this.inputQueues[agent];
     if (queue.timer) { clearTimeout(queue.timer); queue.timer = null; }
-    const data = queue.data;
-    const cwd = queue.cwd;
-    const paste = queue.paste;
-    queue.data = '';
-    queue.cwd = null;
-    queue.paste = false;
-    if (!data) return queue.chain;
-    queue.chain = queue.chain.then(() => this.sendInputData(agent, data, cwd, paste));
+    if (!queue.data || queue.inFlight) return queue.chain;
+    queue.inFlight = true;
+    queue.chain = (async () => {
+      while (queue.data) {
+        const data = queue.data;
+        const cwd = queue.cwd;
+        const paste = queue.paste;
+        queue.data = '';
+        queue.cwd = null;
+        queue.paste = false;
+        const delivered = await this.sendInputData(agent, data, cwd, paste);
+        if (!delivered) {
+          const pendingBytes = Buffer.byteLength(queue.data, 'utf8');
+          queue.data = '';
+          queue.cwd = null;
+          queue.paste = false;
+          if (this.view) this.view.webview.postMessage({
+            type: 'inputError', agent,
+            failedBytes: Buffer.byteLength(data, 'utf8'),
+            pendingBytes,
+            pendingDiscarded: pendingBytes > 0,
+          });
+          return false;
+        }
+      }
+      return true;
+    })().finally(() => { queue.inFlight = false; });
     return queue.chain;
   }
 
@@ -561,6 +681,7 @@ class ClaudeTmuxView {
         this.invalidateSessionCache(agent);
         return false;
       }
+      this.agentState[agent].metaPending = true;
       this.tick(false);
       return true;
     }
@@ -573,19 +694,20 @@ class ClaudeTmuxView {
         return false;
       }
     }
+    if (/[\r\x1b\x00-\x1f\x7f]/.test(data)) this.agentState[agent].metaPending = true;
     this.tick(false);
     return true;
   }
 
-  async withInputSuspended(agent, action) {
+  async withInputSuspended(agent, action, requireFlush = false) {
     const queue = this.inputQueues[agent];
     queue.suspended = true;
     if (queue.timer) clearTimeout(queue.timer);
     queue.timer = null;
-    queue.data = '';
-    queue.cwd = null;
     try {
-      await queue.chain;
+      this.flushInput(agent);
+      const flushed = await queue.chain;
+      if (requireFlush && flushed === false) return false;
       return await action();
     } finally {
       queue.suspended = false;
@@ -610,15 +732,34 @@ class ClaudeTmuxView {
     if (!cols || !rows) return;
     this.cols = cols;
     this.rows = rows;
-    const s = await sessionName(this.activeAgent);
-    if (!await sessionBelongsToWorkspace(s)) {
-      this.tick(true);
-      return;
+    if (this._resizeRunning) {
+      this._resizeQueued = true;
+      return this._resizePromise;
     }
-    // Detach window size from any attached client and force our size.
-    await tmux(['set-window-option', '-t', tmuxPaneTarget(s), 'window-size', 'manual']);
-    await tmux(['resize-window', '-t', tmuxPaneTarget(s), '-x', String(cols), '-y', String(rows)]);
-    this.tick(true);
+    this._resizeRunning = true;
+    this._resizePromise = (async () => {
+      do {
+        this._resizeQueued = false;
+        const requestedCols = this.cols;
+        const requestedRows = this.rows;
+        const agent = this.activeAgent;
+        const cwd = normalizedPath(workspaceFolder());
+        if (!cwd) break;
+        let s = this.cachedReadySession(agent, cwd);
+        if (!s) {
+          s = await sessionName(agent);
+          const info = await agentSessionInfo(agent, s);
+          if (!info.ready) break;
+          this.rememberSession(agent, cwd, s, true);
+        }
+        await tmux(['set-window-option', '-t', tmuxPaneTarget(s), 'window-size', 'manual']);
+        await tmux(['resize-window', '-t', tmuxPaneTarget(s), '-x', String(requestedCols), '-y', String(requestedRows)]);
+      } while (this._resizeQueued);
+    })().finally(() => {
+      this._resizeRunning = false;
+      this.tick(true);
+    });
+    return this._resizePromise;
   }
 
   async startSession(agent = this.activeAgent) {
@@ -676,6 +817,11 @@ class ClaudeTmuxView {
   }
 
   async runAgentCommand(agent, name, command) {
+    const generation = crypto.randomBytes(12).toString('hex');
+    const generationSet = await tmux([
+      'set-option', '-p', '-t', tmuxPaneTarget(name), '@claude_tmux_generation', generation,
+    ]);
+    if (!generationSet.ok) return false;
     await tmux(['set-option', '-p', '-t', tmuxPaneTarget(name), '@claude_tmux_agent', agent]);
     await tmux(['set-option', '-p', '-t', tmuxPaneTarget(name), '@claude_tmux_running', 'starting']);
     const cleanup = `tmux set-option -p -t ${shellQuote(tmuxPaneTarget(name))} @claude_tmux_running 0`;
@@ -735,7 +881,7 @@ class ClaudeTmuxView {
 
   startLoop() {
     this.stopLoop();
-    const ms = Math.max(80, cfg().get('refreshMs') || 250);
+    const ms = Math.max(80, cfg().get('refreshMs') || 120);
     this.timer = setInterval(() => this.tick(false), ms);
   }
 
@@ -787,10 +933,11 @@ class ClaudeTmuxView {
 
     // When hidden, poll slowly just to drive the "unread activity" badge.
     if (!visible) {
-      this._bg = (this._bg + 1) % 6;
-      if (this._bg !== 0) return;
+      const now = Date.now();
+      if (now - this._lastHiddenTickAt < 2000) return;
+      this._lastHiddenTickAt = now;
     } else {
-      this._bg = 0;
+      this._lastHiddenTickAt = 0;
     }
 
     const cwd = workspaceFolder();
@@ -811,7 +958,9 @@ class ClaudeTmuxView {
     const captureArgs = ['capture-pane', '-p', '-e'];
     if (captureHistory) captureArgs.push('-S', `-${scrollback}`);
     captureArgs.push('-t', tmuxPaneTarget(s));
+    const captureStartedAt = Date.now();
     const frame = await tmux(captureArgs);
+    const latencyMs = Date.now() - captureStartedAt;
     if (agent !== this.activeAgent) return;
     if (state.historyMode !== historyMode || state.historyPending !== historyPending) return;
 
@@ -850,25 +999,33 @@ class ClaudeTmuxView {
       state.historyPending = false;
     } else {
       state.lastLiveFrame = frame.out;
+      state.lastFrame = frame.out;
       this.updateActivity(agent, frame.out, frameChanged);
     }
 
     if (!visible) {
       if (changed) {
-        this.unseen++;
-        this.view.badge = { value: this.unseen, tooltip: `${AGENTS[agent].label}: ${this.unseen} new update(s)` };
+        this.unseen = 1;
+        this.view.badge = { value: 1, tooltip: `${AGENTS[agent].label}: new activity` };
       }
       return;
     }
 
-    const meta = await tmux([
-      'display-message', '-p', '-t', tmuxPaneTarget(s),
-      '#{cursor_x},#{cursor_y},#{pane_width},#{pane_height},#{session_created},#{history_size}',
-    ]);
+    let metaText = state.lastMeta;
+    if (force || state.metaPending || !metaText || (changed && Date.now() - state.lastMetaAt >= 200)) {
+      const meta = await tmux([
+        'display-message', '-p', '-t', tmuxPaneTarget(s),
+        '#{cursor_x},#{cursor_y},#{pane_width},#{pane_height},#{session_created},#{history_size},#{session_attached}',
+      ]);
+      metaText = (meta.out || '').trim();
+      state.lastMeta = metaText;
+      state.lastMetaAt = Date.now();
+      state.metaPending = false;
+    }
     if (agent !== this.activeAgent) return;
-    const metaText = (meta.out || '').trim();
     const metaParts = metaText.split(',');
     state.historySize = parseInt(metaParts[5], 10) || 0;
+    state.lastName = s;
 
     // Always send a tiny status (keeps the live dot + cursor + footer fresh even
     // on a static screen); send the heavy frame text only when it changed.
@@ -880,6 +1037,7 @@ class ClaudeTmuxView {
       name: s,
       historyMode,
       historyAvailable: Math.min(state.historySize, scrollback),
+      latencyMs,
     });
   }
 
@@ -891,11 +1049,7 @@ class ClaudeTmuxView {
     if (!await sessionBelongsToWorkspace(s)) return this.startSession();
     const args = agent === 'claude' ? (cfg().get('claudeArgs') || '').trim() : codexLaunchArgs();
     const command = `${AGENTS[agent].command}${args ? ' ' + args : ''}`;
-    await this.withInputSuspended(agent, async () => {
-      await tmux(['kill-session', '-t', tmuxSessionTarget(s)]);
-      this.invalidateSessionCache(agent);
-      await this.createSession(agent, command);
-    });
+    await this.replaceSession(agent, command, 'Restart');
   }
 
   async kill() {
@@ -1016,102 +1170,262 @@ class ClaudeTmuxView {
     );
   }
 
-  async prepareHandoff(source = this.activeAgent) {
+  prepareHandoff(source = this.activeAgent) {
     if (!AGENTS[source] || !this.agentState[source].present) return;
+    if (this.handoff) {
+      vscode.window.showInformationMessage('A handoff is already in progress.');
+      return;
+    }
     if (this.writerAgent && this.writerAgent !== source) {
       vscode.window.showInformationMessage(`Pair Mode writer is ${AGENTS[this.writerAgent].label}. Switch to that tab to hand off.`);
       return;
     }
-    if (this.agentState[source].status === 'working') {
-      vscode.window.showWarningMessage(`Wait for ${AGENTS[source].label} to finish or stop its turn before handing off.`);
-      return;
-    }
-
     const target = source === 'claude' ? 'codex' : 'claude';
+    const id = crypto.randomBytes(8).toString('hex');
+    this.handoff = {
+      id, source, target, phase: 'collecting', details: '', createdAt: Date.now(),
+      ackToken: crypto.randomBytes(12).toString('hex'),
+    };
+    this.postAgents();
+    if (this.view) this.view.webview.postMessage({ type: 'handoffDetails', id, source, target, details: '' });
+  }
+
+  updateHandoffDetails(message) {
+    const transaction = this.handoff;
+    const { id, details } = message;
+    if (!transaction || transaction.id !== id || transaction.phase !== 'collecting'
+      || typeof details !== 'string' || details.length > 4000) return;
+    transaction.details = details;
+  }
+
+  returnHandoffToDetails(transaction, error) {
+    if (this.handoff !== transaction) return;
+    transaction.phase = 'collecting';
+    this.postAgents();
+    if (this.view) this.view.webview.postMessage({
+      type: 'handoffCreateError', id: transaction.id, details: transaction.details || '', error,
+    });
+  }
+
+  async createHandoff(message) {
+    const transaction = this.handoff;
+    const details = typeof message.details === 'string' ? message.details : '';
+    if (!transaction || transaction.id !== message.id || transaction.phase !== 'collecting') return;
+    if (details.length > 4000) {
+      return this.returnHandoffToDetails(transaction, 'Optional details must be 4,000 characters or fewer.');
+    }
+    const beginMarker = `HANDOFF_BEGIN:${transaction.id}`;
+    const endMarker = `HANDOFF_END:${transaction.id}`;
+    if (details.includes(beginMarker) || details.includes(endMarker)) {
+      return this.returnHandoffToDetails(transaction, 'Remove transaction markers from the optional details.');
+    }
+    transaction.details = details;
+    transaction.phase = 'checking';
+    this.postAgents();
+    if (this.view) this.view.webview.postMessage({
+      type: 'handoffChecking', id: transaction.id, source: transaction.source, target: transaction.target,
+    });
+
+    const { source, target, id } = transaction;
+    if (!this.agentState[source].present || ['working', 'needs-input'].includes(this.agentState[source].status)) {
+      return this.returnHandoffToDetails(transaction, `${AGENTS[source].label} must be back at its prompt before creating the handoff.`);
+    }
     if (!this.agentState[target].present) {
       const choice = await vscode.window.showInformationMessage(
         `Start ${AGENTS[target].label} before preparing the handoff?`,
         { modal: true }, 'Start and continue'
       );
-      if (choice !== 'Start and continue') return;
+      if (this.handoff !== transaction) return;
+      if (choice !== 'Start and continue') {
+        return this.returnHandoffToDetails(transaction, `Start ${AGENTS[target].label} to create this handoff.`);
+      }
       await this.startSession(target);
-      if (!this.agentState[target].present) return;
+      if (this.handoff !== transaction) return;
+      if (!this.agentState[target].present) {
+        return this.returnHandoffToDetails(transaction, `${AGENTS[target].label} could not be started.`);
+      }
       this.switchAgent(source);
     }
     if (['working', 'needs-input'].includes(this.agentState[target].status)) {
-      vscode.window.showWarningMessage(`Make sure ${AGENTS[target].label} is back at its normal prompt before handing off.`);
+      return this.returnHandoffToDetails(transaction, `${AGENTS[target].label} must be back at its prompt before creating the handoff.`);
+    }
+
+    const cwd = normalizedPath(workspaceFolder());
+    const sourceName = this.cachedReadySession(source, cwd) || await sessionName(source);
+    transaction.phase = 'drafting';
+    this.postAgents();
+    const prompt = sourceHandoffPrompt(source, target, id, transaction.details);
+    let sourceReady = false;
+    const requested = await this.withInputSuspended(source, async () => {
+      const sourceInfo = await agentSessionInfo(source, sourceName);
+      if (this.handoff !== transaction) return false;
+      if (!sourceInfo.ready || ['working', 'needs-input'].includes(this.agentState[source].status)) {
+        this.invalidateSessionCache(source);
+        return false;
+      }
+      sourceReady = true;
+      this.rememberSession(source, cwd, sourceName, true);
+      if (this.view) this.view.webview.postMessage({ type: 'handoffPreparing', id, source, target });
+      return await this.sendInputData(source, prompt, cwd, true)
+        && await this.sendInputData(source, '\r', cwd, false);
+    }, true);
+    if (!sourceReady) {
+      return this.returnHandoffToDetails(transaction, `${AGENTS[source].label} must be running and back at its prompt before creating the handoff.`);
+    }
+    if (!requested) {
+      this.handoff = null;
+      this.postAgents();
+      if (this.view) this.view.webview.postMessage({ type: 'handoffDraftError', id, error: `Could not ask ${AGENTS[source].label} to prepare the handoff.` });
+      return;
+    }
+    this.agentState[source].lastActivity = Date.now();
+    this.setAgentStatus(source, 'working');
+    const authored = await this.waitForHandoffDraft(transaction, sourceName, 90000);
+    if (this.handoff !== transaction) return;
+    if (!authored) {
+      this.handoff = null;
+      this.postAgents();
+      if (this.view) this.view.webview.postMessage({ type: 'handoffDraftError', id, error: `${AGENTS[source].label} did not return a complete handoff block.` });
       return;
     }
 
-    const cwd = workspaceFolder();
-    const [status, diff, staged] = await Promise.all([
+    const [branch, head, status, diff, staged] = await Promise.all([
+      runFile('git', ['branch', '--show-current'], cwd),
+      runFile('git', ['rev-parse', '--short', 'HEAD'], cwd),
       runFile('git', ['status', '--short'], cwd),
       runFile('git', ['diff', '--stat'], cwd),
       runFile('git', ['diff', '--cached', '--stat'], cwd),
     ]);
-    const sourceName = await sessionName(source);
-    const captured = await tmux(['capture-pane', '-p', '-S', '-60', '-t', tmuxPaneTarget(sourceName)]);
-    const tail = stripAnsi(captured.out).split('\n').slice(-60).join('\n').trim().slice(-6000);
-    const context = [
-      `Handoff from ${AGENTS[source].label} to ${AGENTS[target].label}.`,
-      '',
-      'Before doing anything, recursively read and follow every Markdown instruction under .claude/.',
-      'Inspect the current working tree and preserve valid changes made by the other agent.',
-      '',
-      'Git status:',
-      status.ok && status.out.trim() ? status.out.trim() : '(clean or unavailable)',
-      '',
-      'Unstaged diff summary:',
-      diff.ok && diff.out.trim() ? diff.out.trim() : '(none)',
-      '',
-      'Staged diff summary:',
-      staged.ok && staged.out.trim() ? staged.out.trim() : '(none)',
-      '',
-      `Recent ${AGENTS[source].label} terminal context:`,
-      tail || '(no terminal context captured)',
-    ].join('\n');
-    const reviewOnly = [
-      context,
-      '',
-      'Review only: inspect the diff, run relevant read-only checks/tests, and report concrete findings. Do not modify files.',
-    ].join('\n');
-    const reviewFix = [
-      context,
-      '',
-      'Review & Fix: inspect the diff, run relevant tests, fix confirmed issues without undoing valid work, and verify the final result.',
-    ].join('\n');
+    transaction.phase = 'review';
+    transaction.authored = authored.slice(0, 12000);
+    transaction.repository = {
+      branch: branch.ok && branch.out.trim() ? branch.out.trim() : '(unavailable)',
+      head: head.ok && head.out.trim() ? head.out.trim() : '(unavailable)',
+      status: status.ok && status.out.trim() ? status.out.trim() : '(clean or unavailable)',
+      diff: diff.ok && diff.out.trim() ? diff.out.trim() : '(none)',
+      staged: staged.ok && staged.out.trim() ? staged.out.trim() : '(none)',
+    };
+    transaction.texts = {
+      continue: this.composeHandoffText(transaction, 'continue'),
+      reviewOnly: this.composeHandoffText(transaction, 'reviewOnly'),
+      reviewFix: this.composeHandoffText(transaction, 'reviewFix'),
+    };
+    this.setAgentStatus(source, 'done');
+    this.postAgents();
     if (this.view) {
-      this.view.webview.postMessage({ type: 'handoffDraft', source, target, reviewOnly, reviewFix });
+      this.view.webview.postMessage({
+        type: 'handoffDraft', id, source, target, sourceAuthored: true,
+        continue: transaction.texts.continue,
+        reviewOnly: transaction.texts.reviewOnly,
+        reviewFix: transaction.texts.reviewFix,
+      });
     }
   }
 
+  async waitForHandoffDraft(transaction, sourceName, timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline && this.handoff === transaction && transaction.phase === 'drafting') {
+      const captured = await tmux(['capture-pane', '-p', '-J', '-S', '-220', '-t', tmuxPaneTarget(sourceName)]);
+      if (captured.ok) {
+        const block = extractMarkedBlock(stripAnsi(captured.out), 'HANDOFF', transaction.id);
+        if (block) return block;
+      }
+      await delay(450);
+    }
+    return null;
+  }
+
+  composeHandoffText(transaction, mode) {
+    const repo = transaction.repository;
+    const details = String(transaction.details || '');
+    const ackMiddle = Math.floor(transaction.ackToken.length / 2);
+    const ackLeft = transaction.ackToken.slice(0, ackMiddle);
+    const ackRight = transaction.ackToken.slice(ackMiddle);
+    const modeInstruction = {
+      continue: 'Continue task: take ownership of the next action, preserve valid work, implement only what remains, and verify it.',
+      reviewOnly: 'Review only: inspect changes and run read-only checks, then report concrete findings. Do not modify files.',
+      reviewFix: 'Review & Fix: inspect changes, run relevant tests, fix confirmed issues without undoing valid work, and verify the result.',
+    }[mode];
+    return [
+      `Handoff from ${AGENTS[transaction.source].label} to ${AGENTS[transaction.target].label}.`,
+      `Transaction ID: ${transaction.id}`,
+      '',
+      `Briefing authored by ${AGENTS[transaction.source].label} specifically for ${AGENTS[transaction.target].label}:`,
+      transaction.authored,
+      ...(details.trim() ? [
+        '',
+        'Additional details supplied by the user before generation:',
+        details,
+      ] : []),
+      '',
+      'Repository facts added by AgentMux:',
+      `Branch / HEAD: ${repo.branch} / ${repo.head}`,
+      'Git status:', repo.status,
+      'Unstaged diff summary:', repo.diff,
+      'Staged diff summary:', repo.staged,
+      '',
+      'Before doing any work, recursively read and follow every Markdown instruction under .claude/.',
+      modeInstruction,
+      '',
+      `Acknowledgement token halves: ${ackLeft} and ${ackRight}.`,
+      'In your first response, output one line made from the prefix HANDOFF_ACK, a colon, then the two token halves joined with no separator. Do not reproduce an example marker. Then continue with the requested mode.',
+    ].join('\n');
+  }
+
   async confirmHandoff(message) {
-    const { source, target, text, mode } = message;
-    if (!AGENTS[source] || !AGENTS[target] || source === target || typeof text !== 'string') {
-      return this.postHandoffResult(false, 'Invalid handoff request.');
+    const { id, source, target, text, mode } = message;
+    const transaction = this.handoff;
+    if (!transaction || transaction.phase !== 'review' || transaction.id !== id
+      || transaction.source !== source || transaction.target !== target
+      || !['continue', 'reviewOnly', 'reviewFix'].includes(mode) || typeof text !== 'string') {
+      return this.postHandoffResult(false, 'Invalid handoff request. Prepare a fresh handoff and try again.');
     }
     if (!text.trim() || text.length > 30000) {
       return this.postHandoffResult(false, 'Handoff text must contain 1–30,000 characters.');
     }
-    if (this.agentState[source].status === 'working' || ['working', 'needs-input'].includes(this.agentState[target].status)) {
-      return this.postHandoffResult(false, 'An agent is not ready for handoff. Wait for work to finish and clear any target prompt, then send again.');
+    const ackMarker = `HANDOFF_ACK:${transaction.ackToken}`;
+    if (text.split(/\r?\n/).some((line) => line.trim() === ackMarker)) {
+      return this.postHandoffResult(false, 'Remove the acknowledgement marker from the handoff text and try again.');
     }
-    const targetName = await sessionName(target);
-    const targetInfo = await agentSessionInfo(target, targetName);
-    if (!targetInfo.ready) {
+    if (['working', 'needs-input'].includes(this.agentState[source].status)
+      || ['working', 'needs-input'].includes(this.agentState[target].status)) {
+      return this.postHandoffResult(false, 'An agent is no longer ready. Return both agents to their prompts, then send again.');
+    }
+    transaction.phase = 'delivering';
+    transaction.mode = mode;
+    transaction.text = text;
+    transaction.texts[mode] = text;
+    transaction.previewMode = mode;
+    this.postAgents();
+    const cwd = normalizedPath(workspaceFolder());
+    const targetName = this.cachedReadySession(target, cwd) || await sessionName(target);
+    let targetInfo = null;
+    const sent = await this.withInputSuspended(target, async () => {
+      targetInfo = await agentSessionInfo(target, targetName);
+      if (!targetInfo.ready) {
+        this.invalidateSessionCache(target);
+        return false;
+      }
+      this.rememberSession(target, cwd, targetName, true);
+      return await this.sendInputData(target, text, cwd, true)
+        && await this.sendInputData(target, '\r', cwd, false);
+    }, true);
+    if (!targetInfo?.ready) {
+      transaction.phase = 'review';
+      this.postAgents();
       this.pollPresence(true);
       return this.postHandoffResult(false, `${AGENTS[target].label} is no longer running in this workspace tmux.`);
     }
-    const sent = await this.withInputSuspended(target, async () => {
-      const cwd = normalizedPath(workspaceFolder());
-      return await this.sendInputData(target, text, cwd, true)
-        && await this.sendInputData(target, '\r', cwd, false);
-    });
     if (!sent) {
+      transaction.phase = 'review';
+      this.postAgents();
       return this.postHandoffResult(false, `The handoff could not be delivered to ${AGENTS[target].label}. Your edited text is still available.`);
     }
-    this.writerAgent = target;
-    this.context.workspaceState.update('claudeTmux.pairWriter', target);
+    transaction.phase = 'awaitingAck';
+    transaction.targetName = targetName;
+    transaction.targetCreated = targetInfo.created;
+    transaction.targetGeneration = targetInfo.generation;
+    transaction.sentAt = Date.now();
     this.activeAgent = target;
     this.context.workspaceState.update('claudeTmux.activeAgent', target);
     const state = this.agentState[target];
@@ -1120,10 +1434,136 @@ class ClaudeTmuxView {
     this.postActiveAgent();
     this.postAgents();
     this.setSize(this.cols, this.rows);
+    if (this.view) this.view.webview.postMessage({ type: 'handoffAwaitingAck', id, target });
+    this.waitForHandoffAck(transaction, 30000);
+  }
+
+  async waitForHandoffAck(transaction, timeoutMs) {
+    const marker = `HANDOFF_ACK:${transaction.ackToken}`;
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline && this.handoff === transaction && transaction.phase === 'awaitingAck') {
+      const captured = await tmux(['capture-pane', '-p', '-J', '-S', '-160', '-t', tmuxPaneTarget(transaction.targetName)]);
+      const acknowledged = captured.ok && stripAnsi(captured.out).split('\n').some((line) => line.trim() === marker);
+      if (acknowledged) {
+        const info = await agentSessionInfo(transaction.target, transaction.targetName);
+        if (info.ready && info.created === transaction.targetCreated
+          && info.generation === transaction.targetGeneration) return this.completeHandoff(transaction, false);
+        if (this.handoff === transaction) {
+          this.handoff = null;
+          this.postAgents();
+          if (this.view) this.view.webview.postMessage({
+            type: 'handoffManualError', id: transaction.id, stale: true,
+            error: `${AGENTS[transaction.target].label}'s tmux session changed. Prepare a fresh handoff.`,
+          });
+        }
+        return;
+      }
+      await delay(450);
+    }
+    if (this.handoff === transaction && transaction.phase === 'awaitingAck') {
+      transaction.phase = 'ackTimeout';
+      this.postAgents();
+      if (this.view) this.view.webview.postMessage({ type: 'handoffAckTimeout', id: transaction.id, target: transaction.target });
+    }
+  }
+
+  async acceptHandoff(id) {
+    const transaction = this.handoff;
+    if (!transaction || transaction.id !== id || transaction.phase !== 'ackTimeout') return;
+    const cwd = normalizedPath(workspaceFolder());
+    const targetName = transaction.targetName || this.cachedReadySession(transaction.target, cwd) || await sessionName(transaction.target);
+    const info = await agentSessionInfo(transaction.target, targetName);
+    if (this.handoff !== transaction || transaction.phase !== 'ackTimeout') return;
+    if (!info.ready) {
+      if (this.view) this.view.webview.postMessage({
+        type: 'handoffManualError', id,
+        error: `${AGENTS[transaction.target].label} is no longer running in this workspace.`,
+      });
+      return;
+    }
+    if (info.created !== transaction.targetCreated || info.generation !== transaction.targetGeneration) {
+      this.handoff = null;
+      this.postAgents();
+      if (this.view) this.view.webview.postMessage({
+        type: 'handoffManualError', id, stale: true,
+        error: `${AGENTS[transaction.target].label}'s tmux session changed. Prepare a fresh handoff.`,
+      });
+      return;
+    }
+    this.completeHandoff(transaction, true);
+  }
+
+  completeHandoff(transaction, manual) {
+    if (this.handoff !== transaction || !['awaitingAck', 'ackTimeout'].includes(transaction.phase)) return;
+    this.writerAgent = transaction.target;
+    this.context.workspaceState.update('claudeTmux.pairWriter', transaction.target);
+    this.handoff = null;
+    this.postAgents();
     this.postHandoffResult(true);
     vscode.window.showInformationMessage(
-      `Pair Mode: ${AGENTS[target].label} owns the workspace (${mode === 'reviewOnly' ? 'review only' : 'review & fix'}).`
+      `AgentMux: ${AGENTS[transaction.target].label} accepted the handoff${manual ? ' (manually confirmed)' : ''}.`
     );
+  }
+
+  cancelHandoff(id) {
+    if (!this.handoff || (id && this.handoff.id !== id)) return;
+    if (!['collecting', 'checking', 'drafting', 'review'].includes(this.handoff.phase)) return;
+    this.handoff = null;
+    this.postAgents();
+    if (this.view) this.view.webview.postMessage({ type: 'handoffCancelled' });
+  }
+
+  updateHandoffDraft(message) {
+    const transaction = this.handoff;
+    const { id, mode, text } = message;
+    if (!transaction || transaction.id !== id || transaction.phase !== 'review'
+      || !['continue', 'reviewOnly', 'reviewFix'].includes(mode)
+      || typeof text !== 'string' || text.length > 30000) return;
+    transaction.texts[mode] = text;
+    transaction.previewMode = mode;
+  }
+
+  postHandoffState() {
+    if (!this.view || !this.handoff) return;
+    const transaction = this.handoff;
+    if (transaction.phase === 'collecting') {
+      this.view.webview.postMessage({
+        type: 'handoffDetails', id: transaction.id,
+        source: transaction.source, target: transaction.target,
+        details: transaction.details || '',
+      });
+      return;
+    }
+    if (transaction.phase === 'checking') {
+      this.view.webview.postMessage({
+        type: 'handoffChecking', id: transaction.id,
+        source: transaction.source, target: transaction.target,
+      });
+      return;
+    }
+    if (transaction.phase === 'drafting') {
+      this.view.webview.postMessage({
+        type: 'handoffPreparing', id: transaction.id,
+        source: transaction.source, target: transaction.target,
+      });
+      return;
+    }
+    if (!transaction.texts) return;
+    this.view.webview.postMessage({
+      type: 'handoffDraft', id: transaction.id,
+      source: transaction.source, target: transaction.target,
+      sourceAuthored: true, mode: transaction.mode || transaction.previewMode || 'continue',
+      continue: transaction.texts.continue,
+      reviewOnly: transaction.texts.reviewOnly,
+      reviewFix: transaction.texts.reviewFix,
+    });
+    if (transaction.phase === 'delivering') {
+      this.view.webview.postMessage({ type: 'handoffDelivering', id: transaction.id });
+    } else if (transaction.phase === 'awaitingAck') {
+      this.view.webview.postMessage({ type: 'handoffAwaitingAck', id: transaction.id, target: transaction.target });
+    } else if (transaction.phase === 'ackTimeout') {
+      this.view.webview.postMessage({ type: 'handoffAckTimeout', id: transaction.id, target: transaction.target });
+    }
   }
 
   postHandoffResult(ok, error = '') {
@@ -1131,6 +1571,10 @@ class ClaudeTmuxView {
   }
 
   cancelPairMode() {
+    if (this.handoff) {
+      vscode.window.showInformationMessage('Finish or cancel the current handoff first.');
+      return;
+    }
     this.writerAgent = null;
     this.context.workspaceState.update('claudeTmux.pairWriter', undefined);
     this.postAgents();
@@ -1171,23 +1615,23 @@ class ClaudeTmuxView {
 <body>
   <div id="app" data-cursor="${cursorStyle}">
     <div id="agent-tabs" role="tablist" aria-label="Tmux agent">
-      <button id="tab-claude" class="agent-tab hidden" role="tab" data-agent="claude" aria-selected="false">
+      <button id="tab-claude" class="agent-tab hidden" role="tab" data-agent="claude" aria-selected="false" aria-controls="screen">
         <span class="agent-label">Claude</span><span class="writer-mark" aria-hidden="true">◆</span><span class="agent-state" aria-hidden="true"></span>
       </button>
-      <button id="tab-codex" class="agent-tab hidden" role="tab" data-agent="codex" aria-selected="false">
+      <button id="tab-codex" class="agent-tab hidden" role="tab" data-agent="codex" aria-selected="false" aria-controls="screen">
         <span class="agent-label">Codex</span><span class="writer-mark" aria-hidden="true">◆</span><span class="agent-state" aria-hidden="true"></span>
       </button>
-      <button id="tab-add" class="tab-add" type="button" aria-label="Start or resume an agent" title="Start or resume an agent">＋</button>
-      <div id="agent-launch-menu" class="launch-menu hidden">
-        <button data-action="start" data-agent="claude">Start Claude</button>
-        <button data-action="attach" data-agent="claude">Resume Claude…</button>
-        <button data-action="start" data-agent="codex">Start Codex</button>
-        <button data-action="attach" data-agent="codex">Resume Codex…</button>
+      <button id="tab-add" class="tab-add" type="button" aria-label="Start or resume an agent" title="Start or resume an agent" aria-expanded="false" aria-controls="agent-launch-menu">＋</button>
+      <div id="agent-launch-menu" class="launch-menu hidden" role="menu">
+        <button role="menuitem" data-action="start" data-agent="claude">Start Claude</button>
+        <button role="menuitem" data-action="attach" data-agent="claude">Resume Claude…</button>
+        <button role="menuitem" data-action="start" data-agent="codex">Start Codex</button>
+        <button role="menuitem" data-action="attach" data-agent="codex">Resume Codex…</button>
       </div>
     </div>
     <div id="screen-wrap">
       <div id="terminal">
-        <div id="screen" tabindex="0" aria-label="Tmux terminal mirror"></div>
+        <div id="screen" tabindex="0" role="tabpanel" aria-label="Tmux terminal mirror"></div>
         <div id="cursor"></div>
       </div>
       <div id="hint">click to type</div>
@@ -1222,19 +1666,21 @@ class ClaudeTmuxView {
         <button id="btn-pair" class="footer-action" title="Hand off to the other agent" aria-label="Hand off to the other agent">⇄</button>
         <button id="btn-unlock" class="footer-action hidden" title="Release Pair Mode lock" aria-label="Release Pair Mode lock">◇</button>
         <span id="status-meta"></span>
-        <span id="status-state"><span class="dot" id="status-dot"></span><span id="status-label">connecting…</span></span>
+        <span id="status-state" role="status" aria-live="polite"><span class="dot" id="status-dot"></span><span id="status-label">connecting…</span></span>
       </span>
     </div>
 
     <div id="handoff-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="handoff-title">
       <div class="modal-card">
-        <div class="modal-title" id="handoff-title">Pair Mode handoff</div>
-        <label for="handoff-mode">Mode</label>
+        <div class="modal-title" id="handoff-title">AgentMux handoff</div>
+        <div class="modal-meta" id="handoff-meta"></div>
+        <label id="handoff-mode-label" for="handoff-mode">Mode</label>
         <select id="handoff-mode">
+          <option value="continue">Continue task</option>
           <option value="reviewFix">Review &amp; Fix</option>
           <option value="reviewOnly">Review only</option>
         </select>
-        <label for="handoff-text">Message — fully editable before sending</label>
+        <label id="handoff-text-label" for="handoff-text">Message — fully editable before sending</label>
         <textarea id="handoff-text" spellcheck="false"></textarea>
         <div id="handoff-error" class="modal-error hidden" role="alert"></div>
         <div class="modal-actions">
@@ -1267,16 +1713,22 @@ function activate(context) {
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('claudeTmux.refreshMs')) provider.startLoop();
       if (e.affectsConfiguration('claudeTmux')) {
+        provider.invalidateSessionCache();
         for (const state of Object.values(provider.agentState)) state.lastFrame = null;
         provider.tick(true);
       }
     }),
     vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      if (provider.handoff && provider.view) {
+        provider.view.webview.postMessage({ type: 'handoffCancelled' });
+      }
       for (const agent of Object.keys(AGENTS)) provider.agentState[agent] = provider.newAgentState();
       provider.resetInputQueues();
       provider.invalidateSessionCache();
       provider.writerAgent = null;
+      provider.handoff = null;
       provider.context.workspaceState.update('claudeTmux.pairWriter', undefined);
+      provider.postAgents();
       provider.pollPresence(true);
       provider.tick(true);
     }),

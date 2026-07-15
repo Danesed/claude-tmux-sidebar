@@ -1,15 +1,13 @@
-- [x] Aggiungere `codexFullAccess=true`: avvio/ripresa Codex con `--dangerously-bypass-approvals-and-sandbox`, senza duplicare flag espliciti.
-- [x] Correggere il lag: input per-agent raggruppato e serializzato, target fissato al keydown, refresh non forzato dopo il flush.
-- [x] Separare frame live e history: pane corrente nel polling, scrollback completo solo su richiesta e ritorno al live quando si torna in fondo.
-- [x] Rendere il DOM incrementale per riga, preservando selezione, scroll e ordine input.
-- [x] Rilevare ogni secondo la presenza delle due sessioni workspace-scoped senza catturare history.
-- [x] Mostrare solo le tab con TUI workspace esistente; aggiungere launcher e `+`; switch automatico se la sessione attiva termina.
-- [x] Impostare `autoResume=false` di default per non creare una tab Claude senza scelta esplicita.
-- [x] Aggiungere stato euristico per agente: `working`, breve `done`, `needs-input`, `idle`; indicatore discreto accessibile e `prefers-reduced-motion`.
-- [x] Aggiungere `codexReadClaudeRules=true`: developer instruction non mutante che impone a Codex di leggere ricorsivamente `.claude/**/*.md` prima di lavorare e ignorare gli altri file.
-- [x] Implementare Pair Mode sequenziale: un writer, handoff esplicito con testo completamente modificabile, modalità Review only / Review & Fix e nessuna modifica concorrente automatica.
-- [x] Chiudere audit finale: snapshot history senza race, coda legata alla workspace, operazioni sessione serializzate e history non ricatturata continuamente.
-- [x] Chiudere audit Pair Mode: verificare TUI agente prima di mostrare/inviare, vietare handoff con agente working, preservare draft per modalità e attendere ACK prima di trasferire ownership.
-- [x] Gestire no-workspace, rilevare il conflitto `developer_instructions` in `codexArgs` e documentare la sostituzione dell'eventuale valore globale.
-- [x] Verificare automaticamente burst 200 caratteri, paste UTF-8 grande, target/workspace, history lazy, stati, Full Access, regole `.claude` e handoff success/failure.
-- [x] Aggiornare manifest/versione, README, guida, changelog, testing e produrre una nuova VSIX verificata.
+- [x] Separare il click iniziale dalla generazione: aprire un modal locale senza contattare alcun agente.
+  - Verifica: click su Handoff non produce `send-keys`, paste-buffer o cambio ownership.
+- [x] Aggiungere un campo opzionale per i dettagli dell'utente e azioni `Cancel` / `Create handoff`.
+  - Verifica: campo vuoto consentito; testo, focus ed Escape funzionano senza interferire col terminale.
+- [x] Passare i dettagli confermati al prompt source-authored e avviare solo allora la transazione A→B.
+  - Verifica: A riceve i dettagli esatti e prepara un briefing specifico per B; ID stale restano ignorati.
+- [x] Conservare la seconda fase di revisione completa prima della consegna a B.
+  - Verifica: il draft generato è ancora modificabile; solo `Send handoff` lo invia al destinatario.
+- [x] Coprire apertura, annullamento, dettagli vuoti/compilati, reload webview e assenza di invii prematuri.
+- [x] Arricchire il footer senza nuove chiamate: history disponibile, client tmux collegati e lag solo quando significativo.
+  - Verifica: i dati provengono dallo snapshot meta esistente; nessun processo aggiuntivo nel refresh live.
+- [x] Rinominare il prodotto pubblico in AgentMux mantenendo ID interno e namespace delle impostazioni.
+- [x] Aggiornare documentazione, stato, versione e VSIX dopo test e revisione finale.

@@ -1,4 +1,6 @@
-# Claude & Codex Tmux Sidebar
+# AgentMux
+
+**Two agents. One terminal flow.**
 
 Run **Claude Code** and **OpenAI Codex CLI** in persistent tmux sessions, switch
 between them instantly, and hand work from one agent to the other from a single
@@ -21,15 +23,15 @@ It mirrors the selected tmux pane instead of opening another VS Code terminal:
 
 - `tmux capture-pane` reads the live screen; bounded scrollback is loaded only
   when you scroll up;
-- batched `tmux send-keys` forwards keyboard and paste input without spawning a
-  process for every character;
+- one ordered input pump merges pending keystrokes under backpressure, while
+  bracketed paste preserves large UTF-8 input;
 - a **Claude** or **Codex** tab appears only while that workspace's matching
   tmux session exists;
 - the `+` menu starts or resumes an absent agent;
 - mouse wheel, scrollbar and `Shift+PageUp` / `Shift+PageDown` navigate history;
 - when tmux has no captured history, the wheel forwards page navigation to the agent TUI;
 - new output follows automatically only while you are at the bottom;
-- each tab remembers its own scroll position while switching.
+- switching tabs returns immediately to each agent's cached live frame.
 
 ## Requirements
 
@@ -55,7 +57,7 @@ From this repository:
 ```bash
 npm run check
 npm run package
-code --install-extension claude-tmux-sidebar-0.7.0.vsix --force
+code --install-extension claude-tmux-sidebar-0.9.0.vsix --force
 ```
 
 Alternatively use VS Code: **Extensions → … → Install from VSIX…**, select the
@@ -64,13 +66,13 @@ generated file, then run **Developer: Reload Window**.
 For Remote-SSH, install the VSIX in the remote extension host from the connected
 window. `tmux`, `claude` and `codex` must be available on that same remote host.
 
-The **Tmux Agents** icon appears in the Activity Bar. You can drag its
-**Claude / Codex** view to the Secondary Side Bar; VS Code remembers the layout.
+The **AgentMux** icon appears in the Activity Bar. You can drag its view to the
+Secondary Side Bar; VS Code remembers the layout.
 
 ## Daily workflow
 
 1. Open a project folder in VS Code.
-2. Open **Tmux Agents**. If no agent is running, choose Claude or Codex from the
+2. Open **AgentMux**. If no agent is running, choose Claude or Codex from the
    central launcher. Use `+` later to add the other agent.
 3. Start or resume:
    - Claude shows conversations read only from this folder's Claude project data;
@@ -96,15 +98,23 @@ Pair Mode coordinates the agents sequentially and refuses a handoff while
 either side is detected as working:
 
 1. Select the agent that currently owns the work and press `⇄`.
-2. If the other agent has no workspace tmux, the extension offers to start it.
-3. The extension prepares a handoff containing git status, staged/unstaged diff
-   summaries and recent source-terminal context.
-4. Choose **Review only** or **Review & Fix**, then freely edit the complete
-   message before sending it.
-5. The editor remains open until delivery is acknowledged. On success, the
-   target becomes the Pair Mode writer. The other tab remains
+2. Add optional details for the other agent. Nothing is sent until you press
+   **Create handoff**.
+3. If the other agent has no workspace tmux, the extension offers to start it.
+4. AgentMux asks the source agent to author a standalone briefing specifically
+   for the target: objective, completed work, files, decisions, tests, risks and
+   the recommended next action.
+5. Fresh Git facts are added separately. Choose **Continue task**, **Review
+   only** or **Review & Fix**, then freely edit the complete message.
+6. Only **Send handoff** delivers the reviewed message. The target then emits a transaction acknowledgement. On success,
+   it becomes the Pair Mode writer. If the best-effort acknowledgement is not
+   observed, AgentMux offers manual acceptance without resending. The other tab remains
    visible and scrollable, but its input is locked in this extension.
-6. Hand back with `⇄`, or release the lock with `◇`.
+7. Hand back with `⇄`, or release the lock with `◇`.
+
+The compact footer shows pane size, session uptime and agent state. It also
+shows available history, attached tmux clients and capture lag when that lag is
+high enough to matter; these values reuse the existing live snapshot.
 
 The lock coordinates input sent through this side bar; it cannot stop a turn
 that was launched outside the extension or prevent a user/process attached to
@@ -138,7 +148,7 @@ settings.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `claudeTmux.refreshMs` | `250` | Mirror refresh interval in milliseconds. |
+| `claudeTmux.refreshMs` | `120` | Mirror refresh interval in milliseconds. |
 | `claudeTmux.claudeArgs` | `--dangerously-skip-permissions --ide` | Arguments used for Claude start/resume. |
 | `claudeTmux.codexArgs` | `--no-alt-screen` | Arguments used for Codex start/resume; the default preserves scrollback. |
 | `claudeTmux.codexFullAccess` | `true` | Add Codex's approval/sandbox bypass flag. Disable for untrusted repositories. |
@@ -161,8 +171,8 @@ settings.
 - This is a polled terminal mirror, not a full PTY. Mouse input is not forwarded.
 - Scrollback is bounded by `claudeTmux.scrollbackLines` and tmux's own history.
 - Multi-line paste is sent raw and a newline may submit input.
-- Pair Mode transfers a context snapshot at handoff time; it is intentionally
-  sequential and does not run autonomous cross-agent orchestration.
+- Pair Mode transfers a source-authored, target-specific snapshot and uses a
+  best-effort terminal acknowledgement; it remains sequential and user-reviewed.
 - A tab disappears when the agent TUI exits even if its tmux shell remains; the
   launcher can start the agent again in that workspace session.
 

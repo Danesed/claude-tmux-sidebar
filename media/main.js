@@ -16,11 +16,15 @@
   const btnPair = document.getElementById('btn-pair');
   const btnUnlock = document.getElementById('btn-unlock');
   const handoffModal = document.getElementById('handoff-modal');
+  const handoffTitle = document.getElementById('handoff-title');
   const handoffMode = document.getElementById('handoff-mode');
+  const handoffModeLabel = document.getElementById('handoff-mode-label');
   const handoffText = document.getElementById('handoff-text');
+  const handoffTextLabel = document.getElementById('handoff-text-label');
   const handoffSend = document.getElementById('handoff-send');
   const handoffCancel = document.getElementById('handoff-cancel');
   const handoffError = document.getElementById('handoff-error');
+  const handoffMeta = document.getElementById('handoff-meta');
   const statusName = document.getElementById('status-name');
   const statusMeta = document.getElementById('status-meta');
   const statusDot = document.getElementById('status-dot');
@@ -30,8 +34,9 @@
   const cursorStyle = (app && app.dataset.cursor) || 'block';
   let activeAgent = 'claude';
   let writerAgent = null;
+  let handoffPhase = null;
   let handoffDraft = null;
-  let handoffCurrentMode = 'reviewFix';
+  let handoffCurrentMode = 'continue';
   const agentPresence = {
     claude: { present: false, status: 'idle' },
     codex: { present: false, status: 'idle' },
@@ -39,6 +44,10 @@
   const scrollState = {
     claude: { top: 0, follow: true, historyMode: false, historyAvailable: 0, pendingHistory: false },
     codex: { top: 0, follow: true, historyMode: false, historyAvailable: 0, pendingHistory: false },
+  };
+  const frameCache = {
+    claude: { frame: null, meta: '', name: '', latencyMs: 0 },
+    codex: { frame: null, meta: '', name: '', latencyMs: 0 },
   };
   let renderedLineCount = 0;
   let programmaticScroll = false;
@@ -74,6 +83,23 @@
       lastCols = cols; lastRows = rows;
       vscode.postMessage({ type: 'resize', cols, rows });
     }
+  }
+  let resizeTimer = null;
+  let resizeFrame = null;
+  let resizeNeedsMeasure = false;
+  function scheduleReportSize(remeasure = false) {
+    resizeNeedsMeasure = resizeNeedsMeasure || remeasure;
+    if (resizeTimer !== null) clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      resizeTimer = null;
+      if (resizeFrame !== null) cancelAnimationFrame(resizeFrame);
+      resizeFrame = requestAnimationFrame(() => {
+        resizeFrame = null;
+        if (resizeNeedsMeasure) measure();
+        resizeNeedsMeasure = false;
+        reportSize();
+      });
+    }, 80);
   }
 
   // ---- ANSI colour palette (themed where possible) -------------------------
@@ -278,16 +304,53 @@
   let lastSeen = 0;
   function setStatus(name, cls, label) {
     if (name) statusName.textContent = name;
-    statusDot.className = 'dot ' + cls;
-    statusLabel.textContent = label;
+    const dotClass = 'dot ' + cls;
+    if (statusDot.className !== dotClass) statusDot.className = dotClass;
+    if (statusLabel.textContent !== label) statusLabel.textContent = label;
+  }
+  function applyFrameMeta(meta, name, latencyMs = 0) {
+    const p = (meta || '').split(',');
+    placeCursor(parseInt(p[0], 10) || 0, parseInt(p[1], 10) || 0, parseInt(p[3], 10) || lastRows || 24);
+    const pw = p[2], ph = p[3], created = parseInt(p[4], 10) || 0;
+    const history = parseInt(p[5], 10) || 0;
+    const clients = parseInt(p[6], 10) || 0;
+    const up = created ? fmtUptime(Date.now() / 1000 - created) : '';
+    statusMeta.textContent = [
+      pw && ph ? `${pw}×${ph}` : '',
+      up ? `up ${up}` : '',
+      history ? `hist ${history}` : '',
+      clients ? `${clients} client${clients === 1 ? '' : 's'}` : '',
+      latencyMs >= 200 ? `lag ${Math.round(latencyMs)}ms` : '',
+    ].filter(Boolean).join(' · ');
+    statusMeta.title = statusMeta.textContent;
+    const agentStatus = agentPresence[activeAgent].status || 'idle';
+    setStatus(name, agentStatus, STATE_LABELS[agentStatus] || agentStatus);
   }
   // ---- input ---------------------------------------------------------------
+  const graphemeSegmenter = Intl.Segmenter
+    ? new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+    : null;
+  function isTextKey(key) {
+    if (!key || key === 'Dead' || key === 'Process' || key === 'Unidentified') return false;
+    if (key.length === 1) return true;
+    if (!graphemeSegmenter) return Array.from(key).length === 1;
+    const segments = [...graphemeSegmenter.segment(key)];
+    return segments.length === 1;
+  }
+
   function keyToBytes(e) {
     const k = e.key;
-    if (e.ctrlKey && !e.altKey && k.length === 1) {
+    const altGraph = e.getModifierState && e.getModifierState('AltGraph');
+    if (e.ctrlKey && !e.altKey && !altGraph && k.length === 1) {
       const lc = k.toLowerCase().charCodeAt(0);
       if (lc >= 97 && lc <= 122) return String.fromCharCode(lc - 96);
-      if (k === ' ') return '\x00';
+      if (k === ' ' || k === '@' || k === '`' || k === '2') return '\x00';
+      if (k === '[' || k === '3') return '\x1b';
+      if (k === '\\' || k === '4') return '\x1c';
+      if (k === ']' || k === '5') return '\x1d';
+      if (k === '^' || k === '6') return '\x1e';
+      if (k === '_' || k === '7') return '\x1f';
+      if (k === '?' || k === '8') return '\x7f';
     }
     switch (k) {
       case 'Enter': return '\r';
@@ -304,19 +367,28 @@
       case 'PageDown': return '\x1b[6~';
       case 'Delete': return '\x1b[3~';
     }
-    if (k.length === 1 && !e.ctrlKey && !e.metaKey) return k;
+    if (isTextKey(k) && !e.metaKey && (!e.ctrlKey || altGraph)) return k;
     return null;
   }
 
   const isMac = navigator.platform.startsWith('Mac');
+  let composing = false;
+  function isInputLocked() {
+    return ['drafting', 'delivering', 'awaitingAck', 'ackTimeout'].includes(handoffPhase)
+      || (!!writerAgent && activeAgent !== writerAgent);
+  }
   screen.addEventListener('keydown', (e) => {
-    // Leave copy/paste/select-all to VS Code (Cmd on mac, Ctrl elsewhere).
-    const mod = isMac ? e.metaKey : e.ctrlKey;
-    if (mod && ['c', 'v', 'a', 'x'].includes(e.key.toLowerCase())) return;
-    if (writerAgent && activeAgent !== writerAgent && !['PageUp', 'PageDown'].includes(e.key)) {
+    // Cmd stays a UI shortcut on macOS. On Windows/Linux, copy a selection with
+    // Ctrl+C and paste with Ctrl+V; otherwise Ctrl combinations reach tmux.
+    const key = e.key.toLowerCase();
+    if (isMac && e.metaKey && ['c', 'v', 'a', 'x'].includes(key)) return;
+    if (!isMac && e.ctrlKey && ((key === 'c' && hasSelection()) || key === 'v')) return;
+    if (!isMac && e.ctrlKey && e.shiftKey && ['c', 'v'].includes(key)) return;
+    if (isInputLocked() && !['PageUp', 'PageDown'].includes(e.key)) {
       e.preventDefault();
       return;
     }
+    if (composing || e.isComposing || e.key === 'Process' || e.keyCode === 229) return;
     if (e.shiftKey && (e.key === 'PageUp' || e.key === 'PageDown')) {
       e.preventDefault();
       if (e.key === 'PageUp' && wrap.scrollHeight <= wrap.clientHeight + charH && requestHistory()) return;
@@ -325,10 +397,22 @@
       return;
     }
     const bytes = keyToBytes(e);
-    if (bytes !== null) { e.preventDefault(); vscode.postMessage({ type: 'input', agent: activeAgent, data: bytes }); }
+    if (bytes !== null) {
+      e.preventDefault();
+      vscode.postMessage({
+        type: 'input', agent: activeAgent, data: bytes,
+        immediate: e.ctrlKey || !isTextKey(e.key),
+      });
+    }
+  });
+  screen.addEventListener('compositionstart', () => { composing = true; });
+  screen.addEventListener('compositionend', (e) => {
+    composing = false;
+    if (!e.data || isInputLocked()) return;
+    vscode.postMessage({ type: 'input', agent: activeAgent, data: e.data });
   });
   screen.addEventListener('paste', (e) => {
-    if (writerAgent && activeAgent !== writerAgent) { e.preventDefault(); return; }
+    if (isInputLocked()) { e.preventDefault(); return; }
     const text = (e.clipboardData || window.clipboardData).getData('text');
     if (text) { e.preventDefault(); vscode.postMessage({ type: 'paste', agent: activeAgent, data: text }); }
   });
@@ -338,7 +422,8 @@
 
   function setActiveAgent(agent) {
     if (!scrollState[agent]) return;
-    if (agent !== activeAgent) saveScroll();
+    const changed = agent !== activeAgent;
+    if (changed) saveScroll();
     activeAgent = agent;
     tabs.forEach((tab) => {
       const selected = tab.dataset.agent === agent;
@@ -347,13 +432,20 @@
       tab.tabIndex = selected ? 0 : -1;
     });
     screen.setAttribute('aria-label', `${agent === 'claude' ? 'Claude' : 'Codex'} tmux terminal mirror`);
+    screen.setAttribute('aria-labelledby', `tab-${agent}`);
     screen.replaceChildren();
     renderedLineCount = 0;
     cursorEl.style.visibility = 'hidden';
     overlay.classList.add('hidden');
     statusName.textContent = '';
     statusMeta.textContent = '';
-    setStatus('', 'idle', 'connecting…');
+    const cached = frameCache[agent];
+    if (cached.frame != null) {
+      render(cached.frame);
+      applyFrameMeta(cached.meta, cached.name, cached.latencyMs);
+    } else {
+      setStatus('', 'idle', 'connecting…');
+    }
     programmaticScroll = true;
     wrap.scrollTop = scrollState[agent].top;
     programmaticScroll = false;
@@ -361,7 +453,14 @@
   }
 
   tabs.forEach((tab) => {
-    tab.addEventListener('click', () => vscode.postMessage({ type: 'switchAgent', agent: tab.dataset.agent }));
+    tab.addEventListener('click', (e) => {
+      const agent = tab.dataset.agent;
+      if (e.detail > 0 && agent !== activeAgent) setActiveAgent(agent);
+      vscode.postMessage({ type: 'switchAgent', agent });
+      // Pointer users expect to type immediately. Keyboard-triggered clicks keep
+      // focus on the tab so the ARIA tablist arrow navigation remains intact.
+      if (e.detail > 0) screen.focus({ preventScroll: true });
+    });
     tab.addEventListener('keydown', (e) => {
       if (!['ArrowLeft', 'ArrowRight'].includes(e.key)) return;
       e.preventDefault();
@@ -374,15 +473,26 @@
     });
   });
 
-  tabAdd.addEventListener('click', () => launchMenu.classList.toggle('hidden'));
+  function setLaunchMenu(open, focusMenu = false) {
+    launchMenu.classList.toggle('hidden', !open);
+    tabAdd.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (open && focusMenu) launchMenu.querySelector('button:not(.hidden):not(:disabled)')?.focus();
+  }
+  tabAdd.addEventListener('click', () => setLaunchMenu(launchMenu.classList.contains('hidden'), true));
   launchMenu.addEventListener('click', (e) => {
     const button = e.target.closest('button[data-agent]');
     if (!button) return;
-    launchMenu.classList.add('hidden');
+    setLaunchMenu(false);
     vscode.postMessage({ type: button.dataset.action, agent: button.dataset.agent });
   });
   document.addEventListener('click', (e) => {
-    if (!launchMenu.contains(e.target) && e.target !== tabAdd) launchMenu.classList.add('hidden');
+    if (!launchMenu.contains(e.target) && e.target !== tabAdd) setLaunchMenu(false);
+  });
+  launchMenu.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    e.preventDefault();
+    setLaunchMenu(false);
+    tabAdd.focus();
   });
   launcherActions.addEventListener('click', (e) => {
     const button = e.target.closest('button[data-launch-agent]');
@@ -397,26 +507,33 @@
   };
 
   function applyPairLock() {
-    const locked = !!writerAgent && activeAgent !== writerAgent;
+    const transactionLocked = ['drafting', 'delivering', 'awaitingAck', 'ackTimeout'].includes(handoffPhase);
+    const locked = isInputLocked();
     screen.classList.toggle('input-locked', locked);
     screen.setAttribute('aria-readonly', locked ? 'true' : 'false');
-    document.getElementById('hint').textContent = locked
-      ? `Pair Mode · ${writerAgent === 'claude' ? 'Claude' : 'Codex'} is writer`
-      : 'click to type';
+    document.getElementById('hint').textContent = transactionLocked
+      ? 'handoff in progress'
+      : locked ? `Pair Mode · ${writerAgent === 'claude' ? 'Claude' : 'Codex'} is writer` : 'click to type';
     btnUnlock.classList.toggle('hidden', !writerAgent);
   }
 
   function renderAgents(message) {
     writerAgent = message.writerAgent || null;
+    handoffPhase = message.handoffPhase || null;
     for (const agent of ['claude', 'codex']) {
       Object.assign(agentPresence[agent], message.agents?.[agent] || { present: false, status: 'idle' });
       const tab = document.getElementById(`tab-${agent}`);
       const present = !!agentPresence[agent].present;
       const status = agentPresence[agent].status || 'idle';
+      const attention = agentPresence[agent].attention || null;
+      if (!present) frameCache[agent] = { frame: null, meta: '', name: '', latencyMs: 0 };
       tab.classList.toggle('hidden', !present);
       tab.classList.toggle('writer', writerAgent === agent);
       for (const name of ['working', 'done', 'needs-input', 'idle']) tab.classList.toggle(`state-${name}`, status === name);
-      const label = `${agent === 'claude' ? 'Claude' : 'Codex'}: ${STATE_LABELS[status] || status}${writerAgent === agent ? ', Pair Mode writer' : ''}`;
+      tab.classList.toggle('attention-done', attention === 'done');
+      tab.classList.toggle('attention-needs-input', attention === 'needs-input');
+      const attentionLabel = attention === 'done' ? ', new completion' : attention === 'needs-input' ? ', awaiting input' : '';
+      const label = `${agent === 'claude' ? 'Claude' : 'Codex'}: ${STATE_LABELS[status] || status}${attentionLabel}${writerAgent === agent ? ', Pair Mode writer' : ''}`;
       tab.title = label;
       tab.setAttribute('aria-label', label);
       for (const button of launchMenu.querySelectorAll(`button[data-agent="${agent}"]`)) {
@@ -428,7 +545,7 @@
     tabAdd.classList.toggle('hidden', !hasWorkspace || presentAgents.length === 2);
     for (const button of launcherActions.querySelectorAll('button')) button.disabled = !hasWorkspace;
     for (const button of launchMenu.querySelectorAll('button')) button.disabled = !hasWorkspace;
-    btnPair.disabled = !agentPresence[activeAgent].present;
+    btnPair.disabled = !agentPresence[activeAgent].present || !!handoffPhase;
     applyPairLock();
     if (!hasWorkspace) {
       screen.replaceChildren();
@@ -467,27 +584,58 @@
   btnPair.addEventListener('click', () => vscode.postMessage({ type: 'prepareHandoff', source: activeAgent }));
   btnUnlock.addEventListener('click', () => vscode.postMessage({ type: 'cancelPair' }));
   handoffMode.addEventListener('change', () => {
-    if (!handoffDraft) return;
+    if (!handoffDraft || handoffDraft.phase !== 'review') return;
     handoffDraft[handoffCurrentMode] = handoffText.value;
+    vscode.postMessage({ type: 'updateHandoffDraft', id: handoffDraft.id, mode: handoffCurrentMode, text: handoffText.value });
     handoffCurrentMode = handoffMode.value;
     handoffText.value = handoffDraft[handoffCurrentMode];
+    vscode.postMessage({ type: 'updateHandoffDraft', id: handoffDraft.id, mode: handoffCurrentMode, text: handoffText.value });
   });
   handoffText.addEventListener('input', () => {
-    if (handoffDraft) handoffDraft[handoffCurrentMode] = handoffText.value;
+    if (handoffDraft?.phase === 'collecting') {
+      handoffDraft.details = handoffText.value;
+      vscode.postMessage({ type: 'updateHandoffDetails', id: handoffDraft.id, details: handoffText.value });
+    } else if (handoffDraft?.phase === 'review') {
+      handoffDraft[handoffCurrentMode] = handoffText.value;
+      vscode.postMessage({ type: 'updateHandoffDraft', id: handoffDraft.id, mode: handoffCurrentMode, text: handoffText.value });
+    }
   });
   handoffCancel.addEventListener('click', () => {
+    if (handoffDraft?.id) vscode.postMessage({ type: 'cancelHandoff', id: handoffDraft.id });
     handoffModal.classList.add('hidden');
     handoffDraft = null;
     handoffError.classList.add('hidden');
+    screen.focus({ preventScroll: true });
   });
   handoffSend.addEventListener('click', () => {
     if (!handoffDraft) return;
+    if (handoffDraft.phase === 'collecting') {
+      handoffDraft.details = handoffText.value;
+      handoffDraft.phase = 'creating';
+      handoffText.readOnly = true;
+      handoffSend.disabled = true;
+      handoffSend.textContent = 'Creating…';
+      handoffError.classList.add('hidden');
+      vscode.postMessage({ type: 'createHandoff', id: handoffDraft.id, details: handoffText.value });
+      return;
+    }
+    if (handoffDraft.phase === 'ackTimeout') {
+      handoffSend.disabled = true;
+      handoffSend.textContent = 'Accepting…';
+      vscode.postMessage({ type: 'acceptHandoff', id: handoffDraft.id });
+      return;
+    }
+    if (handoffDraft.phase !== 'review') return;
     handoffDraft[handoffCurrentMode] = handoffText.value;
     handoffSend.disabled = true;
+    handoffCancel.disabled = true;
+    handoffMode.disabled = true;
+    handoffText.readOnly = true;
     handoffSend.textContent = 'Sending…';
     handoffError.classList.add('hidden');
     vscode.postMessage({
       type: 'confirmHandoff',
+      id: handoffDraft.id,
       source: handoffDraft.source,
       target: handoffDraft.target,
       mode: handoffMode.value,
@@ -495,6 +643,14 @@
     });
   });
   document.addEventListener('keydown', (e) => {
+    if (e.key === 'Tab' && !handoffModal.classList.contains('hidden')) {
+      const focusable = [...handoffModal.querySelectorAll('select, textarea, button')].filter((item) => !item.disabled);
+      if (!focusable.length) return;
+      const index = focusable.indexOf(document.activeElement);
+      if (e.shiftKey && index <= 0) { e.preventDefault(); focusable.at(-1).focus(); }
+      else if (!e.shiftKey && index === focusable.length - 1) { e.preventDefault(); focusable[0].focus(); }
+      return;
+    }
     if (e.key === 'Escape' && !handoffModal.classList.contains('hidden')) {
       e.preventDefault();
       handoffCancel.click();
@@ -545,30 +701,174 @@
   window.addEventListener('message', (event) => {
     const m = event.data;
     if (m.type === 'activeAgent') {
+      frameCache[m.agent] = {
+        frame: m.cachedFrame ?? null, meta: m.cachedMeta || '', name: m.cachedName || '', latencyMs: 0,
+      };
+      if (m.historyMode === false && scrollState[m.agent].historyMode) {
+        scrollState[m.agent].historyMode = false;
+        scrollState[m.agent].pendingHistory = false;
+        scrollState[m.agent].follow = true;
+      }
       setActiveAgent(m.agent);
     } else if (m.type === 'agents') {
       renderAgents(m);
+    } else if (m.type === 'handoffDetails') {
+      handoffDraft = {
+        id: m.id, source: m.source, target: m.target, phase: 'collecting', details: m.details || '',
+      };
+      handoffTitle.textContent = 'Create AgentMux handoff';
+      handoffMeta.textContent = `${m.source === 'claude' ? 'Claude' : 'Codex'} → ${m.target === 'claude' ? 'Claude' : 'Codex'} · optional context`;
+      handoffModeLabel.classList.add('hidden');
+      handoffMode.classList.add('hidden');
+      handoffTextLabel.textContent = 'Optional details to include in the handoff';
+      handoffText.value = handoffDraft.details;
+      handoffText.placeholder = 'What should the other agent know or prioritize?';
+      handoffText.maxLength = 4000;
+      handoffText.readOnly = false;
+      handoffSend.disabled = false;
+      handoffSend.textContent = 'Create handoff';
+      handoffCancel.disabled = false;
+      handoffError.classList.add('hidden');
+      handoffModal.classList.add('details-step');
+      handoffModal.classList.remove('hidden');
+      handoffText.focus();
+      handoffText.setSelectionRange(handoffText.value.length, handoffText.value.length);
+    } else if (m.type === 'handoffChecking') {
+      handoffDraft = { id: m.id, source: m.source, target: m.target, phase: 'checking' };
+      handoffTitle.textContent = 'Create AgentMux handoff';
+      handoffMeta.textContent = `${m.source === 'claude' ? 'Claude' : 'Codex'} → ${m.target === 'claude' ? 'Claude' : 'Codex'} · checking readiness`;
+      handoffModeLabel.classList.add('hidden');
+      handoffMode.classList.add('hidden');
+      handoffTextLabel.textContent = 'Agent readiness';
+      handoffText.value = 'Checking agents…';
+      handoffText.readOnly = true;
+      handoffMode.disabled = true;
+      handoffSend.disabled = true;
+      handoffSend.textContent = 'Checking…';
+      handoffCancel.disabled = false;
+      handoffError.classList.add('hidden');
+      handoffModal.classList.add('details-step');
+      handoffModal.classList.remove('hidden');
+      handoffCancel.focus();
+    } else if (m.type === 'handoffPreparing') {
+      handoffDraft = { id: m.id, source: m.source, target: m.target, phase: 'preparing' };
+      handoffTitle.textContent = 'Creating AgentMux handoff';
+      handoffMeta.textContent = `${m.source === 'claude' ? 'Claude' : 'Codex'} → ${m.target === 'claude' ? 'Claude' : 'Codex'} · source-authored context`;
+      handoffModeLabel.classList.add('hidden');
+      handoffMode.classList.add('hidden');
+      handoffTextLabel.textContent = 'Generated handoff';
+      handoffText.value = `${m.source === 'claude' ? 'Claude' : 'Codex'} is preparing a focused handoff…`;
+      handoffText.maxLength = 4000;
+      handoffText.readOnly = true;
+      handoffMode.disabled = true;
+      handoffSend.disabled = true;
+      handoffSend.textContent = 'Preparing…';
+      handoffCancel.disabled = false;
+      handoffError.classList.add('hidden');
+      handoffModal.classList.add('details-step');
+      handoffModal.classList.remove('hidden');
+      handoffCancel.focus();
     } else if (m.type === 'handoffDraft') {
       handoffDraft = {
+        id: m.id,
         source: m.source,
         target: m.target,
+        phase: 'review',
+        continue: m.continue,
         reviewOnly: m.reviewOnly,
         reviewFix: m.reviewFix,
       };
-      handoffMode.value = 'reviewFix';
-      handoffCurrentMode = 'reviewFix';
-      handoffText.value = m.reviewFix;
+      handoffTitle.textContent = 'Review AgentMux handoff';
+      handoffMeta.textContent = `${m.source === 'claude' ? 'Claude' : 'Codex'} → ${m.target === 'claude' ? 'Claude' : 'Codex'} · authored by source, Git facts added by AgentMux`;
+      handoffModeLabel.classList.remove('hidden');
+      handoffMode.classList.remove('hidden');
+      handoffTextLabel.textContent = 'Message — fully editable before sending';
+      handoffText.placeholder = '';
+      handoffText.maxLength = 30000;
+      handoffMode.value = m.mode || 'continue';
+      handoffCurrentMode = handoffMode.value;
+      handoffMode.disabled = false;
+      handoffText.readOnly = false;
+      handoffText.value = handoffDraft[handoffCurrentMode];
       handoffError.classList.add('hidden');
       handoffSend.disabled = false;
       handoffSend.textContent = 'Send handoff';
+      handoffCancel.disabled = false;
+      handoffModal.classList.remove('details-step');
       handoffModal.classList.remove('hidden');
       handoffText.focus();
       handoffText.setSelectionRange(0, 0);
     } else if (m.type === 'inputLocked') {
       applyPairLock();
     } else if (m.type === 'inputSuspended') {
-      document.getElementById('hint').textContent = 'session operation in progress';
+      document.getElementById('hint').textContent = m.reason === 'handoff' ? 'handoff in progress' : 'session operation in progress';
       setTimeout(applyPairLock, 1200);
+    } else if (m.type === 'inputError') {
+      document.getElementById('hint').textContent = m.pendingBytes ? 'input failed · later keys discarded' : 'input not delivered';
+      setStatus('', 'dead', 'input failed');
+      setTimeout(applyPairLock, 2500);
+    } else if (m.type === 'handoffCreateError') {
+      if (!handoffDraft || handoffDraft.id !== m.id) return;
+      handoffDraft.phase = 'collecting';
+      handoffDraft.details = m.details || '';
+      handoffTitle.textContent = 'Create AgentMux handoff';
+      handoffModeLabel.classList.add('hidden');
+      handoffMode.classList.add('hidden');
+      handoffTextLabel.textContent = 'Optional details to include in the handoff';
+      handoffText.value = handoffDraft.details;
+      handoffText.placeholder = 'What should the other agent know or prioritize?';
+      handoffText.maxLength = 4000;
+      handoffText.readOnly = false;
+      handoffSend.disabled = false;
+      handoffSend.textContent = 'Create handoff';
+      handoffCancel.disabled = false;
+      handoffError.textContent = m.error || 'The handoff cannot be created yet.';
+      handoffError.classList.remove('hidden');
+      handoffModal.classList.add('details-step');
+      handoffText.focus();
+    } else if (m.type === 'handoffDraftError') {
+      if (!handoffDraft || handoffDraft.id !== m.id) return;
+      handoffDraft.phase = 'failed';
+      handoffError.textContent = m.error || 'The source agent could not prepare the handoff.';
+      handoffError.classList.remove('hidden');
+      handoffSend.disabled = true;
+      handoffSend.textContent = 'Unavailable';
+    } else if (m.type === 'handoffAwaitingAck') {
+      if (!handoffDraft || handoffDraft.id !== m.id) return;
+      handoffDraft.phase = 'awaitingAck';
+      handoffText.readOnly = true;
+      handoffMode.disabled = true;
+      handoffSend.disabled = true;
+      handoffSend.textContent = 'Waiting for ACK…';
+      handoffCancel.disabled = true;
+      handoffError.classList.add('hidden');
+    } else if (m.type === 'handoffDelivering') {
+      if (!handoffDraft || handoffDraft.id !== m.id) return;
+      handoffDraft.phase = 'delivering';
+      handoffText.readOnly = true;
+      handoffMode.disabled = true;
+      handoffCancel.disabled = true;
+      handoffSend.disabled = true;
+      handoffSend.textContent = 'Sending…';
+    } else if (m.type === 'handoffAckTimeout') {
+      if (!handoffDraft || handoffDraft.id !== m.id) return;
+      handoffDraft.phase = 'ackTimeout';
+      handoffSend.disabled = false;
+      handoffSend.textContent = 'Accept manually';
+      handoffCancel.disabled = true;
+      handoffError.textContent = 'Delivered, but acknowledgement was not observed. Do not resend automatically.';
+      handoffError.classList.remove('hidden');
+    } else if (m.type === 'handoffManualError') {
+      if (!handoffDraft || handoffDraft.id !== m.id) return;
+      handoffSend.disabled = !!m.stale;
+      handoffSend.textContent = m.stale ? 'Prepare again' : 'Accept manually';
+      handoffCancel.disabled = !m.stale;
+      handoffError.textContent = m.error || 'The target is no longer available.';
+      handoffError.classList.remove('hidden');
+    } else if (m.type === 'handoffCancelled') {
+      handoffModal.classList.add('hidden');
+      handoffDraft = null;
+      screen.focus({ preventScroll: true });
     } else if (m.type === 'handoffResult') {
       handoffSend.disabled = false;
       handoffSend.textContent = 'Send handoff';
@@ -576,7 +876,14 @@
         handoffModal.classList.add('hidden');
         handoffDraft = null;
         handoffError.classList.add('hidden');
+        handoffMode.disabled = false;
+        handoffText.readOnly = false;
+        handoffCancel.disabled = false;
+        screen.focus({ preventScroll: true });
       } else {
+        handoffCancel.disabled = false;
+        handoffMode.disabled = false;
+        handoffText.readOnly = false;
         handoffError.textContent = m.error || 'Handoff failed.';
         handoffError.classList.remove('hidden');
         handoffText.focus();
@@ -589,18 +896,17 @@
       state.historyMode = !!m.historyMode;
       state.historyAvailable = parseInt(m.historyAvailable, 10) || 0;
       if (m.frame != null) {
+        frameCache[m.agent].frame = m.frame;
         if (hasSelection()) pendingFrame = { agent: m.agent, frame: m.frame }; // don't clobber a copy in progress
         else { render(m.frame); pendingFrame = null; }
       }
-      const p = (m.meta || '').split(',');
-      placeCursor(parseInt(p[0], 10) || 0, parseInt(p[1], 10) || 0, parseInt(p[3], 10) || lastRows || 24);
-      const pw = p[2], ph = p[3], created = parseInt(p[4], 10) || 0;
-      const up = created ? fmtUptime(Date.now() / 1000 - created) : '';
-      statusMeta.textContent = [pw && ph ? `${pw}×${ph}` : '', up ? `up ${up}` : ''].filter(Boolean).join(' · ');
-      const agentStatus = agentPresence[activeAgent].status || 'idle';
-      setStatus(m.name, agentStatus, STATE_LABELS[agentStatus] || agentStatus);
+      frameCache[m.agent].meta = m.meta || frameCache[m.agent].meta;
+      frameCache[m.agent].name = m.name || frameCache[m.agent].name;
+      frameCache[m.agent].latencyMs = parseInt(m.latencyMs, 10) || 0;
+      applyFrameMeta(frameCache[m.agent].meta, frameCache[m.agent].name, frameCache[m.agent].latencyMs);
     } else if (m.type === 'nosession') {
       if (m.agent !== activeAgent) return;
+      frameCache[m.agent] = { frame: null, meta: '', name: '', latencyMs: 0 };
       screen.replaceChildren();
       renderedLineCount = 0;
       scrollState[activeAgent] = { top: 0, follow: true, historyMode: false, historyAvailable: 0, pendingHistory: false };
@@ -646,8 +952,9 @@
   // ---- boot ----------------------------------------------------------------
   measure();
   reportSize();
-  if (window.ResizeObserver) new ResizeObserver(() => { measure(); reportSize(); }).observe(wrap);
-  window.addEventListener('resize', () => { measure(); reportSize(); });
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => scheduleReportSize(true));
+  if (window.ResizeObserver) new ResizeObserver(() => scheduleReportSize()).observe(wrap);
+  window.addEventListener('resize', () => scheduleReportSize());
   vscode.postMessage({ type: 'ready' });
   setTimeout(() => screen.focus(), 200);
 })();
