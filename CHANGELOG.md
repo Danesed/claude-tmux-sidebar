@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.10.0
+- Fuse the pane capture and cursor/size metadata into one tmux invocation per tick: cursor position is now always exactly as fresh as the frame it describes and the live path costs a single process.
+- Add a persistent tmux control-mode client (`claudeTmux.transport`, default `auto`) that replaces fork/exec-per-command and pushes output notifications via format subscriptions on the active pane; a `pipe-pane` FIFO tap is the fallback event source and classic polling remains the watchdog. Failed in-flight input is reported, never replayed.
+- Make the refresh loop adaptive: hot while typing or output streams, configured rate normally, slow decay when static, watchdog-only when a push source is live.
+- Ship background presence captures to the tab cache, so switching agents paints an at-most-seconds-old frame instantly.
+- Transport small screen changes as per-line deltas with sequence-checked resync; the webview patches only the changed rows.
+- Add display-only predictive local echo (mosh-style), virtualized rendering for large history captures, Cmd/Ctrl+click file:line links that open in the editor, Alt+Up prompt recall (host-reconstructed, ESC-safe), per-agent activity sparklines and a first-run environment checklist.
+- Ground-truth agent state via generated Claude Code hooks and a Codex notify program stamping tmux pane options (heuristic remains the fallback); the footer, tabs, per-agent status bar items and richer view badge now show state, elapsed time, current tool, token/turn telemetry from local transcript tails, and per-turn git deltas.
+- Raise an actionable notification when a background agent asks a question; numbered menu options become identity-pinned answer buttons (explicit, never automatic).
+- Record session, turn, input-discard, handoff and arbiter events to `.claude/agentmux/ledger.jsonl` with a Timeline overlay; a delivered handoff now survives an extension-host restart as manual-accept only.
+- Move the handoff exchange onto the `.claude/agentmux` file channel (briefing file + short pasted pointer + ACK file) with the pane-marker block as automatic fallback; `.claude` remains the agents' only coordination medium and Codex's rule bridge now skips the transient channel directory.
+- Enrich the briefing capsule with recent commits, capped real diff hunks, the task file, an opt-in trust-gated verify command's output and best-effort conversation resume pointers.
+- Add a findings round-trip after review-mode handoffs, native Codex session listing/resume from `~/.codex/sessions`, and an arbiter mode that asks both agents in parallel and makes the chosen winner the Pair Mode writer.
+- Set the agent sessions' tmux status-right to compact AgentMux facts for real-terminal attachers, and add an experimental vendored xterm.js renderer (`claudeTmux.renderer`, default `dom`).
+
 ## 0.9.0
 - Rename the public extension to **AgentMux — Claude & Codex in tmux**, preserving the installed extension ID and `claudeTmux.*` settings.
 - Add an optional user-details step before source-agent handoff generation; the initial click no longer contacts either agent.

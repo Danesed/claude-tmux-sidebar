@@ -59,6 +59,8 @@ html, body {
 }
 .writer-mark { display: none; font-size: 7px; color: var(--vscode-focusBorder, #4daafc); }
 .agent-tab.writer .writer-mark { display: inline; }
+.agent-spark { flex: 0 1 auto; min-width: 0; opacity: .8; }
+#app[data-sparks="0"] .agent-spark { display: none; }
 .agent-tab.state-working .agent-state {
   background: #58c7d5;
   opacity: 1;
@@ -157,6 +159,19 @@ html, body {
 }
 #screen .row { display: block; height: 1.15em; }
 
+/* experimental xterm.js renderer: draws under a transparent, still-focusable
+   #screen so key capture and click-to-focus behave exactly as in DOM mode */
+#screen { position: relative; z-index: 2; }
+#xterm-host {
+  position: absolute;
+  inset: 0;
+  padding: 6px 8px;
+  z-index: 1;
+  pointer-events: none;
+}
+#app.xterm-live #screen .row { display: none; }
+#app.xterm-live #cursor { display: none !important; }
+
 /* subtle focus ring so you know keystrokes are captured */
 #screen:focus { box-shadow: inset 0 0 0 1px var(--vscode-focusBorder, #0e639c); }
 #screen.input-locked { cursor: default; opacity: .88; }
@@ -184,6 +199,98 @@ html, body {
   transition: opacity .2s;
 }
 #screen-wrap:focus-within #hint { opacity: 0; }
+
+/* tentative keystroke echo, superseded by the next real frame */
+#predict {
+  position: absolute;
+  pointer-events: none;
+  white-space: pre;
+  font: inherit;
+  opacity: 0.55;
+  text-decoration: underline dotted;
+  color: var(--vscode-editor-foreground, #ccc);
+  background: var(--vscode-editor-background, #1e1e1e);
+}
+
+/* Cmd/Ctrl+click to open in the editor */
+.path-link { text-decoration: underline dotted 1px; text-underline-offset: 2px; }
+.path-link:hover { text-decoration: underline; cursor: pointer; }
+
+/* Alt+Up prompt recall */
+#prompt-recall {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 8px;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px;
+  border: 1px solid var(--vscode-widget-border, rgba(255,255,255,.15));
+  border-radius: 6px;
+  background: var(--vscode-menu-background, #252526);
+  box-shadow: 0 6px 18px rgba(0,0,0,.3);
+  font-family: var(--vscode-font-family);
+}
+#recall-filter {
+  padding: 4px 8px;
+  font-size: 12px;
+  color: var(--vscode-input-foreground, #ddd);
+  background: var(--vscode-input-background, #2a2d2e);
+  border: 1px solid var(--vscode-input-border, rgba(255,255,255,0.12));
+  border-radius: 4px;
+  outline: none;
+}
+#recall-list { display: flex; flex-direction: column; gap: 2px; max-height: 30vh; overflow-y: auto; }
+.recall-item {
+  text-align: left;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  font: 11px/1.4 ui-monospace, monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.recall-item:hover, .recall-item.sel { background: var(--vscode-list-hoverBackground, rgba(255,255,255,.08)); }
+
+/* session timeline overlay */
+#timeline {
+  position: absolute;
+  inset: 8px;
+  z-index: 28;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--vscode-widget-border, rgba(255,255,255,.15));
+  border-radius: 6px;
+  background: var(--vscode-editorWidget-background, #252526);
+  box-shadow: 0 6px 18px rgba(0,0,0,.3);
+  font-family: var(--vscode-font-family);
+  font-size: 11.5px;
+}
+#timeline-head { display: flex; align-items: center; justify-content: space-between; }
+.tl-title { font-weight: 600; font-size: 12px; }
+.tl-actions { display: flex; gap: 6px; }
+.tl-actions button { padding: 2px 8px; font-size: 10.5px; }
+#timeline-list { flex: 1 1 auto; overflow-y: auto; display: flex; flex-direction: column; gap: 3px; }
+.tl-row { display: flex; gap: 8px; align-items: baseline; }
+.tl-time { flex: 0 0 auto; opacity: .55; font-family: ui-monospace, monospace; font-size: 10.5px; }
+#timeline-list details { border-left: 2px solid var(--vscode-focusBorder, #0e639c); padding-left: 6px; }
+#timeline-list summary { cursor: pointer; }
+#timeline-list pre {
+  margin: 4px 0;
+  padding: 6px;
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font: 10.5px/1.4 ui-monospace, monospace;
+  background: var(--vscode-editor-background, #1e1e1e);
+  border-radius: 4px;
+}
 
 /* ---- empty-state card ---------------------------------------------------- */
 #overlay {
@@ -219,6 +326,26 @@ html, body {
   font-family: ui-monospace, monospace;
 }
 .card-actions { display: flex; flex-direction: column; gap: 8px; width: 100%; margin-top: 4px; }
+
+/* first-run environment checklist */
+#preflight {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+  box-sizing: border-box;
+  border: 1px solid var(--vscode-widget-border, rgba(255,255,255,.1));
+  border-radius: 6px;
+  font-size: 11.5px;
+  text-align: left;
+}
+.pf-row { display: flex; align-items: center; gap: 7px; }
+.pf-row.ok .pf-mark { color: var(--vscode-testing-iconPassed, #3fb950); }
+.pf-row.miss .pf-mark { color: var(--vscode-testing-iconFailed, #f14c4c); }
+.pf-name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pf-copy, #pf-recheck { padding: 2px 8px; font-size: 10.5px; }
+#pf-recheck { align-self: flex-end; margin-top: 2px; }
 
 /* ---- session chooser list ----------------------------------------------- */
 .hidden { display: none !important; }
@@ -411,6 +538,32 @@ button.primary:hover { background: var(--vscode-button-hoverBackground, #1177bb)
   background: var(--vscode-inputValidation-errorBackground, rgba(90,20,20,.35));
   font-size: 11px;
 }
+
+/* arbiter verdict */
+#arbiter-body { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; min-height: 0; flex: 1 1 auto; }
+#arbiter-body textarea {
+  width: 100%;
+  min-height: 140px;
+  box-sizing: border-box;
+  resize: none;
+  padding: 8px;
+  font: 11px/1.35 ui-monospace, "SF Mono", Menlo, Monaco, Consolas, monospace;
+  color: var(--vscode-input-foreground, #ddd);
+  background: var(--vscode-input-background, #2a2d2e);
+  border: 1px solid var(--vscode-input-border, rgba(255,255,255,.14));
+  border-radius: 4px;
+  outline: none;
+}
+.arb-answer { border: 1px solid var(--vscode-widget-border, rgba(255,255,255,.12)); border-radius: 5px; padding: 6px 8px; }
+.arb-answer summary { cursor: pointer; font-weight: 600; font-size: 12px; }
+.arb-answer pre {
+  margin: 6px 0;
+  max-height: 26vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  font: 10.5px/1.4 ui-monospace, monospace;
+}
+.arb-answer button { align-self: flex-start; }
 
 @media (prefers-reduced-motion: reduce) {
   .agent-state, .dot, #cursor { animation: none !important; }

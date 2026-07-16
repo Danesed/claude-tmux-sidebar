@@ -30,13 +30,112 @@
   const statusDot = document.getElementById('status-dot');
   const statusLabel = document.getElementById('status-label');
   const app = document.getElementById('app');
+  const predictEl = document.getElementById('predict');
+  const recallEl = document.getElementById('prompt-recall');
+  const recallFilter = document.getElementById('recall-filter');
+  const recallList = document.getElementById('recall-list');
+  const preflightEl = document.getElementById('preflight');
   const tabs = [...document.querySelectorAll('.agent-tab')];
   const cursorStyle = (app && app.dataset.cursor) || 'block';
+  const FLAGS = {
+    predict: app?.dataset.predict !== '0',
+    links: app?.dataset.links !== '0',
+    sparks: app?.dataset.sparks !== '0',
+  };
+  // Experimental opt-in renderer: vendored xterm.js draws the LIVE screen
+  // (cell-accurate widths, GPU paint); history mode and selection still use the
+  // DOM renderer. Input capture stays on #screen — xterm never sees keys.
+  const RENDERER = (app?.dataset.renderer === 'xterm' && typeof Terminal === 'function') ? 'xterm' : 'dom';
+  let xterm = null;
+  let xtermEl = null;
+  function xtermTheme() {
+    const s = getComputedStyle(document.documentElement);
+    const v = (name, fallback) => (s.getPropertyValue(name) || '').trim() || fallback;
+    return {
+      background: v('--vscode-editor-background', '#1e1e1e'),
+      foreground: v('--vscode-editor-foreground', '#cccccc'),
+      cursor: v('--vscode-terminalCursor-foreground', '#d4d4d4'),
+      black: v('--vscode-terminal-ansiBlack', '#000000'),
+      red: v('--vscode-terminal-ansiRed', '#cd3131'),
+      green: v('--vscode-terminal-ansiGreen', '#0dbc79'),
+      yellow: v('--vscode-terminal-ansiYellow', '#e5e510'),
+      blue: v('--vscode-terminal-ansiBlue', '#2472c8'),
+      magenta: v('--vscode-terminal-ansiMagenta', '#bc3fbc'),
+      cyan: v('--vscode-terminal-ansiCyan', '#11a8cd'),
+      white: v('--vscode-terminal-ansiWhite', '#e5e5e5'),
+      brightBlack: v('--vscode-terminal-ansiBrightBlack', '#666666'),
+      brightRed: v('--vscode-terminal-ansiBrightRed', '#f14c4c'),
+      brightGreen: v('--vscode-terminal-ansiBrightGreen', '#23d18b'),
+      brightYellow: v('--vscode-terminal-ansiBrightYellow', '#f5f543'),
+      brightBlue: v('--vscode-terminal-ansiBrightBlue', '#3b8eea'),
+      brightMagenta: v('--vscode-terminal-ansiBrightMagenta', '#d670d6'),
+      brightCyan: v('--vscode-terminal-ansiBrightCyan', '#29b8db'),
+      brightWhite: v('--vscode-terminal-ansiBrightWhite', '#ffffff'),
+    };
+  }
+  function ensureXterm() {
+    if (xterm) return xterm;
+    xtermEl = document.createElement('div');
+    xtermEl.id = 'xterm-host';
+    document.getElementById('terminal').appendChild(xtermEl);
+    const cs = getComputedStyle(document.getElementById('screen'));
+    xterm = new Terminal({
+      disableStdin: true,
+      cols: lastCols || 80,
+      rows: lastRows || 24,
+      fontFamily: cs.fontFamily,
+      fontSize: parseFloat(cs.fontSize) || 12,
+      theme: xtermTheme(),
+      cursorBlink: true,
+      scrollback: 0,
+      allowTransparency: true,
+    });
+    xterm.open(xtermEl);
+    return xterm;
+  }
+  function xtermVisible(visible) {
+    if (!xtermEl) { if (!visible) return; ensureXterm(); }
+    xtermEl.style.display = visible ? '' : 'none';
+    app.classList.toggle('xterm-live', visible);
+  }
+  function xtermCursorSeq(meta) {
+    const p = (meta || '').split(',');
+    return `\x1b[${(parseInt(p[1], 10) || 0) + 1};${(parseInt(p[0], 10) || 0) + 1}H`;
+  }
+  function xtermWriteFull(frame, meta) {
+    const t = ensureXterm();
+    const p = (meta || '').split(',');
+    const cols = parseInt(p[2], 10) || lastCols || 80;
+    const rows = parseInt(p[3], 10) || lastRows || 24;
+    if (t.cols !== cols || t.rows !== rows) t.resize(cols, rows);
+    const lines = frame.split('\n');
+    if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
+    let out = '\x1b[H';
+    const max = Math.min(lines.length, t.rows);
+    for (let i = 0; i < max; i++) {
+      out += (i ? '\r\n' : '') + lines[i].replace(/\r/g, '') + '\x1b[0m\x1b[K';
+    }
+    out += '\x1b[0J' + xtermCursorSeq(meta);
+    t.write(out);
+  }
+  function xtermPatch(changes, meta) {
+    const t = ensureXterm();
+    let out = '';
+    for (const [idx, raw] of changes) {
+      if (idx >= t.rows) return false;
+      out += `\x1b[${idx + 1};1H\x1b[2K` + raw.replace(/\r/g, '') + '\x1b[0m';
+    }
+    out += xtermCursorSeq(meta);
+    t.write(out);
+    return true;
+  }
   let activeAgent = 'claude';
   let writerAgent = null;
   let handoffPhase = null;
   let handoffDraft = null;
   let handoffCurrentMode = 'continue';
+  let arbiterPhase = null;
+  let arbiterState = null; // { id, phase }
   const agentPresence = {
     claude: { present: false, status: 'idle' },
     codex: { present: false, status: 'idle' },
@@ -51,6 +150,11 @@
   };
   let renderedLineCount = 0;
   let programmaticScroll = false;
+  // Line cache for the delta frame transport: raw '\n' split (including the
+  // trailing '' element) of the active agent's current live frame, plus the
+  // sequence number it corresponds to. Deltas only apply to an unbroken chain.
+  let liveLines = null;
+  let liveSeq = 0;
 
   // ---- char metrics --------------------------------------------------------
   let charW = 7, charH = 14;
@@ -190,23 +294,126 @@
     if (!openSpan) flush();
     return html;
   }
-  function render(frame) {
-    const lines = frame.split('\n');
-    if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
-    for (let i = 0; i < lines.length; i++) {
-      let row = screen.children[i];
-      if (!row) {
-        row = document.createElement('div');
-        row.className = 'row';
-        screen.appendChild(row);
+  // ---- clickable file paths -------------------------------------------------
+  // Wrap path-like tokens (with a '/' or a ':line' suffix) in spans; the host
+  // verifies existence before opening, so false positives cost nothing.
+  const PATH_RE = /(?:[\w.~-]+\/)*[\w-][\w.-]*\.[A-Za-z0-9]{1,8}(?::\d+(?::\d+)?)?/g;
+  function linkifyRow(row) {
+    if (!FLAGS.links) return;
+    const text = row.textContent;
+    if (!text || text.indexOf('.') < 0 || text.length > 500) return;
+    PATH_RE.lastIndex = 0;
+    if (!PATH_RE.test(text)) return;
+    const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    let node;
+    while ((node = walker.nextNode())) nodes.push(node);
+    for (const textNode of nodes) {
+      const value = textNode.nodeValue;
+      PATH_RE.lastIndex = 0;
+      let match;
+      let last = 0;
+      let frag = null;
+      while ((match = PATH_RE.exec(value))) {
+        const token = match[0];
+        if (!token.includes('/') && !/:\d/.test(token)) continue; // bare words stay prose
+        if (!frag) frag = document.createDocumentFragment();
+        if (match.index > last) frag.appendChild(document.createTextNode(value.slice(last, match.index)));
+        const parts = token.match(/^(.*?)(?::(\d+))?(?::(\d+))?$/);
+        const span = document.createElement('span');
+        span.className = 'path-link';
+        span.textContent = token;
+        span.dataset.path = parts[1];
+        if (parts[2]) span.dataset.line = parts[2];
+        if (parts[3]) span.dataset.col = parts[3];
+        frag.appendChild(span);
+        last = match.index + token.length;
       }
-      if (row._raw !== lines[i]) {
-        row._raw = lines[i];
-        row.innerHTML = renderLine(lines[i]) || '&nbsp;';
+      if (!frag) continue;
+      if (last < value.length) frag.appendChild(document.createTextNode(value.slice(last)));
+      textNode.parentNode.replaceChild(frag, textNode);
+    }
+  }
+
+  // ---- virtualized scrollback ------------------------------------------------
+  // History captures can be thousands of fixed-height lines; render only the
+  // viewport (plus overscan) between two spacers instead of materializing all.
+  const VIRT_MIN = 300;
+  const VIRT_OVERSCAN = 30;
+  let virt = null; // { lines, start, end, spacerTop, spacerBottom }
+  let virtScrollFrame = null;
+
+  function exitVirtual() {
+    if (!virt) return;
+    virt = null;
+    screen.replaceChildren();
+  }
+
+  function updateVirtualWindow(force) {
+    if (!virt) return;
+    const total = virt.lines.length;
+    const viewRows = Math.ceil(wrap.clientHeight / charH) || 24;
+    let start = Math.floor((wrap.scrollTop - PAD_Y) / charH) - VIRT_OVERSCAN;
+    start = Math.max(0, Math.min(start, Math.max(0, total - viewRows - VIRT_OVERSCAN)));
+    const end = Math.min(total, start + viewRows + VIRT_OVERSCAN * 2);
+    if (!force && start === virt.start && end === virt.end) return;
+    virt.start = start;
+    virt.end = end;
+    virt.spacerTop.style.height = (start * charH) + 'px';
+    virt.spacerBottom.style.height = ((total - end) * charH) + 'px';
+    const needed = end - start;
+    const rows = [];
+    let row = virt.spacerTop.nextSibling;
+    while (row && row !== virt.spacerBottom) { rows.push(row); row = row.nextSibling; }
+    while (rows.length > needed) rows.pop().remove();
+    while (rows.length < needed) {
+      const fresh = document.createElement('div');
+      fresh.className = 'row';
+      screen.insertBefore(fresh, virt.spacerBottom);
+      rows.push(fresh);
+    }
+    for (let i = 0; i < needed; i++) {
+      const raw = virt.lines[start + i];
+      if (rows[i]._raw !== raw) {
+        rows[i]._raw = raw;
+        rows[i].innerHTML = renderLine(raw) || '&nbsp;';
+        linkifyRow(rows[i]);
       }
     }
-    while (screen.children.length > lines.length) screen.lastElementChild.remove();
-    renderedLineCount = lines.length;
+  }
+
+  function render(frame) {
+    const lines = Array.isArray(frame) ? frame.slice() : frame.split('\n');
+    if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
+    if (lines.length > VIRT_MIN && scrollState[activeAgent].historyMode) {
+      screen.replaceChildren();
+      virt = {
+        lines, start: -1, end: -1,
+        spacerTop: document.createElement('div'),
+        spacerBottom: document.createElement('div'),
+      };
+      screen.appendChild(virt.spacerTop);
+      screen.appendChild(virt.spacerBottom);
+      renderedLineCount = lines.length;
+      updateVirtualWindow(true);
+    } else {
+      exitVirtual();
+      for (let i = 0; i < lines.length; i++) {
+        let row = screen.children[i];
+        if (!row) {
+          row = document.createElement('div');
+          row.className = 'row';
+          screen.appendChild(row);
+        }
+        if (row._raw !== lines[i]) {
+          row._raw = lines[i];
+          row.innerHTML = renderLine(lines[i]) || '&nbsp;';
+          linkifyRow(row);
+        }
+      }
+      while (screen.children.length > lines.length) screen.lastElementChild.remove();
+      renderedLineCount = lines.length;
+    }
     const agentAtRender = activeAgent;
     const state = scrollState[agentAtRender];
     programmaticScroll = true;
@@ -225,6 +432,22 @@
       updateCursorVisibility();
     });
   }
+  // Apply a line delta directly to the existing rows; false means a row index
+  // fell outside the rendered screen and a full render is required instead.
+  function patchRows(changes) {
+    if (virt) return false; // deltas never target the virtualized history view
+    for (const [idx, raw] of changes) {
+      const row = screen.children[idx];
+      if (!row) return false;
+      if (row._raw !== raw) {
+        row._raw = raw;
+        row.innerHTML = renderLine(raw) || '&nbsp;';
+        linkifyRow(row);
+      }
+    }
+    return true;
+  }
+
   function placeCursor(cx, cy, paneHeight) {
     const historyRows = Math.max(0, renderedLineCount - paneHeight);
     const left = PAD_X + cx * charW, top = PAD_Y + (historyRows + cy) * charH;
@@ -249,6 +472,12 @@
     state.follow = nearBottom();
   }
   wrap.addEventListener('scroll', () => {
+    if (virt && virtScrollFrame === null) {
+      virtScrollFrame = requestAnimationFrame(() => {
+        virtScrollFrame = null;
+        updateVirtualWindow(false);
+      });
+    }
     if (programmaticScroll) return;
     saveScroll();
     const state = scrollState[activeAgent];
@@ -287,7 +516,10 @@
   }
   document.addEventListener('selectionchange', () => {
     if (!hasSelection() && pendingFrame != null) {
-      if (pendingFrame.agent === activeAgent) render(pendingFrame.frame);
+      if (pendingFrame.agent === activeAgent) {
+        if (pendingFrame.useLive && liveLines) render(liveLines);
+        else if (pendingFrame.frame != null) render(pendingFrame.frame);
+      }
       pendingFrame = null;
     }
   });
@@ -308,23 +540,43 @@
     if (statusDot.className !== dotClass) statusDot.className = dotClass;
     if (statusLabel.textContent !== label) statusLabel.textContent = label;
   }
+  function fmtK(n) {
+    n = n || 0;
+    if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+    if (n >= 1000) return (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'k';
+    return String(n);
+  }
   function applyFrameMeta(meta, name, latencyMs = 0) {
     const p = (meta || '').split(',');
     placeCursor(parseInt(p[0], 10) || 0, parseInt(p[1], 10) || 0, parseInt(p[3], 10) || lastRows || 24);
+    if (predictQueue.length) positionPredict();
     const pw = p[2], ph = p[3], created = parseInt(p[4], 10) || 0;
     const history = parseInt(p[5], 10) || 0;
     const clients = parseInt(p[6], 10) || 0;
     const up = created ? fmtUptime(Date.now() / 1000 - created) : '';
+    const ap = agentPresence[activeAgent] || {};
+    const tel = ap.telemetry;
+    const delta = ap.delta;
     statusMeta.textContent = [
       pw && ph ? `${pw}×${ph}` : '',
       up ? `up ${up}` : '',
       history ? `hist ${history}` : '',
       clients ? `${clients} client${clients === 1 ? '' : 's'}` : '',
+      tel && (tel.inTokens || tel.outTokens) ? `↑${fmtK(tel.inTokens)} ↓${fmtK(tel.outTokens)}` : '',
+      tel && tel.turns ? `t${tel.turns}` : '',
+      delta && delta.files ? `Δ${delta.files} +${delta.insertions}−${delta.deletions}` : '',
       latencyMs >= 200 ? `lag ${Math.round(latencyMs)}ms` : '',
     ].filter(Boolean).join(' · ');
-    statusMeta.title = statusMeta.textContent;
-    const agentStatus = agentPresence[activeAgent].status || 'idle';
-    setStatus(name, agentStatus, STATE_LABELS[agentStatus] || agentStatus);
+    statusMeta.title = statusMeta.textContent
+      + (tel && tel.model ? `\nmodel ${tel.model}` : '')
+      + (delta && delta.names ? `\nlast turn: ${delta.names.join(', ')}` : '');
+    const agentStatus = ap.status || 'idle';
+    let label = STATE_LABELS[agentStatus] || agentStatus;
+    if (agentStatus === 'working') {
+      if (ap.statusSince) label += ' ' + fmtUptime((Date.now() - ap.statusSince) / 1000);
+      if (ap.lastTool) label += ' · ' + ap.lastTool;
+    }
+    setStatus(name, agentStatus, label);
   }
   // ---- input ---------------------------------------------------------------
   const graphemeSegmenter = Intl.Segmenter
@@ -375,8 +627,79 @@
   let composing = false;
   function isInputLocked() {
     return ['drafting', 'delivering', 'awaitingAck', 'ackTimeout'].includes(handoffPhase)
+      || ['delivering', 'gathering'].includes(arbiterPhase)
       || (!!writerAgent && activeAgent !== writerAgent);
   }
+
+  // ---- predictive local echo -------------------------------------------------
+  // Paint printable keystrokes instantly as a tentative overlay at the cursor;
+  // any real content update supersedes it. Display-only: the input pump and the
+  // no-implicit-replay contract are untouched.
+  let predictQueue = [];
+  let predictAt = 0;
+  function clearPredict() {
+    if (predictQueue.length) predictQueue = [];
+    if (predictEl.textContent) predictEl.textContent = '';
+  }
+  function positionPredict() {
+    if (!predictQueue.length) { predictEl.textContent = ''; return; }
+    predictEl.textContent = predictQueue.join('');
+    predictEl.style.left = cursorEl.style.left;
+    predictEl.style.top = cursorEl.style.top;
+    predictEl.style.height = charH + 'px';
+    predictEl.style.lineHeight = charH + 'px';
+  }
+  function notePredict(e, bytes) {
+    if (!FLAGS.predict) return;
+    if (bytes.length === 1 && bytes >= ' ' && !e.ctrlKey && !e.metaKey && !e.altKey
+      && isTextKey(e.key) && scrollState[activeAgent].follow) {
+      if (predictQueue.length < 40) predictQueue.push(bytes);
+      predictAt = Date.now();
+      positionPredict();
+    } else if (bytes === '\x7f' && predictQueue.length) {
+      predictQueue.pop();
+      positionPredict();
+    } else {
+      clearPredict();
+    }
+  }
+
+  // ---- prompt recall (Alt+Up) --------------------------------------------------
+  let recallItems = [];
+  let recallFiltered = [];
+  let recallIndex = 0;
+  function renderRecall() {
+    const q = (recallFilter.value || '').toLowerCase().trim();
+    recallFiltered = q ? recallItems.filter((t) => t.toLowerCase().includes(q)) : recallItems.slice();
+    recallIndex = Math.max(0, Math.min(recallIndex, recallFiltered.length - 1));
+    recallList.innerHTML = recallFiltered.length
+      ? recallFiltered.slice(0, 30).map((t, i) =>
+          `<button class="recall-item${i === recallIndex ? ' sel' : ''}" data-i="${i}">${esc(t)}</button>`).join('')
+      : '<div class="sess-empty">No prompts recorded yet.</div>';
+  }
+  function closeRecall(focusScreen = true) {
+    recallEl.classList.add('hidden');
+    if (focusScreen) screen.focus({ preventScroll: true });
+  }
+  function pickRecall(text) {
+    if (typeof text !== 'string' || !text) return;
+    closeRecall();
+    vscode.postMessage({ type: 'paste', agent: activeAgent, data: text });
+  }
+  recallFilter.addEventListener('input', () => { recallIndex = 0; renderRecall(); });
+  recallEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); closeRecall(); return; }
+    if (e.key === 'Enter') { e.preventDefault(); pickRecall(recallFiltered[recallIndex]); return; }
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      recallIndex = Math.max(0, Math.min(recallFiltered.length - 1, recallIndex + (e.key === 'ArrowDown' ? 1 : -1)));
+      renderRecall();
+    }
+  });
+  recallList.addEventListener('click', (e) => {
+    const item = e.target.closest('.recall-item');
+    if (item) pickRecall(recallFiltered[parseInt(item.dataset.i, 10)]);
+  });
   screen.addEventListener('keydown', (e) => {
     // Cmd stays a UI shortcut on macOS. On Windows/Linux, copy a selection with
     // Ctrl+C and paste with Ctrl+V; otherwise Ctrl combinations reach tmux.
@@ -389,6 +712,11 @@
       return;
     }
     if (composing || e.isComposing || e.key === 'Process' || e.keyCode === 229) return;
+    if (e.altKey && e.key === 'ArrowUp' && !e.metaKey && !e.ctrlKey) {
+      e.preventDefault();
+      vscode.postMessage({ type: 'promptHistory' });
+      return;
+    }
     if (e.shiftKey && (e.key === 'PageUp' || e.key === 'PageDown')) {
       e.preventDefault();
       if (e.key === 'PageUp' && wrap.scrollHeight <= wrap.clientHeight + charH && requestHistory()) return;
@@ -403,9 +731,17 @@
         type: 'input', agent: activeAgent, data: bytes,
         immediate: e.ctrlKey || !isTextKey(e.key),
       });
+      notePredict(e, bytes);
     }
   });
-  screen.addEventListener('compositionstart', () => { composing = true; });
+  screen.addEventListener('click', (e) => {
+    if (!e.metaKey && !e.ctrlKey) return;
+    const link = e.target.closest('.path-link');
+    if (!link) return;
+    e.preventDefault();
+    vscode.postMessage({ type: 'openFile', path: link.dataset.path, line: link.dataset.line, col: link.dataset.col });
+  });
+  screen.addEventListener('compositionstart', () => { composing = true; clearPredict(); });
   screen.addEventListener('compositionend', (e) => {
     composing = false;
     if (!e.data || isInputLocked()) return;
@@ -433,17 +769,28 @@
     });
     screen.setAttribute('aria-label', `${agent === 'claude' ? 'Claude' : 'Codex'} tmux terminal mirror`);
     screen.setAttribute('aria-labelledby', `tab-${agent}`);
+    exitVirtual();
     screen.replaceChildren();
     renderedLineCount = 0;
+    liveLines = null;
+    liveSeq = 0;
+    clearPredict();
+    closeRecall(false);
     cursorEl.style.visibility = 'hidden';
     overlay.classList.add('hidden');
     statusName.textContent = '';
     statusMeta.textContent = '';
     const cached = frameCache[agent];
     if (cached.frame != null) {
-      render(cached.frame);
+      if (RENDERER === 'xterm') {
+        xtermVisible(true);
+        xtermWriteFull(cached.frame, cached.meta);
+      } else {
+        render(cached.frame);
+      }
       applyFrameMeta(cached.meta, cached.name, cached.latencyMs);
     } else {
+      if (RENDERER === 'xterm') xtermVisible(false);
       setStatus('', 'idle', 'connecting…');
     }
     programmaticScroll = true;
@@ -517,12 +864,64 @@
     btnUnlock.classList.toggle('hidden', !writerAgent);
   }
 
+  // 60-slot activity sparkline (2s per slot): teal = output, yellow = asking.
+  function drawSpark(tab, series) {
+    const canvas = tab.querySelector('.agent-spark');
+    if (!canvas) return;
+    const key = Array.isArray(series) && series.length ? series.join('') : '';
+    if (canvas._key === key) return;
+    canvas._key = key;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (!key) return;
+    const styles = getComputedStyle(document.documentElement);
+    const activeColor = (styles.getPropertyValue('--vscode-charts-blue') || '').trim() || '#58c7d5';
+    const warnColor = (styles.getPropertyValue('--vscode-charts-yellow') || '').trim() || '#d7a838';
+    const w = canvas.width / series.length;
+    for (let i = 0; i < series.length; i++) {
+      const v = series[i];
+      if (!v) continue;
+      ctx.fillStyle = v === 2 ? warnColor : activeColor;
+      const h = v === 2 ? canvas.height : canvas.height - 3;
+      ctx.fillRect(i * w, canvas.height - h, Math.max(1, w - 0.4), h);
+    }
+  }
+
+  function renderPreflight(m) {
+    const missing = !m.tmux || !m.claude || !m.codex;
+    preflightEl.classList.toggle('hidden', !missing);
+    if (!missing) return;
+    const row = (ok, label, cmd) =>
+      `<div class="pf-row ${ok ? 'ok' : 'miss'}"><span class="pf-mark">${ok ? '✓' : '✗'}</span><span class="pf-name">${esc(label)}</span>`
+      + (ok ? '' : `<button class="pf-copy" data-cmd="${esc(cmd)}">copy install cmd</button>`) + '</div>';
+    preflightEl.innerHTML =
+      row(!!m.tmux, m.tmux ? m.tmux : 'tmux not found', 'brew install tmux')
+      + row(!!m.claude, m.claude ? 'claude found' : 'claude not on PATH', 'npm install -g @anthropic-ai/claude-code')
+      + row(!!m.codex, m.codex ? 'codex found' : 'codex not on PATH', 'npm install -g @openai/codex')
+      + '<button id="pf-recheck">Recheck</button>';
+  }
+  preflightEl.addEventListener('click', (e) => {
+    const copy = e.target.closest('.pf-copy');
+    if (copy) {
+      navigator.clipboard?.writeText(copy.dataset.cmd || '');
+      copy.textContent = 'copied';
+      return;
+    }
+    if (e.target.closest('#pf-recheck')) vscode.postMessage({ type: 'preflightRecheck' });
+  });
+
   function renderAgents(message) {
     writerAgent = message.writerAgent || null;
     handoffPhase = message.handoffPhase || null;
+    arbiterPhase = message.arbiterPhase || null;
+    btnFindings.classList.toggle('hidden', !message.handBack);
+    const bothPresent = !!(message.agents?.claude?.present && message.agents?.codex?.present);
+    btnArbiter.classList.toggle('hidden', !bothPresent);
+    btnArbiter.disabled = !bothPresent || !!handoffPhase || !!arbiterPhase;
     for (const agent of ['claude', 'codex']) {
       Object.assign(agentPresence[agent], message.agents?.[agent] || { present: false, status: 'idle' });
       const tab = document.getElementById(`tab-${agent}`);
+      if (FLAGS.sparks) drawSpark(tab, agentPresence[agent].spark);
       const present = !!agentPresence[agent].present;
       const status = agentPresence[agent].status || 'idle';
       const attention = agentPresence[agent].attention || null;
@@ -583,6 +982,91 @@
 
   btnPair.addEventListener('click', () => vscode.postMessage({ type: 'prepareHandoff', source: activeAgent }));
   btnUnlock.addEventListener('click', () => vscode.postMessage({ type: 'cancelPair' }));
+
+  // ---- findings round-trip + arbiter -------------------------------------------
+  const btnFindings = document.getElementById('btn-findings');
+  const btnArbiter = document.getElementById('btn-arbiter');
+  const arbiterModal = document.getElementById('arbiter-modal');
+  const arbiterMeta = document.getElementById('arbiter-meta');
+  const arbiterBody = document.getElementById('arbiter-body');
+  const arbiterError = document.getElementById('arbiter-error');
+  const arbiterSend = document.getElementById('arbiter-send');
+  const arbiterCancel = document.getElementById('arbiter-cancel');
+  btnFindings.addEventListener('click', () => vscode.postMessage({ type: 'requestFindings' }));
+  btnArbiter.addEventListener('click', () => vscode.postMessage({ type: 'prepareArbiter' }));
+
+  function closeArbiter() {
+    arbiterModal.classList.add('hidden');
+    arbiterState = null;
+    screen.focus({ preventScroll: true });
+  }
+  function arbiterQuestionValue() {
+    const box = document.getElementById('arbiter-text');
+    return box ? box.value : '';
+  }
+  arbiterSend.addEventListener('click', () => {
+    if (!arbiterState) return;
+    if (arbiterState.phase === 'collecting') {
+      arbiterSend.disabled = true;
+      arbiterSend.textContent = 'Asking…';
+      arbiterError.classList.add('hidden');
+      vscode.postMessage({ type: 'createArbiter', id: arbiterState.id, question: arbiterQuestionValue() });
+    }
+  });
+  arbiterCancel.addEventListener('click', () => {
+    if (arbiterState) vscode.postMessage({ type: 'arbiterCancel', id: arbiterState.id });
+    closeArbiter();
+  });
+  arbiterBody.addEventListener('click', (e) => {
+    const pick = e.target.closest('button[data-winner]');
+    if (pick && arbiterState && arbiterState.phase === 'verdict') {
+      vscode.postMessage({ type: 'arbiterPick', id: arbiterState.id, winner: pick.dataset.winner });
+    }
+  });
+
+  // ---- session timeline -------------------------------------------------------
+  const btnTimeline = document.getElementById('btn-timeline');
+  const timelineEl = document.getElementById('timeline');
+  const timelineList = document.getElementById('timeline-list');
+  function fmtClock(ts) {
+    try { return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); } catch { return ''; }
+  }
+  function cap(agent) { return agent === 'claude' ? 'Claude' : agent === 'codex' ? 'Codex' : agent || ''; }
+  function describeEvent(e) {
+    if (e.type === 'session') return `${cap(e.agent)} session ${e.action}`;
+    if (e.type === 'turn') {
+      const d = e.delta;
+      return `${cap(e.agent)} ${e.status === 'needs-input' ? 'asked for input' : 'finished a turn'}`
+        + ` after ${fmtUptime((e.durationMs || 0) / 1000) || '0s'}`
+        + (e.tool ? ` · ${e.tool}` : '')
+        + (d && d.files ? ` · ${d.files}f +${d.insertions}−${d.deletions}` : '');
+    }
+    if (e.type === 'input-discarded') return `input not delivered to ${cap(e.agent)} (${e.failedBytes || 0}B failed, ${e.pendingBytes || 0}B discarded)`;
+    if (e.type === 'handoff') {
+      return `handoff ${e.phase}${e.source ? ` · ${cap(e.source)} → ${cap(e.target)}` : ''}${e.mode ? ` · ${e.mode}` : ''}`;
+    }
+    if (e.type === 'arbiter') return `arbiter ${e.phase || ''}${e.winner ? ` · winner ${cap(e.winner)}` : ''}`;
+    return e.type || 'event';
+  }
+  function renderTimeline(events) {
+    const items = (events || []).slice().reverse();
+    timelineList.innerHTML = items.length
+      ? items.map((e) => {
+          const body = e.type === 'handoff' && e.text
+            ? `<details><summary>${esc(fmtClock(e.ts))} · ${esc(describeEvent(e))}</summary><pre>${esc(e.text.slice(0, 4000))}</pre></details>`
+            : `<div class="tl-row"><span class="tl-time">${esc(fmtClock(e.ts))}</span><span>${esc(describeEvent(e))}</span></div>`;
+          return body;
+        }).join('')
+      : '<div class="sess-empty">Nothing recorded yet.</div>';
+  }
+  btnTimeline.addEventListener('click', () => vscode.postMessage({ type: 'timeline' }));
+  timelineEl.addEventListener('click', (e) => {
+    if (e.target.closest('#timeline-close')) { timelineEl.classList.add('hidden'); screen.focus({ preventScroll: true }); }
+    else if (e.target.closest('#timeline-clear')) vscode.postMessage({ type: 'timelineClear' });
+  });
+  timelineEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); timelineEl.classList.add('hidden'); screen.focus({ preventScroll: true }); }
+  });
   handoffMode.addEventListener('change', () => {
     if (!handoffDraft || handoffDraft.phase !== 'review') return;
     handoffDraft[handoffCurrentMode] = handoffText.value;
@@ -654,6 +1138,11 @@
     if (e.key === 'Escape' && !handoffModal.classList.contains('hidden')) {
       e.preventDefault();
       handoffCancel.click();
+      return;
+    }
+    if (e.key === 'Escape' && !arbiterModal.classList.contains('hidden')) {
+      e.preventDefault();
+      arbiterCancel.click();
     }
   });
 
@@ -716,8 +1205,8 @@
       handoffDraft = {
         id: m.id, source: m.source, target: m.target, phase: 'collecting', details: m.details || '',
       };
-      handoffTitle.textContent = 'Create AgentMux handoff';
-      handoffMeta.textContent = `${m.source === 'claude' ? 'Claude' : 'Codex'} → ${m.target === 'claude' ? 'Claude' : 'Codex'} · optional context`;
+      handoffTitle.textContent = m.findings ? 'Request review findings' : 'Create AgentMux handoff';
+      handoffMeta.textContent = `${m.source === 'claude' ? 'Claude' : 'Codex'} → ${m.target === 'claude' ? 'Claude' : 'Codex'} · ${m.findings ? 'findings report back to the author' : 'optional context'}`;
       handoffModeLabel.classList.add('hidden');
       handoffMode.classList.add('hidden');
       handoffTextLabel.textContent = 'Optional details to include in the handoff';
@@ -728,6 +1217,7 @@
       handoffSend.disabled = false;
       handoffSend.textContent = 'Create handoff';
       handoffCancel.disabled = false;
+      handoffCancel.textContent = 'Cancel';
       handoffError.classList.add('hidden');
       handoffModal.classList.add('details-step');
       handoffModal.classList.remove('hidden');
@@ -794,6 +1284,7 @@
       handoffSend.disabled = false;
       handoffSend.textContent = 'Send handoff';
       handoffCancel.disabled = false;
+      handoffCancel.textContent = 'Cancel';
       handoffModal.classList.remove('details-step');
       handoffModal.classList.remove('hidden');
       handoffText.focus();
@@ -855,8 +1346,9 @@
       handoffDraft.phase = 'ackTimeout';
       handoffSend.disabled = false;
       handoffSend.textContent = 'Accept manually';
-      handoffCancel.disabled = true;
-      handoffError.textContent = 'Delivered, but acknowledgement was not observed. Do not resend automatically.';
+      handoffCancel.disabled = false;
+      handoffCancel.textContent = 'Dismiss';
+      handoffError.textContent = 'Delivered, but acknowledgement was not observed. Accept manually to transfer ownership, or dismiss (nothing is ever resent).';
       handoffError.classList.remove('hidden');
     } else if (m.type === 'handoffManualError') {
       if (!handoffDraft || handoffDraft.id !== m.id) return;
@@ -895,20 +1387,117 @@
       const state = scrollState[activeAgent];
       state.historyMode = !!m.historyMode;
       state.historyAvailable = parseInt(m.historyAvailable, 10) || 0;
+      if (m.frame != null || m.delta) clearPredict();
+      else if (predictQueue.length && Date.now() - predictAt > 400) clearPredict();
+      const xtermLive = RENDERER === 'xterm' && !m.historyMode;
       if (m.frame != null) {
+        liveSeq = m.seq || 0;
+        liveLines = m.historyMode ? null : m.frame.split('\n');
         frameCache[m.agent].frame = m.frame;
-        if (hasSelection()) pendingFrame = { agent: m.agent, frame: m.frame }; // don't clobber a copy in progress
-        else { render(m.frame); pendingFrame = null; }
+        if (xtermLive) {
+          xtermVisible(true);
+          xtermWriteFull(m.frame, m.meta || frameCache[m.agent].meta);
+          pendingFrame = null;
+        } else {
+          if (RENDERER === 'xterm') xtermVisible(false);
+          if (hasSelection()) pendingFrame = { agent: m.agent, frame: m.frame }; // don't clobber a copy in progress
+          else { render(m.frame); pendingFrame = null; }
+        }
+      } else if (m.delta) {
+        if (!liveLines || m.delta.baseSeq !== liveSeq) {
+          vscode.postMessage({ type: 'resync' }); // broken chain -> ask for a full frame
+        } else {
+          liveSeq = m.delta.seq;
+          for (const [idx, raw] of m.delta.changes) liveLines[idx] = raw;
+          frameCache[m.agent].frame = liveLines.join('\n');
+          if (xtermLive) {
+            xtermVisible(true);
+            if (!xtermPatch(m.delta.changes, m.meta || frameCache[m.agent].meta)) {
+              xtermWriteFull(frameCache[m.agent].frame, m.meta || frameCache[m.agent].meta);
+            }
+          } else if (hasSelection() || pendingFrame) {
+            pendingFrame = { agent: m.agent, useLive: true };
+          } else if (!patchRows(m.delta.changes)) {
+            render(liveLines);
+          }
+        }
       }
       frameCache[m.agent].meta = m.meta || frameCache[m.agent].meta;
       frameCache[m.agent].name = m.name || frameCache[m.agent].name;
       frameCache[m.agent].latencyMs = parseInt(m.latencyMs, 10) || 0;
       applyFrameMeta(frameCache[m.agent].meta, frameCache[m.agent].name, frameCache[m.agent].latencyMs);
+    } else if (m.type === 'bgFrame') {
+      // Background agent captures keep the inactive tab's cache warm so a
+      // switch paints an at-most-seconds-old frame instantly.
+      if (frameCache[m.agent] && m.agent !== activeAgent) frameCache[m.agent].frame = m.frame;
+    } else if (m.type === 'timeline') {
+      renderTimeline(m.events);
+      timelineEl.classList.remove('hidden');
+    } else if (m.type === 'arbiterPrompt') {
+      arbiterState = { id: m.id, phase: 'collecting' };
+      arbiterMeta.textContent = 'One question, two independent answers, no file changes. The winner becomes Pair Mode writer.';
+      arbiterBody.innerHTML = '<textarea id="arbiter-text" spellcheck="false" placeholder="Design question, bug diagnosis, \'which approach is right\'…"></textarea>';
+      arbiterError.classList.add('hidden');
+      arbiterSend.disabled = false;
+      arbiterSend.textContent = 'Ask both';
+      arbiterSend.classList.remove('hidden');
+      arbiterCancel.disabled = false;
+      arbiterModal.classList.remove('hidden');
+      document.getElementById('arbiter-text').focus();
+    } else if (m.type === 'arbiterGathering') {
+      if (!arbiterState || arbiterState.id !== m.id) return;
+      arbiterState.phase = 'gathering';
+      arbiterMeta.textContent = 'Both agents are answering… input is paused until the round finishes.';
+      arbiterBody.innerHTML = '<div class="sess-empty">Waiting for both marked answers (up to 3 minutes)…</div>';
+      arbiterSend.disabled = true;
+      arbiterSend.textContent = 'Gathering…';
+    } else if (m.type === 'arbiterVerdict') {
+      if (!arbiterState || arbiterState.id !== m.id) return;
+      arbiterState.phase = 'verdict';
+      arbiterMeta.textContent = 'Pick the answer to act on — the winner becomes the Pair Mode writer.';
+      const side = (agent, text) => text
+        ? `<details open class="arb-answer"><summary>${agent === 'claude' ? 'Claude' : 'Codex'}</summary><pre>${esc(text)}</pre>`
+          + `<button class="primary" data-winner="${agent}">Use ${agent === 'claude' ? "Claude's" : "Codex's"} answer</button></details>`
+        : `<div class="sess-empty">${agent === 'claude' ? 'Claude' : 'Codex'} returned no marked answer.</div>`;
+      arbiterBody.innerHTML = side('claude', m.claude) + side('codex', m.codex);
+      arbiterSend.classList.add('hidden');
+      arbiterCancel.disabled = false;
+    } else if (m.type === 'arbiterError') {
+      if (!arbiterState || arbiterState.id !== m.id) return;
+      if (arbiterState.phase === 'collecting') {
+        arbiterSend.disabled = false;
+        arbiterSend.textContent = 'Ask both';
+        arbiterError.textContent = m.error || 'Arbiter round failed.';
+        arbiterError.classList.remove('hidden');
+      } else {
+        arbiterError.textContent = m.error || 'Arbiter round failed.';
+        arbiterError.classList.remove('hidden');
+        arbiterSend.disabled = true;
+        arbiterCancel.disabled = false;
+      }
+    } else if (m.type === 'arbiterDone' || m.type === 'arbiterCancelled') {
+      closeArbiter();
+    } else if (m.type === 'promptHistory') {
+      recallItems = Array.isArray(m.list) ? m.list : [];
+      recallIndex = 0;
+      recallFilter.value = '';
+      renderRecall();
+      recallEl.classList.remove('hidden');
+      recallFilter.focus();
+    } else if (m.type === 'preflight') {
+      renderPreflight(m);
     } else if (m.type === 'nosession') {
       if (m.agent !== activeAgent) return;
       frameCache[m.agent] = { frame: null, meta: '', name: '', latencyMs: 0 };
+      exitVirtual();
       screen.replaceChildren();
       renderedLineCount = 0;
+      liveLines = null;
+      clearPredict();
+      if (RENDERER === 'xterm') {
+        xtermVisible(false);
+        if (xterm) xterm.reset();
+      }
       scrollState[activeAgent] = { top: 0, follow: true, historyMode: false, historyAvailable: 0, pendingHistory: false };
       wrap.scrollTop = 0;
       overlay.classList.remove('hidden');
@@ -921,9 +1510,14 @@
       btnStart.disabled = false;
       btnStart.textContent = `＋ Start new ${m.agent === 'claude' ? 'Claude' : 'Codex'}`;
       if (m.agent === 'codex') {
-        overlayTitle.textContent = 'Start or resume Codex';
-        sessionFilter.classList.add('hidden');
-        sessionList.innerHTML = '<div class="sess-empty">Codex resume is filtered to this workspace.</div>';
+        if (m.list && m.list.length) {
+          overlayTitle.textContent = 'Attach to a Codex session';
+          setSessions(m.list);
+        } else {
+          overlayTitle.textContent = 'Start or resume Codex';
+          sessionFilter.classList.add('hidden');
+          sessionList.innerHTML = '<div class="sess-empty">No Codex conversations found for this workspace.</div>';
+        }
         btnResume.classList.remove('hidden');
       } else {
         overlayTitle.textContent = (m.list && m.list.length)

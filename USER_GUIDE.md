@@ -10,11 +10,11 @@ npm run check
 npm run package
 ```
 
-Install `claude-tmux-sidebar-0.9.0.vsix` from **Extensions → … → Install from
+Install `claude-tmux-sidebar-0.10.0.vsix` from **Extensions → … → Install from
 VSIX…**, then reload VS Code. From a shell you can instead run:
 
 ```bash
-code --install-extension claude-tmux-sidebar-0.9.0.vsix --force
+code --install-extension claude-tmux-sidebar-0.10.0.vsix --force
 ```
 
 With Remote-SSH, perform the install from the connected VS Code window so the
@@ -39,10 +39,11 @@ agent.
 - **Start new Codex** creates `codex_<folder>` in the workspace root.
 - Start, resume and restart use Full Access by default. Disable
   `claudeTmux.codexFullAccess` if approvals and sandboxing are required.
-- **Resume previous session** or the toolbar resume action replaces the current
-  Codex tmux session and starts `codex resume` in the workspace root.
-- Codex's own picker filters sessions by cwd because the extension never passes
-  `--all`.
+- The launcher card now lists this workspace's Codex conversations natively
+  (read from `~/.codex/sessions`, cwd-filtered); picking one runs
+  `codex resume <id>` in a fresh workspace session.
+- **Resume previous session** still opens Codex's own cwd-filtered picker
+  (`codex resume` without `--all`).
 
 Clicking the other tab changes only the mirror target. It does not stop, detach
 or restart either agent. The last selected tab is restored after reload.
@@ -58,10 +59,31 @@ or restart either agent. The last selected tab is restored after reload.
 5. The dialog shows that authored briefing plus fresh, separate Git facts.
 6. Select **Continue task**, **Review only** or **Review & Fix**. The entire textarea is editable:
    add, delete or replace anything before pressing **Send handoff**.
-7. The edited text is sent unchanged. AgentMux waits for the target's transaction
+7. The edited text is delivered unchanged. By default it is written to
+   `.claude/agentmux/handoff-<id>.md` and only a short pointer prompt is pasted
+   into the target TUI; the target acknowledges by creating
+   `.claude/agentmux/ack-<id>` (write-restricted agents print the marker line
+   instead — same rules, automatic fallback). AgentMux waits for the
    acknowledgement before moving the writer diamond. On timeout, accept manually
-   or cancel; AgentMux never resends the work automatically.
-8. Press `⇄` from the writer to hand the work back, or `◇` to unlock both tabs.
+   or dismiss; AgentMux never resends the work automatically. A delivered
+   handoff survives a VS Code restart and is offered again as manual-accept.
+8. After a review-mode handoff, `↩` asks the reviewer for a structured findings
+   report and hands it back to the original author (same transaction rules,
+   linked to the original handoff).
+9. Press `⇄` from the writer to hand the work back, or `◇` to unlock both tabs.
+   `◷` opens the Timeline: session starts/stops, turns with durations and git
+   deltas, discarded input, and every handoff/arbiter transition, all recorded
+   in `.claude/agentmux/ledger.jsonl`.
+
+## Arbiter: ask both agents
+
+Press `⚖` (both agents must be running and idle), type one question, and
+AgentMux delivers it to Claude and Codex in parallel with an answers-only,
+no-file-changes instruction. Both marked answers are collected through
+`.claude/agentmux/answer-<id>-<agent>.md` (pane markers as fallback) and shown
+stacked for comparison. Picking a winner makes that agent the Pair Mode writer
+and tells it to proceed; input to both panes stays paused while answers are
+being gathered (up to 3 minutes, cancellable).
 
 Pair Mode never commits, resets or reverts the working tree. Its lock applies to
 this VS Code view only; another tmux client can still type into either session.
@@ -126,16 +148,23 @@ The footer and each tab show a discreet state:
 - **idle**: the session exists without detected activity;
 - **stopped**: no matching workspace session exists.
 
-These states are terminal-output heuristics, not private Claude/Codex APIs.
-`working` starts on a submitted Enter; `finished` appears after output has been
-stable for four seconds. A silent long-running tool or an external tmux client
-can still make the result imperfect. Motion is reduced automatically when the
-OS requests reduced motion.
+With `claudeTmux.stateHooks` on (default), managed launches also install Claude
+Code lifecycle hooks and a Codex notify program that stamp the true state and
+current tool into tmux pane options — the heuristics then only fill gaps. When
+hooks are unavailable, `working` starts on a submitted Enter and `finished`
+appears after output has been stable for four seconds; a silent long-running
+tool or an external tmux client can still make the result imperfect. Motion is
+reduced automatically when the OS requests reduced motion.
 
 The same compact footer shows pane size and tmux uptime. When available it adds
-`hist` for scrollback lines, attached tmux client count, and `lag` only when a
-capture takes at least 200 ms. These fields reuse the existing metadata/capture
-calls and do not add another polling process.
+`hist` for scrollback lines, attached tmux client count, `lag` only when a
+capture takes at least 200 ms, token/turn chips tailed from the CLI's local
+transcript, the current tool while working, and the last turn's git delta.
+These fields reuse existing snapshots and local file reads and do not add
+another tmux process. Per-agent status bar items mirror the same state across
+all of VS Code (click one to focus that agent), and a hidden agent asking a
+numbered question raises a notification whose buttons answer it — after
+re-verifying the exact pane identity, and only when you click.
 
 Toolbar actions are scoped to the active tab. The manage action shows zero, one
 or two entries and rechecks the workspace path immediately before killing.
@@ -163,5 +192,18 @@ or two entries and rechecks the workspace path immediately before killing.
 - **Full Access is too permissive**: set `claudeTmux.codexFullAccess` to `false`.
 - **Codex should ignore `.claude` rules**: set
   `claudeTmux.codexReadClaudeRules` to `false`.
+- **A `_agentmux_ctl_<pid>` tmux session appears in `tmux ls`**: that is the
+  extension's control-mode client parking session; it destroys itself when the
+  client disconnects. Set `claudeTmux.transport` to `poll` to avoid it entirely.
+- **Sluggish or missing pushes over odd setups**: try `claudeTmux.transport`
+  `pipe` or `poll`; polling always works everywhere.
+- **Handoff files in `.claude/agentmux`**: transaction files are transient,
+  gitignored and pruned automatically; `ledger.jsonl` is the Timeline's data and
+  can be cleared from the Timeline overlay.
+- **The agent can't write the ACK file**: sandboxed agents fall back to printing
+  the marker line automatically; nothing to configure.
+- **Too many chips or badges**: each surface has its own toggle —
+  `telemetry`, `showSparklines`, `statusBarItems`, `notifyPrompts`,
+  `tmuxStatusBar`, `eventLog`, `predictiveEcho`, `fileLinks`.
 
 For a clean end-to-end check after installing, follow [TESTING.md](TESTING.md).

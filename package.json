@@ -2,7 +2,7 @@
   "name": "claude-tmux-sidebar",
   "displayName": "AgentMux — Claude & Codex in tmux",
   "description": "Two agents, one terminal flow: switch fast and hand off work intelligently between Claude Code and Codex in tmux.",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "publisher": "Danesed",
   "license": "MIT",
   "icon": "icon.png",
@@ -69,6 +69,22 @@
         "title": "Hand off to the other agent…",
         "category": "AgentMux",
         "icon": "$(arrow-swap)"
+      },
+      {
+        "command": "claudeTmux.arbiter",
+        "title": "Ask both agents (arbiter)…",
+        "category": "AgentMux",
+        "icon": "$(law)"
+      },
+      {
+        "command": "claudeTmux.focusAgent",
+        "title": "Focus an agent tab",
+        "category": "AgentMux"
+      },
+      {
+        "command": "claudeTmux.clearPromptHistory",
+        "title": "Clear prompt history for this workspace",
+        "category": "AgentMux"
       }
     ],
     "menus": {
@@ -83,8 +99,11 @@
         { "command": "claudeTmux.attach" },
         { "command": "claudeTmux.restart" },
         { "command": "claudeTmux.handoff" },
+        { "command": "claudeTmux.arbiter" },
         { "command": "claudeTmux.kill" },
-        { "command": "claudeTmux.killPick" }
+        { "command": "claudeTmux.killPick" },
+        { "command": "claudeTmux.clearPromptHistory" },
+        { "command": "claudeTmux.focusAgent", "when": "false" }
       ]
     },
     "keybindings": [
@@ -160,6 +179,90 @@
           "type": "boolean",
           "default": false,
           "description": "When the side bar opens and no Claude session is running, automatically resume the folder's most recent Claude conversation. Disabled by default so tabs only appear after an explicit start or an existing tmux session is detected."
+        },
+        "claudeTmux.transport": {
+          "type": "string",
+          "enum": ["auto", "control", "pipe", "poll"],
+          "default": "auto",
+          "description": "How tmux is driven. auto: persistent control-mode client with push notifications, falling back to a pipe-pane tap, then polling. control: control mode only. pipe: pipe-pane output tap. poll: classic polling only."
+        },
+        "claudeTmux.predictiveEcho": {
+          "type": "boolean",
+          "default": true,
+          "description": "Paint printable keystrokes instantly as a tentative overlay at the cursor until the real tmux frame arrives (display-only, mosh-style)."
+        },
+        "claudeTmux.fileLinks": {
+          "type": "boolean",
+          "default": true,
+          "description": "Detect file paths like src/foo.js:42 in the mirror and open them in the editor with Cmd/Ctrl+click."
+        },
+        "claudeTmux.showSparklines": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a small per-agent activity sparkline (last ~2 minutes) in the tabs."
+        },
+        "claudeTmux.promptHistory": {
+          "type": "boolean",
+          "default": true,
+          "description": "Record submitted prompt lines (reconstructed from keystrokes, never from agent output) for Alt+Up recall. Stored in workspace state; clear with the 'Clear prompt history' command."
+        },
+        "claudeTmux.statusBarItems": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show one status bar item per running agent with live state, elapsed time, and telemetry tooltip."
+        },
+        "claudeTmux.notifyPrompts": {
+          "type": "boolean",
+          "default": true,
+          "description": "When a hidden or background agent asks a question, raise a notification; numbered menu options become answer buttons (always explicit, never automatic)."
+        },
+        "claudeTmux.stateHooks": {
+          "type": "boolean",
+          "default": true,
+          "description": "Launch Claude with generated lifecycle hooks and Codex with a notify program that stamp ground-truth state (working / needs-input / done, current tool) into tmux pane options. Skipped when your own --settings or notify configuration is present."
+        },
+        "claudeTmux.telemetry": {
+          "type": "boolean",
+          "default": true,
+          "description": "Tail the CLIs' local JSONL transcripts for tokens, model, turn count and current tool (footer chips and status bar tooltips). Local file reads only; nothing leaves your machine."
+        },
+        "claudeTmux.eventLog": {
+          "type": "boolean",
+          "default": true,
+          "description": "Record session, turn and handoff events to .claude/agentmux/ledger.jsonl (powers the Timeline and crash-safe handoff recovery)."
+        },
+        "claudeTmux.tmuxStatusBar": {
+          "type": "boolean",
+          "default": true,
+          "description": "Set the agent session's tmux status-right to show AgentMux facts (agent, live state, current tool) for anyone attached in a real terminal."
+        },
+        "claudeTmux.fileChannel": {
+          "type": "boolean",
+          "default": true,
+          "description": "Exchange handoff briefings, acknowledgements and arbiter answers through .claude/agentmux/ files instead of pasting/scraping the terminal (pane markers remain the automatic fallback). .claude stays the only coordination medium between the agents."
+        },
+        "claudeTmux.handoffDiffChars": {
+          "type": "number",
+          "default": 6000,
+          "minimum": 0,
+          "maximum": 60000,
+          "description": "Include up to this many characters of real diff hunks (git diff --unified=1) in the handoff briefing. 0 disables the hunks section."
+        },
+        "claudeTmux.handoffTodoFile": {
+          "type": "string",
+          "default": "tasks/todo.md",
+          "description": "Workspace-relative task file whose content (capped) is included in handoff briefings. Empty disables."
+        },
+        "claudeTmux.handoffVerifyCommand": {
+          "type": "string",
+          "default": "",
+          "description": "Optional command (e.g. 'npm run check') executed once at handoff-draft time, in the workspace, with a 60s timeout; its output tail is included in the briefing. Requires a trusted workspace. Empty disables."
+        },
+        "claudeTmux.renderer": {
+          "type": "string",
+          "enum": ["dom", "xterm"],
+          "default": "dom",
+          "description": "Terminal mirror renderer. dom: the built-in lightweight renderer. xterm: experimental vendored xterm.js for the live screen (cell-accurate widths); history and text selection still use the DOM renderer."
         }
       }
     }

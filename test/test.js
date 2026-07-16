@@ -19,6 +19,18 @@ const settings = new Map([
   ['sessionPrefix', 'tmux_'],
   ['codexSessionPrefix', 'codex_'],
   ['scrollbackLines', 1000],
+  // Keep tests hermetic: no ledger writes into the repo, no real transports,
+  // no hook assets, no telemetry reads.
+  ['eventLog', false],
+  ['transport', 'poll'],
+  ['stateHooks', false],
+  ['telemetry', false],
+  ['notifyPrompts', false],
+  ['promptHistory', false],
+  ['tmuxStatusBar', false],
+  // Legacy paste/scrape delivery keeps the historical contract assertions valid;
+  // the file channel gets its own hermetic tests.
+  ['fileChannel', false],
 ]);
 
 function execFile(command, args, options, callback) {
@@ -35,7 +47,11 @@ function execFile(command, args, options, callback) {
     }
     return callback(null, '2,3,80,24,1700000000,240,0\n', '');
   }
-  if (args[0] === 'capture-pane') return callback(null, captureOutput, '');
+  if (args[0] === 'capture-pane') {
+    // Live ticks fuse the meta display-message into the same invocation.
+    const fused = args.includes(';');
+    return callback(null, captureOutput + (fused ? '\x1f2,3,80,24,1700000000,240,0\n' : ''), '');
+  }
   if (args[0] === 'paste-buffer' && failPaste) return callback(new Error('simulated paste failure'), '', '');
   if (args[0] === 'send-keys' && args.includes('-H') && holdNextSend) {
     holdNextSend = false;
@@ -63,7 +79,7 @@ const vscode = {
 };
 
 const source = fs.readFileSync(path.join(root, 'extension.js'), 'utf8')
-  + '\nmodule.exports.__test = { ClaudeTmuxView, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt };';
+  + '\nmodule.exports.__test = { ClaudeTmuxView, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions };';
 const moduleUnderTest = { exports: {} };
 const sandbox = {
   module: moduleUnderTest,
@@ -84,7 +100,7 @@ const sandbox = {
   clearInterval,
 };
 vm.runInNewContext(source, sandbox, { filename: 'extension.js' });
-const { ClaudeTmuxView, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt } = moduleUnderTest.exports.__test;
+const { ClaudeTmuxView, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions } = moduleUnderTest.exports.__test;
 
 function makeProvider() {
   const provider = new ClaudeTmuxView({
@@ -245,10 +261,51 @@ async function run() {
   provider.agentState.codex.historyMode = false;
   provider.agentState.codex.lastLiveFrame = 'terminal frame\n';
   provider.agentState.codex.lastMeta = '2,3,80,24,1700000000,240';
-  provider.agentState.codex.metaPending = false;
   calls.length = 0;
   await provider.tickOnce(false);
-  assert.strictEqual(calls.length, 1, 'an unchanged warm live tick should only capture the pane');
+  assert.strictEqual(calls.length, 1, 'an unchanged warm live tick must cost exactly one tmux process (fused capture+meta)');
+
+  // ---- fused capture + line-delta transport ---------------------------------
+  const fusedSplit = splitFusedCapture('line1\nline2\n\x1f1,2,80,24,1700000000,240,0\n');
+  assert.strictEqual(fusedSplit.frame, 'line1\nline2\n');
+  assert.strictEqual(fusedSplit.meta, '1,2,80,24,1700000000,240,0');
+  const trickySplit = splitFusedCapture('pane text with \x1f inside\n');
+  assert.strictEqual(trickySplit.frame, 'pane text with \x1f inside\n', 'pane bytes must never be mistaken for the meta sentinel');
+  assert.strictEqual(trickySplit.meta, null);
+  assert.strictEqual(diffFrameLines(['a', 'b', 'c', ''], ['a', 'X', 'c', ''], 100).length, 1);
+  assert.strictEqual(diffFrameLines(['a', 'b'], ['a', 'b', 'c'], 100), null, 'row-count changes require a full frame');
+
+  captureOutput = Array.from({ length: 20 }, (_, i) => 'row ' + i).join('\n') + '\n';
+  provider.resetLiveFrame('codex');
+  messages.length = 0;
+  await provider.tickOnce(true);
+  const fullFrameMsg = messages.filter((msg) => msg.type === 'frame').at(-1);
+  assert.ok(fullFrameMsg.frame && !fullFrameMsg.delta, 'a forced tick sends the full frame');
+  assert.strictEqual(fullFrameMsg.meta, '2,3,80,24,1700000000,240,0', 'cursor meta must ride fused with the frame it describes');
+  captureOutput = captureOutput.replace('row 7', 'row 7 CHANGED');
+  messages.length = 0;
+  await provider.tickOnce(false);
+  const deltaMsg = messages.filter((msg) => msg.type === 'frame').at(-1);
+  assert.strictEqual(deltaMsg.frame, null, 'small changes must travel as line deltas');
+  assert.strictEqual(JSON.stringify(deltaMsg.delta.changes), '[[7,"row 7 CHANGED"]]');
+  assert.strictEqual(deltaMsg.delta.baseSeq + 1, deltaMsg.delta.seq, 'deltas must chain by sequence number');
+  captureOutput = 'terminal frame\n';
+  provider.resetLiveFrame('codex');
+
+  // ---- adaptive cadence -------------------------------------------------------
+  provider._lastInputAt = Date.now();
+  assert.ok(provider.nextTickDelay() <= 120, 'typing must run the loop hot');
+  provider._lastInputAt = 0;
+  provider._lastFrameChangeAt = 0;
+  assert.ok(provider.nextTickDelay() >= 400, 'a static pane must decay the loop');
+  provider._eventSourceLive = true;
+  assert.ok(provider.nextTickDelay() >= 500, 'a live push source demotes polling to a watchdog');
+  provider._eventSourceLive = false;
+
+  // ---- control-mode client fundamentals ----------------------------------------
+  assert.strictEqual(TmuxControlClient.quoteArg("it's"), "'it'\\''s'");
+  assert.ok(TmuxControlClient.controlSafe(['display-message', '-p', '#{pane_id}']));
+  assert.ok(!TmuxControlClient.controlSafe(['set-buffer', '--', 'multi\nline']), 'multiline payloads must stay on execFile');
 
   const cwd = workspace;
   provider.rememberSession('claude', cwd, 'tmux_claude-tmux-sidebar', true);
@@ -460,6 +517,89 @@ async function run() {
   assert.strictEqual(provider.writerAgent, 'codex', 'only an observed current target ACK transfers ownership automatically');
   captureOutput = 'terminal frame\n';
 
+  // ---- prompt recall reconstruction ---------------------------------------------
+  settings.set('promptHistory', true);
+  state.delete('claudeTmux.promptHistory');
+  provider.agentState.codex.promptLine = '';
+  provider.recordPromptInput('codex', 'fix the bug');
+  provider.recordPromptInput('codex', '\x7f\x7f\x7fissue\r');
+  assert.strictEqual(JSON.stringify(state.get('claudeTmux.promptHistory')), '["fix the issue"]', 'submitted lines must be reconstructed byte-for-byte');
+  provider.recordPromptInput('codex', 'abc\x1b[A');
+  assert.strictEqual(provider.agentState.codex.promptLine, null, 'escape sequences must bail reconstruction, not guess');
+  settings.set('promptHistory', false);
+
+  // ---- .claude/agentmux file channel ---------------------------------------------
+  const os = require('os');
+  const channelWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), 'agentmux-test-'));
+  vscode.workspace.workspaceFolders[0].uri.fsPath = channelWorkspace;
+  settings.set('fileChannel', true);
+  const channelProvider = makeProvider();
+  const draftPath = channelProvider.channelFile('draft-tx1.md');
+  assert.ok(draftPath.includes(path.join('.claude', 'agentmux')), 'agents communicate only through .claude');
+  fs.mkdirSync(path.dirname(draftPath), { recursive: true });
+  fs.writeFileSync(draftPath, 'HANDOFF_BEGIN:tx1\nfile-authored briefing\nHANDOFF_END:tx1\n');
+  const fileBlock = await channelProvider.waitForMarkedBlock({
+    prefix: 'HANDOFF', id: 'tx1', file: draftPath, paneName: 'codex_x', timeoutMs: 2000, active: () => true,
+  });
+  assert.strictEqual(fileBlock, 'file-authored briefing', 'the channel file must win over pane scraping');
+
+  settings.set('eventLog', true);
+  channelProvider.eventLog.append({
+    type: 'handoff', id: 'tx1', phase: 'delivered', source: 'claude', target: 'codex', mode: 'continue',
+    text: 'briefing', targetName: 'codex_x', targetCreated: '1700000000', targetGeneration: 'gen-a',
+  });
+  const ledgerTail = await channelProvider.eventLog.tail(10);
+  assert.strictEqual(ledgerTail.at(-1).phase, 'delivered', 'the ledger must record handoff transitions');
+  settings.set('eventLog', false);
+  settings.set('fileChannel', false);
+  vscode.workspace.workspaceFolders[0].uri.fsPath = workspace;
+  fs.rmSync(channelWorkspace, { recursive: true, force: true });
+
+  // ---- channel-aware prompts -------------------------------------------------------
+  settings.set('fileChannel', true);
+  assert.match(sourceHandoffPrompt('claude', 'codex', 'tx9'), /\.claude\/agentmux\/draft-tx9\.md/);
+  assert.match(findingsPrompt('codex', 'claude', 'tx9'), /Confirmed issues/);
+  assert.ok(!sourceHandoffPrompt('claude', 'codex', 'tx9').includes('HANDOFF_BEGIN:tx9'), 'the echoed prompt must never contain a complete marker');
+  settings.set('fileChannel', false);
+  assert.doesNotMatch(sourceHandoffPrompt('claude', 'codex', 'tx9'), /agentmux/);
+  assert.match(CODEX_CLAUDE_RULES, /Skip the \.claude\/agentmux directory/);
+
+  // ---- codex rollout listing ---------------------------------------------------------
+  const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'agentmux-home-'));
+  const dayDir = path.join(fakeHome, '.codex', 'sessions', '2026', '07', '16');
+  fs.mkdirSync(dayDir, { recursive: true });
+  fs.writeFileSync(path.join(dayDir, 'rollout-abc.jsonl'),
+    JSON.stringify({ type: 'session_meta', payload: { id: 'sess-abc', cwd: workspace } }) + '\n'
+    + JSON.stringify({ type: 'event_msg', payload: { type: 'user_message', message: 'refactor the tick loop' } }) + '\n');
+  fs.writeFileSync(path.join(dayDir, 'rollout-other.jsonl'),
+    JSON.stringify({ type: 'session_meta', payload: { id: 'sess-other', cwd: '/somewhere/else' } }) + '\n');
+  const oldHome = process.env.HOME;
+  process.env.HOME = fakeHome;
+  const codexSessions = await listCodexSessions(workspace);
+  process.env.HOME = oldHome;
+  assert.strictEqual(codexSessions.length, 1, 'codex listing must be cwd-scoped');
+  assert.strictEqual(codexSessions[0].id, 'sess-abc');
+  assert.strictEqual(codexSessions[0].name, 'refactor the tick loop');
+  fs.rmSync(fakeHome, { recursive: true, force: true });
+
+  // ---- arbiter gates -------------------------------------------------------------------
+  provider.handoff = null;
+  provider.agentState.claude.present = true;
+  provider.agentState.codex.present = true;
+  provider.agentState.claude.status = 'working';
+  provider.agentState.codex.status = 'idle';
+  provider.prepareArbiter();
+  assert.strictEqual(provider.arbiter, null, 'arbiter must refuse while an agent is working');
+  provider.agentState.claude.status = 'idle';
+  provider.prepareArbiter();
+  assert.strictEqual(provider.arbiter.phase, 'collecting');
+  await provider.createArbiter({ id: 'stale-arbiter', question: 'x' });
+  assert.strictEqual(provider.arbiter.phase, 'collecting', 'a stale arbiter id must not advance the round');
+  provider.prepareHandoff('claude');
+  assert.strictEqual(provider.handoff, null, 'handoffs must be blocked while an arbiter round is open');
+  provider.cancelArbiter(provider.arbiter.id);
+  assert.strictEqual(provider.arbiter, null);
+
   const webviewSource = fs.readFileSync(path.join(root, 'media/main.js'), 'utf8');
   assert.match(webviewSource, /tab\.classList\.toggle\('hidden', !present\)/);
   assert.match(webviewSource, /handoffText\.value/);
@@ -472,6 +612,13 @@ async function run() {
   assert.match(source, /value="continue">Continue task/);
   assert.match(webviewSource, /compositionend/);
   assert.match(webviewSource, /scheduleReportSize/);
+  assert.match(webviewSource, /type: 'resync'/);
+  assert.match(webviewSource, /bgFrame/);
+  assert.match(webviewSource, /arbiterVerdict/);
+  assert.match(webviewSource, /path-link/);
+  assert.match(webviewSource, /promptHistory/);
+  assert.match(webviewSource, /updateVirtualWindow/);
+  assert.match(webviewSource, /notePredict/);
 
   console.log('All extension tests passed.');
 }
