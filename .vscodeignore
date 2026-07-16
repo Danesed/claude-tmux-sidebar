@@ -1,5 +1,6 @@
 .git/**
 .gitignore
+.claude/**
 .vscode/**
 *.vsix
 PUBLISHING.md

@@ -6,6 +6,8 @@ Run **Claude Code** and **OpenAI Codex CLI** in persistent tmux sessions, switch
 between them instantly, and hand work from one agent to the other from a single
 VS Code side-bar view.
 
+![AgentMux in action: the Claude tab mirrored in the side bar with live state, activity sparkline and telemetry footer](media/agentmux.0.10.0.png)
+
 The extension is deliberately workspace-scoped:
 
 - the Claude tab controls only `tmux_<folder>`;
