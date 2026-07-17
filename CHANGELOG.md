@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.1
+- Fix intermittent unresponsive typing on some tmux versions: the control-mode client now writes one command per control line instead of ';'-fused lines. Fused lines yield a version-dependent number of `%begin` reply blocks, which desynchronized the reply queue — keystrokes stalled until the 10s watchdog killed the client and dropped everything in flight, and the `\x1f` cursor-meta line leaked into the rendered frame as an incrementing number line under the agent's footer (also mispositioning/hiding the mirror cursor).
+- Strip any leaked meta line from frames as defense in depth, and never mistake legitimate pane bytes for the sentinel.
+- Input suspension around session operations is now depth-counted and watchdog-released, so a wedged tmux call can no longer swallow typing forever.
+- Slim down: removed the per-tab activity sparklines, the predictive keystroke echo overlay, and the experimental vendored xterm.js renderer (~490 KB) with their settings (`showSparklines`, `predictiveEcho`, `renderer`). tmux already does the terminal emulation; the DOM mirror stays the single renderer.
+
 ## 0.10.0
 - Fuse the pane capture and cursor/size metadata into one tmux invocation per tick: cursor position is now always exactly as fresh as the frame it describes and the live path costs a single process.
 - Add a persistent tmux control-mode client (`claudeTmux.transport`, default `auto`) that replaces fork/exec-per-command and pushes output notifications via format subscriptions on the active pane; a `pipe-pane` FIFO tap is the fallback event source and classic polling remains the watchdog. Failed in-flight input is reported, never replayed.

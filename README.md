@@ -6,7 +6,7 @@ Run **Claude Code** and **OpenAI Codex CLI** in persistent tmux sessions, switch
 between them instantly, and hand work from one agent to the other from a single
 VS Code side-bar view.
 
-![AgentMux in action: the Claude tab mirrored in the side bar with live state, activity sparkline and telemetry footer](media/agentmux.0.10.0.png)
+![AgentMux in action: the Claude tab mirrored in the side bar with live state and telemetry footer](media/agentmux.0.10.0.png)
 
 The extension is deliberately workspace-scoped:
 
@@ -32,10 +32,9 @@ It mirrors the selected tmux pane instead of opening another VS Code terminal:
 - the refresh loop is adaptive: hot while you type or output streams, slow when
   the pane is static, watchdog-only when push notifications are live;
 - one ordered input pump merges pending keystrokes under backpressure, while
-  bracketed paste preserves large UTF-8 input; printable keys get an instant
-  display-only **predictive echo** until the real frame lands;
+  bracketed paste preserves large UTF-8 input;
 - a **Claude** or **Codex** tab appears only while that workspace's matching
-  tmux session exists; tabs carry live state dots and an activity sparkline;
+  tmux session exists; tabs carry live state dots;
 - the `+` menu starts or resumes an absent agent (Codex conversations are now
   listed natively from `~/.codex/sessions`, workspace-filtered);
 - `Cmd/Ctrl+click` a `path/file.js:42` in agent output to open it in the editor;
@@ -209,9 +208,7 @@ settings.
 | `claudeTmux.cursorStyle` | `block` | `block`, `bar` or `underline`. |
 | `claudeTmux.autoResume` | `false` | Optionally auto-resume the newest Claude conversation when the view opens. |
 | `claudeTmux.transport` | `auto` | `auto` (control mode → pipe tap → polling), `control`, `pipe`, or `poll`. |
-| `claudeTmux.predictiveEcho` | `true` | Instant display-only echo of printable keystrokes. |
 | `claudeTmux.fileLinks` | `true` | Cmd/Ctrl+click `file:line` tokens to open them in the editor. |
-| `claudeTmux.showSparklines` | `true` | Per-agent activity sparkline in the tabs. |
 | `claudeTmux.promptHistory` | `true` | Alt+Up prompt recall (workspace-local; clear via command). |
 | `claudeTmux.statusBarItems` | `true` | One status bar item per running agent. |
 | `claudeTmux.notifyPrompts` | `true` | Notification with answer buttons when a background agent asks. |
@@ -223,7 +220,6 @@ settings.
 | `claudeTmux.handoffDiffChars` | `6000` | Diff-hunk budget in briefings (0 disables). |
 | `claudeTmux.handoffTodoFile` | `tasks/todo.md` | Task file included in briefings (empty disables). |
 | `claudeTmux.handoffVerifyCommand` | `""` | Optional trust-gated verify command run once at draft time. |
-| `claudeTmux.renderer` | `dom` | `dom` or experimental vendored `xterm` for the live screen. |
 
 ## Scope and limits
 
@@ -238,8 +234,6 @@ settings.
 - Transcript telemetry parses the CLIs' local JSONL files, which are not a
   stable API; the chips silently disappear if a format changes.
 - This is a terminal mirror, not a full PTY. Mouse input is not forwarded.
-- The experimental xterm renderer draws the live screen only; history mode and
-  text selection use the DOM renderer.
 - Scrollback is bounded by `claudeTmux.scrollbackLines` and tmux's own history.
 - Multi-line paste is sent raw and a newline may submit input.
 - Pair Mode transfers a source-authored, target-specific snapshot and uses a

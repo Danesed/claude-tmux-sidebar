@@ -30,7 +30,6 @@
   const statusDot = document.getElementById('status-dot');
   const statusLabel = document.getElementById('status-label');
   const app = document.getElementById('app');
-  const predictEl = document.getElementById('predict');
   const recallEl = document.getElementById('prompt-recall');
   const recallFilter = document.getElementById('recall-filter');
   const recallList = document.getElementById('recall-list');
@@ -38,97 +37,8 @@
   const tabs = [...document.querySelectorAll('.agent-tab')];
   const cursorStyle = (app && app.dataset.cursor) || 'block';
   const FLAGS = {
-    predict: app?.dataset.predict !== '0',
     links: app?.dataset.links !== '0',
-    sparks: app?.dataset.sparks !== '0',
   };
-  // Experimental opt-in renderer: vendored xterm.js draws the LIVE screen
-  // (cell-accurate widths, GPU paint); history mode and selection still use the
-  // DOM renderer. Input capture stays on #screen — xterm never sees keys.
-  const RENDERER = (app?.dataset.renderer === 'xterm' && typeof Terminal === 'function') ? 'xterm' : 'dom';
-  let xterm = null;
-  let xtermEl = null;
-  function xtermTheme() {
-    const s = getComputedStyle(document.documentElement);
-    const v = (name, fallback) => (s.getPropertyValue(name) || '').trim() || fallback;
-    return {
-      background: v('--vscode-editor-background', '#1e1e1e'),
-      foreground: v('--vscode-editor-foreground', '#cccccc'),
-      cursor: v('--vscode-terminalCursor-foreground', '#d4d4d4'),
-      black: v('--vscode-terminal-ansiBlack', '#000000'),
-      red: v('--vscode-terminal-ansiRed', '#cd3131'),
-      green: v('--vscode-terminal-ansiGreen', '#0dbc79'),
-      yellow: v('--vscode-terminal-ansiYellow', '#e5e510'),
-      blue: v('--vscode-terminal-ansiBlue', '#2472c8'),
-      magenta: v('--vscode-terminal-ansiMagenta', '#bc3fbc'),
-      cyan: v('--vscode-terminal-ansiCyan', '#11a8cd'),
-      white: v('--vscode-terminal-ansiWhite', '#e5e5e5'),
-      brightBlack: v('--vscode-terminal-ansiBrightBlack', '#666666'),
-      brightRed: v('--vscode-terminal-ansiBrightRed', '#f14c4c'),
-      brightGreen: v('--vscode-terminal-ansiBrightGreen', '#23d18b'),
-      brightYellow: v('--vscode-terminal-ansiBrightYellow', '#f5f543'),
-      brightBlue: v('--vscode-terminal-ansiBrightBlue', '#3b8eea'),
-      brightMagenta: v('--vscode-terminal-ansiBrightMagenta', '#d670d6'),
-      brightCyan: v('--vscode-terminal-ansiBrightCyan', '#29b8db'),
-      brightWhite: v('--vscode-terminal-ansiBrightWhite', '#ffffff'),
-    };
-  }
-  function ensureXterm() {
-    if (xterm) return xterm;
-    xtermEl = document.createElement('div');
-    xtermEl.id = 'xterm-host';
-    document.getElementById('terminal').appendChild(xtermEl);
-    const cs = getComputedStyle(document.getElementById('screen'));
-    xterm = new Terminal({
-      disableStdin: true,
-      cols: lastCols || 80,
-      rows: lastRows || 24,
-      fontFamily: cs.fontFamily,
-      fontSize: parseFloat(cs.fontSize) || 12,
-      theme: xtermTheme(),
-      cursorBlink: true,
-      scrollback: 0,
-      allowTransparency: true,
-    });
-    xterm.open(xtermEl);
-    return xterm;
-  }
-  function xtermVisible(visible) {
-    if (!xtermEl) { if (!visible) return; ensureXterm(); }
-    xtermEl.style.display = visible ? '' : 'none';
-    app.classList.toggle('xterm-live', visible);
-  }
-  function xtermCursorSeq(meta) {
-    const p = (meta || '').split(',');
-    return `\x1b[${(parseInt(p[1], 10) || 0) + 1};${(parseInt(p[0], 10) || 0) + 1}H`;
-  }
-  function xtermWriteFull(frame, meta) {
-    const t = ensureXterm();
-    const p = (meta || '').split(',');
-    const cols = parseInt(p[2], 10) || lastCols || 80;
-    const rows = parseInt(p[3], 10) || lastRows || 24;
-    if (t.cols !== cols || t.rows !== rows) t.resize(cols, rows);
-    const lines = frame.split('\n');
-    if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
-    let out = '\x1b[H';
-    const max = Math.min(lines.length, t.rows);
-    for (let i = 0; i < max; i++) {
-      out += (i ? '\r\n' : '') + lines[i].replace(/\r/g, '') + '\x1b[0m\x1b[K';
-    }
-    out += '\x1b[0J' + xtermCursorSeq(meta);
-    t.write(out);
-  }
-  function xtermPatch(changes, meta) {
-    const t = ensureXterm();
-    let out = '';
-    for (const [idx, raw] of changes) {
-      if (idx >= t.rows) return false;
-      out += `\x1b[${idx + 1};1H\x1b[2K` + raw.replace(/\r/g, '') + '\x1b[0m';
-    }
-    out += xtermCursorSeq(meta);
-    t.write(out);
-    return true;
-  }
   let activeAgent = 'claude';
   let writerAgent = null;
   let handoffPhase = null;
@@ -549,7 +459,6 @@
   function applyFrameMeta(meta, name, latencyMs = 0) {
     const p = (meta || '').split(',');
     placeCursor(parseInt(p[0], 10) || 0, parseInt(p[1], 10) || 0, parseInt(p[3], 10) || lastRows || 24);
-    if (predictQueue.length) positionPredict();
     const pw = p[2], ph = p[3], created = parseInt(p[4], 10) || 0;
     const history = parseInt(p[5], 10) || 0;
     const clients = parseInt(p[6], 10) || 0;
@@ -631,39 +540,6 @@
       || (!!writerAgent && activeAgent !== writerAgent);
   }
 
-  // ---- predictive local echo -------------------------------------------------
-  // Paint printable keystrokes instantly as a tentative overlay at the cursor;
-  // any real content update supersedes it. Display-only: the input pump and the
-  // no-implicit-replay contract are untouched.
-  let predictQueue = [];
-  let predictAt = 0;
-  function clearPredict() {
-    if (predictQueue.length) predictQueue = [];
-    if (predictEl.textContent) predictEl.textContent = '';
-  }
-  function positionPredict() {
-    if (!predictQueue.length) { predictEl.textContent = ''; return; }
-    predictEl.textContent = predictQueue.join('');
-    predictEl.style.left = cursorEl.style.left;
-    predictEl.style.top = cursorEl.style.top;
-    predictEl.style.height = charH + 'px';
-    predictEl.style.lineHeight = charH + 'px';
-  }
-  function notePredict(e, bytes) {
-    if (!FLAGS.predict) return;
-    if (bytes.length === 1 && bytes >= ' ' && !e.ctrlKey && !e.metaKey && !e.altKey
-      && isTextKey(e.key) && scrollState[activeAgent].follow) {
-      if (predictQueue.length < 40) predictQueue.push(bytes);
-      predictAt = Date.now();
-      positionPredict();
-    } else if (bytes === '\x7f' && predictQueue.length) {
-      predictQueue.pop();
-      positionPredict();
-    } else {
-      clearPredict();
-    }
-  }
-
   // ---- prompt recall (Alt+Up) --------------------------------------------------
   let recallItems = [];
   let recallFiltered = [];
@@ -731,7 +607,6 @@
         type: 'input', agent: activeAgent, data: bytes,
         immediate: e.ctrlKey || !isTextKey(e.key),
       });
-      notePredict(e, bytes);
     }
   });
   screen.addEventListener('click', (e) => {
@@ -741,7 +616,7 @@
     e.preventDefault();
     vscode.postMessage({ type: 'openFile', path: link.dataset.path, line: link.dataset.line, col: link.dataset.col });
   });
-  screen.addEventListener('compositionstart', () => { composing = true; clearPredict(); });
+  screen.addEventListener('compositionstart', () => { composing = true; });
   screen.addEventListener('compositionend', (e) => {
     composing = false;
     if (!e.data || isInputLocked()) return;
@@ -774,7 +649,6 @@
     renderedLineCount = 0;
     liveLines = null;
     liveSeq = 0;
-    clearPredict();
     closeRecall(false);
     cursorEl.style.visibility = 'hidden';
     overlay.classList.add('hidden');
@@ -782,15 +656,9 @@
     statusMeta.textContent = '';
     const cached = frameCache[agent];
     if (cached.frame != null) {
-      if (RENDERER === 'xterm') {
-        xtermVisible(true);
-        xtermWriteFull(cached.frame, cached.meta);
-      } else {
-        render(cached.frame);
-      }
+      render(cached.frame);
       applyFrameMeta(cached.meta, cached.name, cached.latencyMs);
     } else {
-      if (RENDERER === 'xterm') xtermVisible(false);
       setStatus('', 'idle', 'connecting…');
     }
     programmaticScroll = true;
@@ -864,29 +732,6 @@
     btnUnlock.classList.toggle('hidden', !writerAgent);
   }
 
-  // 60-slot activity sparkline (2s per slot): teal = output, yellow = asking.
-  function drawSpark(tab, series) {
-    const canvas = tab.querySelector('.agent-spark');
-    if (!canvas) return;
-    const key = Array.isArray(series) && series.length ? series.join('') : '';
-    if (canvas._key === key) return;
-    canvas._key = key;
-    const ctx = canvas.getContext('2d');
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    if (!key) return;
-    const styles = getComputedStyle(document.documentElement);
-    const activeColor = (styles.getPropertyValue('--vscode-charts-blue') || '').trim() || '#58c7d5';
-    const warnColor = (styles.getPropertyValue('--vscode-charts-yellow') || '').trim() || '#d7a838';
-    const w = canvas.width / series.length;
-    for (let i = 0; i < series.length; i++) {
-      const v = series[i];
-      if (!v) continue;
-      ctx.fillStyle = v === 2 ? warnColor : activeColor;
-      const h = v === 2 ? canvas.height : canvas.height - 3;
-      ctx.fillRect(i * w, canvas.height - h, Math.max(1, w - 0.4), h);
-    }
-  }
-
   function renderPreflight(m) {
     const missing = !m.tmux || !m.claude || !m.codex;
     preflightEl.classList.toggle('hidden', !missing);
@@ -921,7 +766,6 @@
     for (const agent of ['claude', 'codex']) {
       Object.assign(agentPresence[agent], message.agents?.[agent] || { present: false, status: 'idle' });
       const tab = document.getElementById(`tab-${agent}`);
-      if (FLAGS.sparks) drawSpark(tab, agentPresence[agent].spark);
       const present = !!agentPresence[agent].present;
       const status = agentPresence[agent].status || 'idle';
       const attention = agentPresence[agent].attention || null;
@@ -1387,22 +1231,12 @@
       const state = scrollState[activeAgent];
       state.historyMode = !!m.historyMode;
       state.historyAvailable = parseInt(m.historyAvailable, 10) || 0;
-      if (m.frame != null || m.delta) clearPredict();
-      else if (predictQueue.length && Date.now() - predictAt > 400) clearPredict();
-      const xtermLive = RENDERER === 'xterm' && !m.historyMode;
       if (m.frame != null) {
         liveSeq = m.seq || 0;
         liveLines = m.historyMode ? null : m.frame.split('\n');
         frameCache[m.agent].frame = m.frame;
-        if (xtermLive) {
-          xtermVisible(true);
-          xtermWriteFull(m.frame, m.meta || frameCache[m.agent].meta);
-          pendingFrame = null;
-        } else {
-          if (RENDERER === 'xterm') xtermVisible(false);
-          if (hasSelection()) pendingFrame = { agent: m.agent, frame: m.frame }; // don't clobber a copy in progress
-          else { render(m.frame); pendingFrame = null; }
-        }
+        if (hasSelection()) pendingFrame = { agent: m.agent, frame: m.frame }; // don't clobber a copy in progress
+        else { render(m.frame); pendingFrame = null; }
       } else if (m.delta) {
         if (!liveLines || m.delta.baseSeq !== liveSeq) {
           vscode.postMessage({ type: 'resync' }); // broken chain -> ask for a full frame
@@ -1410,12 +1244,7 @@
           liveSeq = m.delta.seq;
           for (const [idx, raw] of m.delta.changes) liveLines[idx] = raw;
           frameCache[m.agent].frame = liveLines.join('\n');
-          if (xtermLive) {
-            xtermVisible(true);
-            if (!xtermPatch(m.delta.changes, m.meta || frameCache[m.agent].meta)) {
-              xtermWriteFull(frameCache[m.agent].frame, m.meta || frameCache[m.agent].meta);
-            }
-          } else if (hasSelection() || pendingFrame) {
+          if (hasSelection() || pendingFrame) {
             pendingFrame = { agent: m.agent, useLive: true };
           } else if (!patchRows(m.delta.changes)) {
             render(liveLines);
@@ -1493,11 +1322,6 @@
       screen.replaceChildren();
       renderedLineCount = 0;
       liveLines = null;
-      clearPredict();
-      if (RENDERER === 'xterm') {
-        xtermVisible(false);
-        if (xterm) xterm.reset();
-      }
       scrollState[activeAgent] = { top: 0, follow: true, historyMode: false, historyAvailable: 0, pendingHistory: false };
       wrap.scrollTop = 0;
       overlay.classList.remove('hidden');

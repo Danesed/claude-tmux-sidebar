@@ -116,16 +116,30 @@ class TmuxControlClient {
 
   exec(args) {
     if (!this.usable()) return Promise.resolve({ ok: false, out: '' });
-    const parts = 1 + args.reduce((n, a) => n + (a === ';' ? 1 : 0), 0);
+    // One command per control line. A single line always yields exactly one
+    // %begin/%end block, on every tmux version. ';'-fused lines do NOT: some
+    // versions reply with one block per part, others with one block for the
+    // whole line, which desynchronized this reply queue (stalled input for
+    // 10s until the watchdog killed the client, and leaked the \x1f meta
+    // line into rendered frames). Commands split from one argv are written in
+    // a single stdin flush, so they still run back-to-back on the client.
+    const commands = [[]];
+    for (const a of args) {
+      if (a === ';') commands.push([]);
+      else commands[commands.length - 1].push(a);
+    }
+    const parts = commands.length;
     return new Promise((resolve) => {
       const entry = {
         remaining: parts, ok: true, out: '', resolve,
         timer: setTimeout(() => this.destroy(true), 10000),
       };
       for (let i = 0; i < parts; i++) this.pending.push(entry);
-      const line = args.map((a) => (a === ';' ? ';' : TmuxControlClient.quoteArg(a))).join(' ');
+      const lines = commands
+        .map((cmd) => cmd.map((a) => TmuxControlClient.quoteArg(a)).join(' '))
+        .join('\n');
       try {
-        this.proc.stdin.write(line + '\n');
+        this.proc.stdin.write(lines + '\n');
       } catch {
         this.destroy(true);
       }
@@ -416,16 +430,29 @@ function fmtDurationShort(ms) {
 const META_SENTINEL = '\x1f';
 const META_FORMAT = '#{cursor_x},#{cursor_y},#{pane_width},#{pane_height},#{session_created},#{history_size},#{session_attached}';
 
+// A leaked meta line is the sentinel followed by exactly the 7-number CSV at
+// end of line; arbitrary pane bytes that merely contain \x1f must survive.
+const META_LEAK_RE = /^.*\x1f\d+,\d+,\d+,\d+,\d+,\d+,\d+\s*$/;
+
 function splitFusedCapture(out) {
   const text = String(out || '');
   const idx = text.lastIndexOf(META_SENTINEL);
-  if (idx >= 0) {
-    const metaText = text.slice(idx + 1).trim();
-    if (/^\d+,\d+,\d+,\d+,\d+,\d+,\d+$/.test(metaText)) {
-      return { frame: text.slice(0, idx), meta: metaText };
-    }
+  if (idx < 0) return { frame: text, meta: null };
+  const metaText = text.slice(idx + 1).trim();
+  if (/^\d+,\d+,\d+,\d+,\d+,\d+,\d+$/.test(metaText)) {
+    // Defense in depth: if reply framing ever drifts again, never let a
+    // sentinel/meta line reach the renderer as pane text.
+    return { frame: stripMetaLines(text.slice(0, idx)), meta: metaText };
   }
-  return { frame: text, meta: null };
+  return { frame: stripMetaLines(text), meta: null };
+}
+
+function stripMetaLines(frame) {
+  if (!frame.includes(META_SENTINEL)) return frame;
+  return frame
+    .split('\n')
+    .filter((line) => !META_LEAK_RE.test(line))
+    .join('\n');
 }
 
 // Index-wise line diff for the frame transport. Returns null when a full frame
@@ -1086,8 +1113,6 @@ class ClaudeTmuxView {
       backgroundPollAt: 0,
       attention: null,
       promptLine: '',          // reconstructed prompt for Alt+Up recall (null = bailed)
-      spark: new Uint8Array(60), // ~2 minutes of activity, one slot per 2s
-      sparkSlot: null,
     };
   }
 
@@ -1165,7 +1190,6 @@ class ClaudeTmuxView {
         status: state.status,
         statusSince: state.statusSince,
         attention: state.attention,
-        spark: this.sparkSeries(agent),
         telemetry: state.telemetry || null,
         delta: state.lastTurnDelta || null,
         lastTool: state.lastTool || '',
@@ -1401,40 +1425,12 @@ class ClaudeTmuxView {
     }
   }
 
-  // Activity sparkline ring buffer: 60 slots of 2s. Level 1 = output changed,
-  // level 2 = the agent is asking for input.
-  markSpark(agent, level) {
-    const state = this.agentState[agent];
-    const slot = Math.floor(Date.now() / 2000);
-    if (state.sparkSlot == null || slot - state.sparkSlot >= 60) {
-      state.spark.fill(0);
-    } else {
-      for (let s = state.sparkSlot + 1; s <= slot; s++) state.spark[s % 60] = 0;
-    }
-    state.spark[slot % 60] = Math.max(state.spark[slot % 60], level);
-    state.sparkSlot = slot;
-  }
-
-  sparkSeries(agent) {
-    const state = this.agentState[agent];
-    if (state.sparkSlot == null) return [];
-    const slot = Math.floor(Date.now() / 2000);
-    if (slot - state.sparkSlot >= 60) return [];
-    const series = new Array(60);
-    for (let i = 0; i < 60; i++) {
-      const s = slot - 59 + i;
-      series[i] = s > state.sparkSlot ? 0 : state.spark[((s % 60) + 60) % 60];
-    }
-    return series;
-  }
-
   updateActivity(agent, frame, changed) {
     const state = this.agentState[agent];
     const now = Date.now();
     if (changed) {
       const tail = stripAnsi(frame).split('\n').slice(-12).join('\n');
       const needsInput = /(?:do you want to|would you like to|allow\s+.+\?|permission required|approval required|press enter to continue|\[[yY]\/[nN]\])/i.test(tail);
-      this.markSpark(agent, needsInput ? 2 : 1);
       if (needsInput) {
         this.setAgentStatus(agent, 'needs-input');
         return;
@@ -1968,16 +1964,29 @@ class ClaudeTmuxView {
 
   async withInputSuspended(agent, action, requireFlush = false) {
     const queue = this.inputQueues[agent];
+    // Depth-counted so overlapping suspends can't re-enable input early, and
+    // watchdog-released so a wedged tmux call inside `action` can never leave
+    // typing silently swallowed forever.
+    queue.suspendDepth = (queue.suspendDepth || 0) + 1;
     queue.suspended = true;
     if (queue.timer) clearTimeout(queue.timer);
     queue.timer = null;
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      queue.suspendDepth = Math.max(0, (queue.suspendDepth || 1) - 1);
+      if (queue.suspendDepth === 0) queue.suspended = false;
+    };
+    const watchdog = setTimeout(release, 20000);
     try {
       this.flushInput(agent);
       const flushed = await queue.chain;
       if (requireFlush && flushed === false) return false;
       return await action();
     } finally {
-      queue.suspended = false;
+      clearTimeout(watchdog);
+      release();
     }
   }
 
@@ -3278,12 +3287,6 @@ class ClaudeTmuxView {
     const fontSize = (cfg().get('fontSize') || 0) || termCfg.get('fontSize') || 12;
     const cursorStyle = cfg().get('cursorStyle') || 'block';
     const flag = (key) => (cfg().get(key) === false ? '0' : '1');
-    // Optional vendored xterm.js renderer (no CDN: CSP allows only local assets).
-    const useXterm = cfg().get('renderer') === 'xterm'
-      && fs.existsSync(path.join(this.context.extensionUri.fsPath || String(this.context.extensionUri), 'media', 'vendor', 'xterm.js'));
-    const xtermAssets = useXterm
-      ? `<link rel="stylesheet" href="${asset('vendor/xterm.css')}">\n<script nonce="${nonce}" src="${asset('vendor/xterm.js')}"></script>`
-      : '';
 
     const csp = [
       `default-src 'none'`,
@@ -3299,20 +3302,19 @@ class ClaudeTmuxView {
 <meta http-equiv="Content-Security-Policy" content="${csp}">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <link rel="stylesheet" href="${asset('main.css')}">
-${xtermAssets}
 <style nonce="${nonce}">
   #screen, #status-name, .card-sub, .sess-name { font-family: ${fontFamily}; }
   #screen { font-size: ${fontSize}px; }
 </style>
 </head>
 <body>
-  <div id="app" data-cursor="${cursorStyle}" data-predict="${flag('predictiveEcho')}" data-links="${flag('fileLinks')}" data-sparks="${flag('showSparklines')}" data-renderer="${useXterm ? 'xterm' : 'dom'}">
+  <div id="app" data-cursor="${cursorStyle}" data-links="${flag('fileLinks')}">
     <div id="agent-tabs" role="tablist" aria-label="Tmux agent">
       <button id="tab-claude" class="agent-tab hidden" role="tab" data-agent="claude" aria-selected="false" aria-controls="screen">
-        <span class="agent-label">Claude</span><canvas class="agent-spark" width="48" height="10" aria-hidden="true"></canvas><span class="writer-mark" aria-hidden="true">◆</span><span class="agent-state" aria-hidden="true"></span>
+        <span class="agent-label">Claude</span><span class="writer-mark" aria-hidden="true">◆</span><span class="agent-state" aria-hidden="true"></span>
       </button>
       <button id="tab-codex" class="agent-tab hidden" role="tab" data-agent="codex" aria-selected="false" aria-controls="screen">
-        <span class="agent-label">Codex</span><canvas class="agent-spark" width="48" height="10" aria-hidden="true"></canvas><span class="writer-mark" aria-hidden="true">◆</span><span class="agent-state" aria-hidden="true"></span>
+        <span class="agent-label">Codex</span><span class="writer-mark" aria-hidden="true">◆</span><span class="agent-state" aria-hidden="true"></span>
       </button>
       <button id="tab-add" class="tab-add" type="button" aria-label="Start or resume an agent" title="Start or resume an agent" aria-expanded="false" aria-controls="agent-launch-menu">＋</button>
       <div id="agent-launch-menu" class="launch-menu hidden" role="menu">
@@ -3326,7 +3328,6 @@ ${xtermAssets}
       <div id="terminal">
         <div id="screen" tabindex="0" role="tabpanel" aria-label="Tmux terminal mirror"></div>
         <div id="cursor"></div>
-        <div id="predict" aria-hidden="true"></div>
       </div>
       <div id="hint">click to type</div>
 

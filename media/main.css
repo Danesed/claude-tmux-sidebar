@@ -59,8 +59,6 @@ html, body {
 }
 .writer-mark { display: none; font-size: 7px; color: var(--vscode-focusBorder, #4daafc); }
 .agent-tab.writer .writer-mark { display: inline; }
-.agent-spark { flex: 0 1 auto; min-width: 0; opacity: .8; }
-#app[data-sparks="0"] .agent-spark { display: none; }
 .agent-tab.state-working .agent-state {
   background: #58c7d5;
   opacity: 1;
@@ -159,19 +157,6 @@ html, body {
 }
 #screen .row { display: block; height: 1.15em; }
 
-/* experimental xterm.js renderer: draws under a transparent, still-focusable
-   #screen so key capture and click-to-focus behave exactly as in DOM mode */
-#screen { position: relative; z-index: 2; }
-#xterm-host {
-  position: absolute;
-  inset: 0;
-  padding: 6px 8px;
-  z-index: 1;
-  pointer-events: none;
-}
-#app.xterm-live #screen .row { display: none; }
-#app.xterm-live #cursor { display: none !important; }
-
 /* subtle focus ring so you know keystrokes are captured */
 #screen:focus { box-shadow: inset 0 0 0 1px var(--vscode-focusBorder, #0e639c); }
 #screen.input-locked { cursor: default; opacity: .88; }
@@ -199,18 +184,6 @@ html, body {
   transition: opacity .2s;
 }
 #screen-wrap:focus-within #hint { opacity: 0; }
-
-/* tentative keystroke echo, superseded by the next real frame */
-#predict {
-  position: absolute;
-  pointer-events: none;
-  white-space: pre;
-  font: inherit;
-  opacity: 0.55;
-  text-decoration: underline dotted;
-  color: var(--vscode-editor-foreground, #ccc);
-  background: var(--vscode-editor-background, #1e1e1e);
-}
 
 /* Cmd/Ctrl+click to open in the editor */
 .path-link { text-decoration: underline dotted 1px; text-underline-offset: 2px; }

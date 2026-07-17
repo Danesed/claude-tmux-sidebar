@@ -307,6 +307,37 @@ async function run() {
   assert.ok(TmuxControlClient.controlSafe(['display-message', '-p', '#{pane_id}']));
   assert.ok(!TmuxControlClient.controlSafe(['set-buffer', '--', 'multi\nline']), 'multiline payloads must stay on execFile');
 
+  // A ';'-fused argv must be written as ONE CONTROL LINE PER COMMAND: a line
+  // always yields exactly one %begin/%end block on every tmux version, while
+  // ';'-fused lines yield a version-dependent block count that desynchronized
+  // the reply queue (stuck input, meta lines leaking into rendered frames).
+  const ctl = new TmuxControlClient();
+  const written = [];
+  ctl.proc = { exitCode: null, stdin: { write: (s) => written.push(s) } };
+  ctl.alive = true;
+  const fusedExec = ctl.exec(['capture-pane', '-p', ';', 'display-message', '-p', 'x']);
+  assert.deepStrictEqual(
+    written.join('').split('\n').filter(Boolean),
+    ["'capture-pane' '-p'", "'display-message' '-p' 'x'"],
+    'fused argv must become one control line per command'
+  );
+  assert.strictEqual(ctl.pending.length, 2, 'one reply slot per control line');
+  ctl.onLine('%begin 1 1 1');
+  ctl.onLine('frame');
+  ctl.onLine('%end 1 1 1');
+  ctl.onLine('%begin 1 2 1');
+  ctl.onLine('\x1f1,2,80,24,1,0,0');
+  ctl.onLine('%end 1 2 1');
+  const fusedReply = await fusedExec;
+  assert.strictEqual(fusedReply.ok, true);
+  assert.strictEqual(fusedReply.out, 'frame\n\x1f1,2,80,24,1,0,0\n', 'both blocks must resolve the single fused call in order');
+  assert.strictEqual(ctl.pending.length, 0);
+
+  // Defense in depth: a meta line that ever leaks into pane text is stripped.
+  const leaked = splitFusedCapture('line1\nstale\x1f9,9,99,99,1700000000,5,0\nline2\n\x1f1,2,80,24,1700000000,240,0\n');
+  assert.strictEqual(leaked.meta, '1,2,80,24,1700000000,240,0');
+  assert.strictEqual(leaked.frame, 'line1\nline2\n', 'leaked meta lines must never render as pane text');
+
   const cwd = workspace;
   provider.rememberSession('claude', cwd, 'tmux_claude-tmux-sidebar', true);
   provider.rememberSession('codex', cwd, 'codex_claude-tmux-sidebar', true);
@@ -618,7 +649,7 @@ async function run() {
   assert.match(webviewSource, /path-link/);
   assert.match(webviewSource, /promptHistory/);
   assert.match(webviewSource, /updateVirtualWindow/);
-  assert.match(webviewSource, /notePredict/);
+  assert.doesNotMatch(webviewSource, /notePredict|drawSpark|xtermWriteFull/, 'removed features must not linger in the webview');
 
   console.log('All extension tests passed.');
 }

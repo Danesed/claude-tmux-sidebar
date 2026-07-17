@@ -2,7 +2,7 @@
   "name": "claude-tmux-sidebar",
   "displayName": "AgentMux — Claude & Codex in tmux",
   "description": "Two agents, one terminal flow: switch fast and hand off work intelligently between Claude Code and Codex in tmux.",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "publisher": "Danesed",
   "license": "MIT",
   "icon": "icon.png",
@@ -186,20 +186,10 @@
           "default": "auto",
           "description": "How tmux is driven. auto: persistent control-mode client with push notifications, falling back to a pipe-pane tap, then polling. control: control mode only. pipe: pipe-pane output tap. poll: classic polling only."
         },
-        "claudeTmux.predictiveEcho": {
-          "type": "boolean",
-          "default": true,
-          "description": "Paint printable keystrokes instantly as a tentative overlay at the cursor until the real tmux frame arrives (display-only, mosh-style)."
-        },
         "claudeTmux.fileLinks": {
           "type": "boolean",
           "default": true,
           "description": "Detect file paths like src/foo.js:42 in the mirror and open them in the editor with Cmd/Ctrl+click."
-        },
-        "claudeTmux.showSparklines": {
-          "type": "boolean",
-          "default": true,
-          "description": "Show a small per-agent activity sparkline (last ~2 minutes) in the tabs."
         },
         "claudeTmux.promptHistory": {
           "type": "boolean",
@@ -257,12 +247,6 @@
           "type": "string",
           "default": "",
           "description": "Optional command (e.g. 'npm run check') executed once at handoff-draft time, in the workspace, with a 60s timeout; its output tail is included in the briefing. Requires a trusted workspace. Empty disables."
-        },
-        "claudeTmux.renderer": {
-          "type": "string",
-          "enum": ["dom", "xterm"],
-          "default": "dom",
-          "description": "Terminal mirror renderer. dom: the built-in lightweight renderer. xterm: experimental vendored xterm.js for the live screen (cell-accurate widths); history and text selection still use the DOM renderer."
         }
       }
     }
