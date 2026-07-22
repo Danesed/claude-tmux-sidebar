@@ -79,7 +79,7 @@ const vscode = {
 };
 
 const source = fs.readFileSync(path.join(root, 'extension.js'), 'utf8')
-  + '\nmodule.exports.__test = { ClaudeTmuxView, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions };';
+  + '\nmodule.exports.__test = { ClaudeTmuxView, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions };';
 const moduleUnderTest = { exports: {} };
 const sandbox = {
   module: moduleUnderTest,
@@ -100,7 +100,7 @@ const sandbox = {
   clearInterval,
 };
 vm.runInNewContext(source, sandbox, { filename: 'extension.js' });
-const { ClaudeTmuxView, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions } = moduleUnderTest.exports.__test;
+const { ClaudeTmuxView, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions } = moduleUnderTest.exports.__test;
 
 function makeProvider() {
   const provider = new ClaudeTmuxView({
@@ -272,6 +272,18 @@ async function run() {
   const trickySplit = splitFusedCapture('pane text with \x1f inside\n');
   assert.strictEqual(trickySplit.frame, 'pane text with \x1f inside\n', 'pane bytes must never be mistaken for the meta sentinel');
   assert.strictEqual(trickySplit.meta, null);
+  // tmux 3.4 (Ubuntu 24.04) octal-escapes control characters in display-message
+  // output: the sentinel arrives as the literal text "\037". Without this the
+  // cursor meta never parses over Remote-SSH hosts running such tmux, and the
+  // meta line renders as an extra pane row that jitters the follow scroll.
+  const escapedSplit = splitFusedCapture('line1\nline2\n\\0371,2,80,24,1700000000,240,0\n');
+  assert.strictEqual(escapedSplit.meta, '1,2,80,24,1700000000,240,0', 'octal-escaped sentinels must still yield cursor meta');
+  assert.strictEqual(escapedSplit.frame, 'line1\nline2\n', 'the escaped meta line must never render as pane text');
+  const escapedTricky = splitFusedCapture('pane text with a literal \\037 inside\n');
+  assert.strictEqual(escapedTricky.meta, null, 'a bare escaped sentinel in pane text must not be mistaken for meta');
+  const leakedEscaped = splitFusedCapture('line1\nstale\\0379,9,99,99,1700000000,5,0\nline2\n\\0371,2,80,24,1700000000,240,0\n');
+  assert.strictEqual(leakedEscaped.meta, '1,2,80,24,1700000000,240,0');
+  assert.strictEqual(leakedEscaped.frame, 'line1\nline2\n', 'leaked escaped meta lines must be stripped like raw ones');
   assert.strictEqual(diffFrameLines(['a', 'b', 'c', ''], ['a', 'X', 'c', ''], 100).length, 1);
   assert.strictEqual(diffFrameLines(['a', 'b'], ['a', 'b', 'c'], 100), null, 'row-count changes require a full frame');
 
@@ -332,6 +344,17 @@ async function run() {
   assert.strictEqual(fusedReply.ok, true);
   assert.strictEqual(fusedReply.out, 'frame\n\x1f1,2,80,24,1,0,0\n', 'both blocks must resolve the single fused call in order');
   assert.strictEqual(ctl.pending.length, 0);
+
+  // A dead control client must mark failures as transport-level, so idempotent
+  // commands can fail over to execFile instead of reading as "no session".
+  const dyingCtl = new TmuxControlClient();
+  dyingCtl.proc = { exitCode: null, stdin: { write: () => {} }, kill: () => {} };
+  dyingCtl.alive = true;
+  const inflight = dyingCtl.exec(['capture-pane', '-p']);
+  dyingCtl.destroy(true);
+  const flushed = await inflight;
+  assert.strictEqual(flushed.ok, false);
+  assert.strictEqual(flushed.transportFailed, true, 'control-client death must be distinguishable from a tmux error reply');
 
   // Defense in depth: a meta line that ever leaks into pane text is stripped.
   const leaked = splitFusedCapture('line1\nstale\x1f9,9,99,99,1700000000,5,0\nline2\n\x1f1,2,80,24,1700000000,240,0\n');
@@ -612,6 +635,23 @@ async function run() {
   assert.strictEqual(codexSessions[0].id, 'sess-abc');
   assert.strictEqual(codexSessions[0].name, 'refactor the tick loop');
   fs.rmSync(fakeHome, { recursive: true, force: true });
+
+  // ---- claude transcript listing (chunked reads) ---------------------------------------
+  const claudeProjectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentmux-claude-'));
+  const fillerLine = JSON.stringify({ type: 'assistant', message: { content: 'x'.repeat(400) }, timestamp: '2026-01-01T00:00:00Z' });
+  fs.writeFileSync(path.join(claudeProjectDir, 'sess-1.jsonl'),
+    JSON.stringify({ type: 'user', message: { content: 'first user prompt here' }, timestamp: '2026-01-01T00:00:00Z' }) + '\n'
+    + Array.from({ length: 800 }, () => fillerLine).join('\n') + '\n' // ~350KB: forces the head+tail chunk path
+    + JSON.stringify({ type: 'system', content: '<command-name>/rename</command-name><command-args>picked name</command-args>' }) + '\n');
+  fs.writeFileSync(path.join(claudeProjectDir, 'sess-2.jsonl'),
+    JSON.stringify({ type: 'user', message: { content: 'small session prompt' }, timestamp: '2026-01-02T00:00:00Z' }) + '\n');
+  const claudeSessions = await listSessions(claudeProjectDir);
+  assert.strictEqual(claudeSessions.length, 2);
+  const bigSession = claudeSessions.find((s) => s.id === 'sess-1');
+  assert.strictEqual(bigSession.name, 'picked name', 'a late /rename must be found without reading the whole transcript');
+  assert.ok(bigSession.lastTs, 'file mtime must stand in for last activity');
+  assert.strictEqual(claudeSessions.find((s) => s.id === 'sess-2').name, 'small session prompt');
+  fs.rmSync(claudeProjectDir, { recursive: true, force: true });
 
   // ---- arbiter gates -------------------------------------------------------------------
   provider.handoff = null;

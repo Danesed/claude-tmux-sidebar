@@ -4,7 +4,6 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const readline = require('readline');
 
 // ---- tmux transport ----------------------------------------------------------
 //
@@ -115,7 +114,7 @@ class TmuxControlClient {
   }
 
   exec(args) {
-    if (!this.usable()) return Promise.resolve({ ok: false, out: '' });
+    if (!this.usable()) return Promise.resolve({ ok: false, out: '', transportFailed: true });
     // One command per control line. A single line always yields exactly one
     // %begin/%end block, on every tmux version. ';'-fused lines do NOT: some
     // versions reply with one block per part, others with one block for the
@@ -200,7 +199,10 @@ class TmuxControlClient {
       if (!entry || settled.has(entry)) return;
       settled.add(entry);
       if (entry.timer) clearTimeout(entry.timer);
-      entry.resolve({ ok: false, out: '' });
+      // transportFailed distinguishes "the control client died" from a real
+      // tmux error reply, so callers can retry over execFile instead of
+      // treating a wedged transport as a missing session or failed input.
+      entry.resolve({ ok: false, out: '', transportFailed: true });
     };
     if (this.current) flush(this.current.entry);
     for (const entry of this.pending) flush(entry);
@@ -222,10 +224,23 @@ function transportMode() {
 
 // Run tmux with an argv array (no shell -> no quoting/injection issues).
 // Resolves { ok, out } where ok=false means tmux exited non-zero (e.g. no session).
+// Commands safe to re-run if the control client died with them in flight (the
+// command may or may not have executed). Input commands (send-keys,
+// paste-buffer) are deliberately absent: replaying them could double-type.
+const TRANSPORT_RETRY_SAFE = new Set([
+  'capture-pane', 'display-message', 'has-session', 'show-option',
+  'set-option', 'set-window-option', 'resize-window', 'refresh-client', 'list-sessions',
+]);
+
 function tmux(args) {
   if (['auto', 'control'].includes(transportMode())
     && TmuxControlClient.controlSafe(args) && controlClient.ensure()) {
-    return controlClient.exec(args);
+    // A control-client death (watchdog kill, tmux exit) fails the command at
+    // the transport layer, not in tmux; retry idempotent commands once over
+    // execFile so a wedged client never masquerades as "no session".
+    return controlClient.exec(args).then((result) => (
+      result.transportFailed && TRANSPORT_RETRY_SAFE.has(args[0]) ? tmuxExecFile(args) : result
+    ));
   }
   return tmuxExecFile(args);
 }
@@ -331,8 +346,8 @@ function workspaceFolder() {
 }
 
 const AGENTS = {
-  claude: { label: 'Claude', command: 'claude', prefixSetting: 'sessionPrefix', defaultPrefix: 'tmux_' },
-  codex: { label: 'Codex', command: 'codex', prefixSetting: 'codexSessionPrefix', defaultPrefix: 'codex_' },
+  claude: { label: 'Claude', command: 'claude', prefixSetting: 'sessionPrefix', defaultPrefix: 'tmux_claude_' },
+  codex: { label: 'Codex', command: 'codex', prefixSetting: 'codexSessionPrefix', defaultPrefix: 'tmux_codex_' },
 };
 
 // normalizedPath runs on every keystroke (queueInput/sendInputData), so cache
@@ -428,27 +443,34 @@ function fmtDurationShort(ms) {
 // meta line is prefixed with \x1f so it can be split from arbitrary pane text,
 // and it is always exactly as fresh as the frame it describes.
 const META_SENTINEL = '\x1f';
+// Some tmux versions (e.g. 3.4 on Ubuntu 24.04) sanitize control characters in
+// display-message output, so the sentinel arrives as the literal text "\037"
+// instead of the raw byte. Both forms must parse, or the cursor/size meta is
+// never seen and the meta line leaks into the rendered frame as pane text.
+const META_SENTINEL_ESCAPED = '\\037';
 const META_FORMAT = '#{cursor_x},#{cursor_y},#{pane_width},#{pane_height},#{session_created},#{history_size},#{session_attached}';
 
 // A leaked meta line is the sentinel followed by exactly the 7-number CSV at
 // end of line; arbitrary pane bytes that merely contain \x1f must survive.
-const META_LEAK_RE = /^.*\x1f\d+,\d+,\d+,\d+,\d+,\d+,\d+\s*$/;
+const META_LEAK_RE = /^.*(?:\x1f|\\037)\d+,\d+,\d+,\d+,\d+,\d+,\d+\s*$/;
 
 function splitFusedCapture(out) {
   const text = String(out || '');
-  const idx = text.lastIndexOf(META_SENTINEL);
-  if (idx < 0) return { frame: text, meta: null };
-  const metaText = text.slice(idx + 1).trim();
-  if (/^\d+,\d+,\d+,\d+,\d+,\d+,\d+$/.test(metaText)) {
-    // Defense in depth: if reply framing ever drifts again, never let a
-    // sentinel/meta line reach the renderer as pane text.
-    return { frame: stripMetaLines(text.slice(0, idx)), meta: metaText };
+  for (const sentinel of [META_SENTINEL, META_SENTINEL_ESCAPED]) {
+    const idx = text.lastIndexOf(sentinel);
+    if (idx < 0) continue;
+    const metaText = text.slice(idx + sentinel.length).trim();
+    if (/^\d+,\d+,\d+,\d+,\d+,\d+,\d+$/.test(metaText)) {
+      // Defense in depth: if reply framing ever drifts again, never let a
+      // sentinel/meta line reach the renderer as pane text.
+      return { frame: stripMetaLines(text.slice(0, idx)), meta: metaText };
+    }
   }
   return { frame: stripMetaLines(text), meta: null };
 }
 
 function stripMetaLines(frame) {
-  if (!frame.includes(META_SENTINEL)) return frame;
+  if (!frame.includes(META_SENTINEL) && !frame.includes(META_SENTINEL_ESCAPED)) return frame;
   return frame
     .split('\n')
     .filter((line) => !META_LEAK_RE.test(line))
@@ -690,34 +712,67 @@ function getProjectDir(cwd) {
 }
 
 // Parse the folder's JSONL transcripts into a resume list (most recent first).
+// Only a head and a tail chunk of each transcript is read: the head holds the
+// first user message (the default title), the tail holds the newest /rename,
+// and the file mtime stands in for last activity. Whole-file line-by-line
+// reads froze the resume overlay once a folder accumulated large transcripts.
+// (Renames buried in the untouched middle of a huge transcript are missed.)
+const SESSION_LIST_HEAD_BYTES = 128 * 1024;
+const SESSION_LIST_TAIL_BYTES = 64 * 1024;
+
+function readFileChunk(file, position, length) {
+  const fd = fs.openSync(file, 'r');
+  try {
+    const buf = Buffer.alloc(length);
+    const read = fs.readSync(fd, buf, 0, length, position);
+    return buf.toString('utf8', 0, read);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function sessionFromTranscriptLines(lines) {
+  let name = null, firstUserMsg = null;
+  for (const line of lines) {
+    if (!line) continue;
+    try {
+      const obj = JSON.parse(line);
+      if (obj.type === 'system' && obj.content && obj.content.includes('/rename')) {
+        const m = obj.content.match(/<command-args>(.*?)<\/command-args>/);
+        if (m) name = m[1];
+      }
+      if (!firstUserMsg && obj.type === 'user' && !obj.isMeta) {
+        const content = obj.message?.content;
+        if (typeof content === 'string' && !content.includes('<command-') && content.length > 5) {
+          firstUserMsg = content.substring(0, 80);
+        }
+      }
+    } catch { /* skip malformed or chunk-truncated line */ }
+  }
+  return { name, firstUserMsg };
+}
+
 async function listSessions(projectDir) {
   if (!fs.existsSync(projectDir)) return [];
   const files = fs.readdirSync(projectDir).filter((f) => f.endsWith('.jsonl'));
   const sessions = [];
   for (const file of files) {
     const id = file.replace('.jsonl', '');
+    const full = path.join(projectDir, file);
     let name = null, firstUserMsg = null, lastTs = null;
     try {
-      const rl = readline.createInterface({
-        input: fs.createReadStream(path.join(projectDir, file)),
-        crlfDelay: Infinity,
-      });
-      for await (const line of rl) {
-        try {
-          const obj = JSON.parse(line);
-          if (obj.timestamp) lastTs = obj.timestamp;
-          if (obj.type === 'system' && obj.content && obj.content.includes('/rename')) {
-            const m = obj.content.match(/<command-args>(.*?)<\/command-args>/);
-            if (m) name = m[1];
-          }
-          if (!firstUserMsg && obj.type === 'user' && !obj.isMeta) {
-            const content = obj.message?.content;
-            if (typeof content === 'string' && !content.includes('<command-') && content.length > 5) {
-              firstUserMsg = content.substring(0, 80);
-            }
-          }
-        } catch { /* skip malformed line */ }
+      const stat = fs.statSync(full);
+      lastTs = stat.mtime.toISOString();
+      let lines;
+      if (stat.size <= SESSION_LIST_HEAD_BYTES + SESSION_LIST_TAIL_BYTES) {
+        lines = fs.readFileSync(full, 'utf8').split('\n');
+      } else {
+        const head = readFileChunk(full, 0, SESSION_LIST_HEAD_BYTES);
+        const tail = readFileChunk(full, stat.size - SESSION_LIST_TAIL_BYTES, SESSION_LIST_TAIL_BYTES);
+        lines = head.slice(0, head.lastIndexOf('\n')).split('\n')
+          .concat(tail.slice(tail.indexOf('\n') + 1).split('\n'));
       }
+      ({ name, firstUserMsg } = sessionFromTranscriptLines(lines));
     } catch { /* skip unreadable file */ }
     sessions.push({ id, name: name || firstUserMsg || id, lastTs });
   }
@@ -1507,16 +1562,22 @@ class ClaudeTmuxView {
         const backgroundDue = state.status === 'working' || now - state.backgroundPollAt >= 1800;
         if (this.view.visible && present && agent !== this.activeAgent && backgroundDue) {
           state.backgroundPollAt = now;
-          const tail = await tmux(['capture-pane', '-p', '-e', '-t', tmuxPaneTarget(name)]);
+          const tail = await tmux([
+            'capture-pane', '-p', '-e', '-t', tmuxPaneTarget(name),
+            ';', 'display-message', '-p', '-t', tmuxPaneTarget(name), META_SENTINEL + META_FORMAT,
+          ]);
           if (tail.ok) {
-            const frameChanged = tail.out !== state.backgroundFrame;
-            state.backgroundFrame = tail.out;
-            this.updateActivity(agent, tail.out, frameChanged);
-            // This capture is already paid for — ship it to the webview's tab
-            // cache so switching paints an at-most-seconds-old frame instantly.
-            state.lastFrame = tail.out;
+            const { frame: bgFrame, meta: bgMeta } = splitFusedCapture(tail.out);
+            const frameChanged = bgFrame !== state.backgroundFrame;
+            state.backgroundFrame = bgFrame;
+            this.updateActivity(agent, bgFrame, frameChanged);
+            // This capture is already paid for — ship it, with its cursor meta,
+            // to the webview's tab cache so switching paints an at-most-
+            // seconds-old frame with a correctly placed cursor instantly.
+            state.lastFrame = bgFrame;
+            if (bgMeta != null) state.lastMeta = bgMeta;
             if (frameChanged && this.view?.visible) {
-              this.view.webview.postMessage({ type: 'bgFrame', agent, frame: tail.out });
+              this.view.webview.postMessage({ type: 'bgFrame', agent, frame: bgFrame, meta: bgMeta });
             }
           }
         }

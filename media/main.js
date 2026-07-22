@@ -326,19 +326,17 @@
     }
     const agentAtRender = activeAgent;
     const state = scrollState[agentAtRender];
-    programmaticScroll = true;
     requestAnimationFrame(() => {
       if (agentAtRender === activeAgent) {
         if (state.pendingHistory && state.historyMode) {
           state.pendingHistory = false;
           state.follow = false;
-          wrap.scrollTop = Math.max(0, wrap.scrollHeight - wrap.clientHeight * 1.8);
+          setScrollTop(wrap.scrollHeight - wrap.clientHeight * 1.8);
         } else {
-          wrap.scrollTop = state.follow ? wrap.scrollHeight : Math.min(state.top, wrap.scrollHeight);
+          setScrollTop(state.follow ? wrap.scrollHeight : state.top);
         }
         state.top = wrap.scrollTop;
       }
-      programmaticScroll = false;
       updateCursorVisibility();
     });
   }
@@ -373,13 +371,26 @@
   function nearBottom() {
     return wrap.scrollHeight - wrap.clientHeight - wrap.scrollTop <= charH * 2;
   }
+  // Without parsed cursor meta the cursor has no known position; hiding it
+  // beats painting a stray block at the top-left corner.
+  let cursorMetaValid = false;
   function updateCursorVisibility() {
-    cursorEl.style.visibility = scrollState[activeAgent].follow ? 'visible' : 'hidden';
+    cursorEl.style.visibility = (cursorMetaValid && scrollState[activeAgent].follow) ? 'visible' : 'hidden';
   }
   function saveScroll() {
     const state = scrollState[activeAgent];
     state.top = wrap.scrollTop;
     state.follow = nearBottom();
+  }
+  // Programmatic scrolls set a consume-once flag that the resulting scroll
+  // event clears, so scroll-position bookkeeping never depends on event timing.
+  // The flag is only set when the write will actually move the viewport (and
+  // therefore fire an event) — otherwise it would swallow a later user scroll.
+  function setScrollTop(value) {
+    const target = Math.max(0, Math.min(value, wrap.scrollHeight - wrap.clientHeight));
+    if (Math.abs(wrap.scrollTop - target) < 1) return;
+    programmaticScroll = true;
+    wrap.scrollTop = target;
   }
   wrap.addEventListener('scroll', () => {
     if (virt && virtScrollFrame === null) {
@@ -388,7 +399,7 @@
         updateVirtualWindow(false);
       });
     }
-    if (programmaticScroll) return;
+    if (programmaticScroll) { programmaticScroll = false; return; }
     saveScroll();
     const state = scrollState[activeAgent];
     if (state.historyMode && state.follow) {
@@ -458,7 +469,9 @@
   }
   function applyFrameMeta(meta, name, latencyMs = 0) {
     const p = (meta || '').split(',');
-    placeCursor(parseInt(p[0], 10) || 0, parseInt(p[1], 10) || 0, parseInt(p[3], 10) || lastRows || 24);
+    cursorMetaValid = p.length >= 4 && p[1] !== '' && !isNaN(parseInt(p[1], 10));
+    if (cursorMetaValid) placeCursor(parseInt(p[0], 10) || 0, parseInt(p[1], 10) || 0, parseInt(p[3], 10) || lastRows || 24);
+    updateCursorVisibility();
     const pw = p[2], ph = p[3], created = parseInt(p[4], 10) || 0;
     const history = parseInt(p[5], 10) || 0;
     const clients = parseInt(p[6], 10) || 0;
@@ -661,9 +674,7 @@
     } else {
       setStatus('', 'idle', 'connecting…');
     }
-    programmaticScroll = true;
-    wrap.scrollTop = scrollState[agent].top;
-    programmaticScroll = false;
+    setScrollTop(scrollState[agent].top);
     applyPairLock();
   }
 
@@ -1257,8 +1268,11 @@
       applyFrameMeta(frameCache[m.agent].meta, frameCache[m.agent].name, frameCache[m.agent].latencyMs);
     } else if (m.type === 'bgFrame') {
       // Background agent captures keep the inactive tab's cache warm so a
-      // switch paints an at-most-seconds-old frame instantly.
-      if (frameCache[m.agent] && m.agent !== activeAgent) frameCache[m.agent].frame = m.frame;
+      // switch paints an at-most-seconds-old frame (and cursor) instantly.
+      if (frameCache[m.agent] && m.agent !== activeAgent) {
+        frameCache[m.agent].frame = m.frame;
+        if (m.meta) frameCache[m.agent].meta = m.meta;
+      }
     } else if (m.type === 'timeline') {
       renderTimeline(m.events);
       timelineEl.classList.remove('hidden');
@@ -1323,7 +1337,7 @@
       renderedLineCount = 0;
       liveLines = null;
       scrollState[activeAgent] = { top: 0, follow: true, historyMode: false, historyAvailable: 0, pendingHistory: false };
-      wrap.scrollTop = 0;
+      setScrollTop(0);
       overlay.classList.remove('hidden');
       overlayFolder.textContent = m.folder || '';
       statusMeta.textContent = '';

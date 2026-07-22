@@ -2,7 +2,7 @@
   "name": "claude-tmux-sidebar",
   "displayName": "AgentMux — Claude & Codex in tmux",
   "description": "Two agents, one terminal flow: switch fast and hand off work intelligently between Claude Code and Codex in tmux.",
-  "version": "0.10.1",
+  "version": "0.10.2",
   "publisher": "Danesed",
   "license": "MIT",
   "icon": "icon.png",
@@ -144,13 +144,13 @@
         },
         "claudeTmux.sessionPrefix": {
           "type": "string",
-          "default": "tmux_",
-          "description": "tmux session name prefix. Session = <prefix><folder name> (e.g. tmux_my-project)."
+          "default": "tmux_claude_",
+          "description": "tmux session name prefix. Session = <prefix><folder name> (e.g. tmux_claude_my-project)."
         },
         "claudeTmux.codexSessionPrefix": {
           "type": "string",
-          "default": "codex_",
-          "description": "Codex tmux session prefix. Session = <prefix><folder name> (e.g. codex_my-project)."
+          "default": "tmux_codex_",
+          "description": "Codex tmux session prefix. Session = <prefix><folder name> (e.g. tmux_codex_my-project)."
         },
         "claudeTmux.scrollbackLines": {
           "type": "number",

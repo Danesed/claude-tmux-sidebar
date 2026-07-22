@@ -10,8 +10,8 @@ VS Code side-bar view.
 
 The extension is deliberately workspace-scoped:
 
-- the Claude tab controls only `tmux_<folder>`;
-- the Codex tab controls only `codex_<folder>`;
+- the Claude tab controls only `tmux_claude_<folder>`;
+- the Codex tab controls only `tmux_codex_<folder>`;
 - every existing session is accepted only when its tmux `session_path` matches
   the current VS Code workspace root;
 - projects with the same folder name receive a stable path hash when needed,
@@ -200,8 +200,8 @@ settings.
 | `claudeTmux.codexArgs` | `--no-alt-screen` | Arguments used for Codex start/resume; the default preserves scrollback. |
 | `claudeTmux.codexFullAccess` | `true` | Add Codex's approval/sandbox bypass flag. Disable for untrusted repositories. |
 | `claudeTmux.codexReadClaudeRules` | `true` | Tell Codex to read every Markdown file recursively under `.claude`. |
-| `claudeTmux.sessionPrefix` | `tmux_` | Claude session prefix. |
-| `claudeTmux.codexSessionPrefix` | `codex_` | Codex session prefix. |
+| `claudeTmux.sessionPrefix` | `tmux_claude_` | Claude session prefix. |
+| `claudeTmux.codexSessionPrefix` | `tmux_codex_` | Codex session prefix. |
 | `claudeTmux.scrollbackLines` | `1000` | Captured history lines, from 0 to 5000. |
 | `claudeTmux.fontFamily` | `""` | Empty inherits `terminal.integrated.fontFamily`. |
 | `claudeTmux.fontSize` | `0` | Zero inherits `terminal.integrated.fontSize`. |

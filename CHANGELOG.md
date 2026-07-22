@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.2
+- Fix the mirror cursor sticking to the top-left corner and the frame jittering up/down on hosts whose tmux octal-escapes control characters in `display-message` output (e.g. tmux 3.4 on Ubuntu 24.04, typical Remote-SSH targets): the `\x1f` cursor-meta sentinel can arrive as the literal text `\037`, so the meta never parsed, the cursor defaulted to (0,0), and the unstripped meta line rendered as an extra changing bottom row that made the view scrollable and re-pinned the follow scroll on every tick. Both sentinel forms are now parsed and stripped; wheel-up scrollback and the footer size/uptime/hist chips work on these hosts again.
+- The webview now hides the cursor when no cursor meta has been parsed instead of painting it at the top-left corner.
+- Control-client deaths (watchdog kill, tmux exit) are now marked as transport failures and idempotent commands retry once over execFile, so a wedged control client no longer flashes the "no session" overlay, raises false "stopped" toasts, or reads as failed input. Input commands are never retried — nothing is ever replayed.
+- Speed up the resume-session list: transcripts are no longer read in full; a head chunk yields the title, a tail chunk the newest `/rename`, and file mtime stands in for last activity. Large transcript folders no longer freeze the overlay.
+- Background tab captures now carry cursor meta, so switching agents paints the cached frame with a correctly placed cursor instead of a stale one.
+- Programmatic scroll writes now use a consume-once flag tied to the event they cause, instead of timing-dependent set/clear around a frame callback.
+- Default tmux session prefixes are now `tmux_claude_` (Claude) and `tmux_codex_` (Codex). If you relied on the old defaults (`tmux_`, `codex_`), running sessions keep their old names — set `claudeTmux.sessionPrefix` / `claudeTmux.codexSessionPrefix` back to the old values, or finish those sessions before updating.
+
 ## 0.10.1
 - Fix intermittent unresponsive typing on some tmux versions: the control-mode client now writes one command per control line instead of ';'-fused lines. Fused lines yield a version-dependent number of `%begin` reply blocks, which desynchronized the reply queue — keystrokes stalled until the 10s watchdog killed the client and dropped everything in flight, and the `\x1f` cursor-meta line leaked into the rendered frame as an incrementing number line under the agent's footer (also mispositioning/hiding the mirror cursor).
 - Strip any leaked meta line from frames as defense in depth, and never mistake legitimate pane bytes for the sentinel.
