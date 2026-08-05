@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.11.0
+- Add **Google Antigravity** (`agy`) as a first-class third agent, working exactly like Claude and Codex: its own tab, tmux session (`tmux_agy_<folder>`, `claudeTmux.antigravitySessionPrefix`), launch arguments (`claudeTmux.antigravityArgs`, default `--dangerously-skip-permissions`), presence and status tracking, input pump, handoffs in both directions, arbiter participation, Pair Mode, status bar item, timeline events and preflight check.
+  - Resume mirrors what the CLI actually offers: Antigravity keeps conversations in a local database instead of readable per-folder transcripts, so the overlay shows no conversation list and **Resume previous session** runs `agy --continue`; a known ID resumes with `agy --conversation <id>`.
+  - Antigravity exposes no hook/notify mechanism, so its live state comes from the existing frame-diff heuristic rather than the tmux pane-option hooks Claude and Codex use.
+- Generalize the whole extension from a hardwired pair to an agent registry: tabs, launch menu, launcher buttons, per-agent state, preflight and the webview roster are now generated from it, so the two-agent assumption is gone from both the host and the webview.
+- Handoffs now let you pick the peer. With more than two agents the details step offers a **Hand off to** selector (running agents first); a findings round-trip keeps its pinned target and ignores re-point attempts.
+- Arbiter rounds now include every *running* agent instead of requiring exactly two: at least two must be running, all of them must be back at their prompts, and agents that are not started simply sit the round out. The verdict lists one answer block per participant.
+- Recognizing an agent started outside the extension is now registry-driven and no longer cross-claims: a pane already marked for one agent can never read as another.
+
 ## 0.10.2
 - Fix the mirror cursor sticking to the top-left corner and the frame jittering up/down on hosts whose tmux octal-escapes control characters in `display-message` output (e.g. tmux 3.4 on Ubuntu 24.04, typical Remote-SSH targets): the `\x1f` cursor-meta sentinel can arrive as the literal text `\037`, so the meta never parsed, the cursor defaulted to (0,0), and the unstripped meta line rendered as an extra changing bottom row that made the view scrollable and re-pinned the follow scroll on every tick. Both sentinel forms are now parsed and stripped; wheel-up scrollback and the footer size/uptime/hist chips work on these hosts again.
 - The webview now hides the cursor when no cursor meta has been parsed instead of painting it at the top-left corner.

@@ -19,6 +19,8 @@
   const handoffTitle = document.getElementById('handoff-title');
   const handoffMode = document.getElementById('handoff-mode');
   const handoffModeLabel = document.getElementById('handoff-mode-label');
+  const handoffTarget = document.getElementById('handoff-target');
+  const handoffTargetLabel = document.getElementById('handoff-target-label');
   const handoffText = document.getElementById('handoff-text');
   const handoffTextLabel = document.getElementById('handoff-text-label');
   const handoffSend = document.getElementById('handoff-send');
@@ -39,25 +41,30 @@
   const FLAGS = {
     links: app?.dataset.links !== '0',
   };
-  let activeAgent = 'claude';
+  // The agent roster comes from the host registry, so this file never hardcodes
+  // which agents exist. Each entry: { id, label, canList, canResumeLatest }.
+  let AGENT_LIST = [];
+  try { AGENT_LIST = JSON.parse(app?.dataset.agents || '[]'); } catch { AGENT_LIST = []; }
+  if (!AGENT_LIST.length) AGENT_LIST = [{ id: 'claude', label: 'Claude', canList: true, canResumeLatest: false }];
+  const AGENT_IDS = AGENT_LIST.map((a) => a.id);
+  const AGENT_LABELS = {};
+  const AGENT_META = {};
+  for (const a of AGENT_LIST) { AGENT_LABELS[a.id] = a.label; AGENT_META[a.id] = a; }
+  const byAgent = (make) => {
+    const out = {};
+    for (const id of AGENT_IDS) out[id] = make(id);
+    return out;
+  };
+  let activeAgent = AGENT_IDS.includes('claude') ? 'claude' : AGENT_IDS[0];
   let writerAgent = null;
   let handoffPhase = null;
   let handoffDraft = null;
   let handoffCurrentMode = 'continue';
   let arbiterPhase = null;
   let arbiterState = null; // { id, phase }
-  const agentPresence = {
-    claude: { present: false, status: 'idle' },
-    codex: { present: false, status: 'idle' },
-  };
-  const scrollState = {
-    claude: { top: 0, follow: true, historyMode: false, historyAvailable: 0, pendingHistory: false },
-    codex: { top: 0, follow: true, historyMode: false, historyAvailable: 0, pendingHistory: false },
-  };
-  const frameCache = {
-    claude: { frame: null, meta: '', name: '', latencyMs: 0 },
-    codex: { frame: null, meta: '', name: '', latencyMs: 0 },
-  };
+  const agentPresence = byAgent(() => ({ present: false, status: 'idle' }));
+  const scrollState = byAgent(() => ({ top: 0, follow: true, historyMode: false, historyAvailable: 0, pendingHistory: false }));
+  const frameCache = byAgent(() => ({ frame: null, meta: '', name: '', latencyMs: 0 }));
   let renderedLineCount = 0;
   let programmaticScroll = false;
   // Line cache for the delta frame transport: raw '\n' split (including the
@@ -655,7 +662,7 @@
       tab.setAttribute('aria-selected', selected ? 'true' : 'false');
       tab.tabIndex = selected ? 0 : -1;
     });
-    screen.setAttribute('aria-label', `${agent === 'claude' ? 'Claude' : 'Codex'} tmux terminal mirror`);
+    screen.setAttribute('aria-label', `${cap(agent)} tmux terminal mirror`);
     screen.setAttribute('aria-labelledby', `tab-${agent}`);
     exitVirtual();
     screen.replaceChildren();
@@ -739,21 +746,31 @@
     screen.setAttribute('aria-readonly', locked ? 'true' : 'false');
     document.getElementById('hint').textContent = transactionLocked
       ? 'handoff in progress'
-      : locked ? `Pair Mode · ${writerAgent === 'claude' ? 'Claude' : 'Codex'} is writer` : 'click to type';
+      : locked ? `Pair Mode · ${cap(writerAgent)} is writer` : 'click to type';
     btnUnlock.classList.toggle('hidden', !writerAgent);
   }
 
+  // Install hints per agent; an agent with no known hint simply shows no button.
+  const INSTALL_CMD = {
+    claude: 'npm install -g @anthropic-ai/claude-code',
+    codex: 'npm install -g @openai/codex',
+    antigravity: 'Install Google Antigravity and ensure its "agy" CLI is on PATH',
+  };
   function renderPreflight(m) {
-    const missing = !m.tmux || !m.claude || !m.codex;
+    const agents = m.agents || {};
+    const missing = !m.tmux || AGENT_IDS.some((agent) => !agents[agent]);
     preflightEl.classList.toggle('hidden', !missing);
     if (!missing) return;
     const row = (ok, label, cmd) =>
       `<div class="pf-row ${ok ? 'ok' : 'miss'}"><span class="pf-mark">${ok ? '✓' : '✗'}</span><span class="pf-name">${esc(label)}</span>`
-      + (ok ? '' : `<button class="pf-copy" data-cmd="${esc(cmd)}">copy install cmd</button>`) + '</div>';
+      + (ok || !cmd ? '' : `<button class="pf-copy" data-cmd="${esc(cmd)}">copy install cmd</button>`) + '</div>';
     preflightEl.innerHTML =
       row(!!m.tmux, m.tmux ? m.tmux : 'tmux not found', 'brew install tmux')
-      + row(!!m.claude, m.claude ? 'claude found' : 'claude not on PATH', 'npm install -g @anthropic-ai/claude-code')
-      + row(!!m.codex, m.codex ? 'codex found' : 'codex not on PATH', 'npm install -g @openai/codex')
+      + AGENT_IDS.map((agent) => row(
+        !!agents[agent],
+        agents[agent] ? `${cap(agent)} found` : `${cap(agent)} not on PATH`,
+        INSTALL_CMD[agent] || ''
+      )).join('')
       + '<button id="pf-recheck">Recheck</button>';
   }
   preflightEl.addEventListener('click', (e) => {
@@ -771,10 +788,12 @@
     handoffPhase = message.handoffPhase || null;
     arbiterPhase = message.arbiterPhase || null;
     btnFindings.classList.toggle('hidden', !message.handBack);
-    const bothPresent = !!(message.agents?.claude?.present && message.agents?.codex?.present);
-    btnArbiter.classList.toggle('hidden', !bothPresent);
-    btnArbiter.disabled = !bothPresent || !!handoffPhase || !!arbiterPhase;
-    for (const agent of ['claude', 'codex']) {
+    // An arbiter round needs at least two running agents, not two specific ones.
+    const runningCount = AGENT_IDS.filter((agent) => message.agents?.[agent]?.present).length;
+    const canArbitrate = runningCount >= 2;
+    btnArbiter.classList.toggle('hidden', !canArbitrate);
+    btnArbiter.disabled = !canArbitrate || !!handoffPhase || !!arbiterPhase;
+    for (const agent of AGENT_IDS) {
       Object.assign(agentPresence[agent], message.agents?.[agent] || { present: false, status: 'idle' });
       const tab = document.getElementById(`tab-${agent}`);
       const present = !!agentPresence[agent].present;
@@ -787,16 +806,16 @@
       tab.classList.toggle('attention-done', attention === 'done');
       tab.classList.toggle('attention-needs-input', attention === 'needs-input');
       const attentionLabel = attention === 'done' ? ', new completion' : attention === 'needs-input' ? ', awaiting input' : '';
-      const label = `${agent === 'claude' ? 'Claude' : 'Codex'}: ${STATE_LABELS[status] || status}${attentionLabel}${writerAgent === agent ? ', Pair Mode writer' : ''}`;
+      const label = `${cap(agent)}: ${STATE_LABELS[status] || status}${attentionLabel}${writerAgent === agent ? ', Pair Mode writer' : ''}`;
       tab.title = label;
       tab.setAttribute('aria-label', label);
       for (const button of launchMenu.querySelectorAll(`button[data-agent="${agent}"]`)) {
         button.classList.toggle('hidden', present);
       }
     }
-    const presentAgents = ['claude', 'codex'].filter((agent) => agentPresence[agent].present);
+    const presentAgents = AGENT_IDS.filter((agent) => agentPresence[agent].present);
     const hasWorkspace = message.hasWorkspace !== false;
-    tabAdd.classList.toggle('hidden', !hasWorkspace || presentAgents.length === 2);
+    tabAdd.classList.toggle('hidden', !hasWorkspace || presentAgents.length === AGENT_IDS.length);
     for (const button of launcherActions.querySelectorAll('button')) button.disabled = !hasWorkspace;
     for (const button of launchMenu.querySelectorAll('button')) button.disabled = !hasWorkspace;
     btnPair.disabled = !agentPresence[activeAgent].present || !!handoffPhase;
@@ -805,7 +824,7 @@
       screen.replaceChildren();
       overlay.classList.remove('hidden');
       overlayTitle.textContent = 'Open a workspace folder';
-      overlayFolder.textContent = 'Claude and Codex tmux sessions are never created outside a workspace.';
+      overlayFolder.textContent = 'Agent tmux sessions are never created outside a workspace.';
       sessionFilter.classList.add('hidden');
       sessionList.innerHTML = '';
       launcherActions.classList.remove('hidden');
@@ -835,6 +854,30 @@
     if (agentPresence[activeAgent].present) setStatus('', activeStatus, STATE_LABELS[activeStatus] || activeStatus);
   }
 
+  // The peer is only a real choice when more than one other agent exists;
+  // with a single candidate the selector stays hidden and the meta line says it.
+  function setHandoffTargets(targets, chosen, source) {
+    const list = (Array.isArray(targets) ? targets : []).filter((id) => id && id !== source);
+    const options = list.length ? list : (chosen ? [chosen] : []);
+    handoffTarget.innerHTML = options
+      .map((id) => `<option value="${esc(id)}">${esc(cap(id))}${agentPresence[id]?.present ? '' : ' (not running)'}</option>`)
+      .join('');
+    if (chosen && options.includes(chosen)) handoffTarget.value = chosen;
+    const show = options.length > 1;
+    handoffTarget.classList.toggle('hidden', !show);
+    handoffTargetLabel.classList.toggle('hidden', !show);
+    handoffTarget.disabled = !show;
+  }
+  function hideHandoffTarget() {
+    handoffTarget.classList.add('hidden');
+    handoffTargetLabel.classList.add('hidden');
+    handoffTarget.disabled = true;
+  }
+  handoffTarget.addEventListener('change', () => {
+    if (handoffDraft?.phase !== 'collecting') return;
+    handoffDraft.target = handoffTarget.value;
+    handoffMeta.textContent = `${cap(handoffDraft.source)} → ${cap(handoffDraft.target)} · optional context`;
+  });
   btnPair.addEventListener('click', () => vscode.postMessage({ type: 'prepareHandoff', source: activeAgent }));
   btnUnlock.addEventListener('click', () => vscode.postMessage({ type: 'cancelPair' }));
 
@@ -886,7 +929,7 @@
   function fmtClock(ts) {
     try { return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); } catch { return ''; }
   }
-  function cap(agent) { return agent === 'claude' ? 'Claude' : agent === 'codex' ? 'Codex' : agent || ''; }
+  function cap(agent) { return AGENT_LABELS[agent] || agent || ''; }
   function describeEvent(e) {
     if (e.type === 'session') return `${cap(e.agent)} session ${e.action}`;
     if (e.type === 'turn') {
@@ -955,7 +998,10 @@
       handoffSend.disabled = true;
       handoffSend.textContent = 'Creating…';
       handoffError.classList.add('hidden');
-      vscode.postMessage({ type: 'createHandoff', id: handoffDraft.id, details: handoffText.value });
+      vscode.postMessage({
+        type: 'createHandoff', id: handoffDraft.id, details: handoffText.value,
+        target: handoffTarget.value || handoffDraft.target,
+      });
       return;
     }
     if (handoffDraft.phase === 'ackTimeout') {
@@ -1061,7 +1107,8 @@
         id: m.id, source: m.source, target: m.target, phase: 'collecting', details: m.details || '',
       };
       handoffTitle.textContent = m.findings ? 'Request review findings' : 'Create AgentMux handoff';
-      handoffMeta.textContent = `${m.source === 'claude' ? 'Claude' : 'Codex'} → ${m.target === 'claude' ? 'Claude' : 'Codex'} · ${m.findings ? 'findings report back to the author' : 'optional context'}`;
+      handoffMeta.textContent = `${cap(m.source)} → ${cap(m.target)} · ${m.findings ? 'findings report back to the author' : 'optional context'}`;
+      setHandoffTargets(m.targets, m.target, m.source);
       handoffModeLabel.classList.add('hidden');
       handoffMode.classList.add('hidden');
       handoffTextLabel.textContent = 'Optional details to include in the handoff';
@@ -1081,7 +1128,8 @@
     } else if (m.type === 'handoffChecking') {
       handoffDraft = { id: m.id, source: m.source, target: m.target, phase: 'checking' };
       handoffTitle.textContent = 'Create AgentMux handoff';
-      handoffMeta.textContent = `${m.source === 'claude' ? 'Claude' : 'Codex'} → ${m.target === 'claude' ? 'Claude' : 'Codex'} · checking readiness`;
+      handoffMeta.textContent = `${cap(m.source)} → ${cap(m.target)} · checking readiness`;
+      hideHandoffTarget();
       handoffModeLabel.classList.add('hidden');
       handoffMode.classList.add('hidden');
       handoffTextLabel.textContent = 'Agent readiness';
@@ -1098,11 +1146,12 @@
     } else if (m.type === 'handoffPreparing') {
       handoffDraft = { id: m.id, source: m.source, target: m.target, phase: 'preparing' };
       handoffTitle.textContent = 'Creating AgentMux handoff';
-      handoffMeta.textContent = `${m.source === 'claude' ? 'Claude' : 'Codex'} → ${m.target === 'claude' ? 'Claude' : 'Codex'} · source-authored context`;
+      handoffMeta.textContent = `${cap(m.source)} → ${cap(m.target)} · source-authored context`;
+      hideHandoffTarget();
       handoffModeLabel.classList.add('hidden');
       handoffMode.classList.add('hidden');
       handoffTextLabel.textContent = 'Generated handoff';
-      handoffText.value = `${m.source === 'claude' ? 'Claude' : 'Codex'} is preparing a focused handoff…`;
+      handoffText.value = `${cap(m.source)} is preparing a focused handoff…`;
       handoffText.maxLength = 4000;
       handoffText.readOnly = true;
       handoffMode.disabled = true;
@@ -1124,7 +1173,8 @@
         reviewFix: m.reviewFix,
       };
       handoffTitle.textContent = 'Review AgentMux handoff';
-      handoffMeta.textContent = `${m.source === 'claude' ? 'Claude' : 'Codex'} → ${m.target === 'claude' ? 'Claude' : 'Codex'} · authored by source, Git facts added by AgentMux`;
+      handoffMeta.textContent = `${cap(m.source)} → ${cap(m.target)} · authored by source, Git facts added by AgentMux`;
+      hideHandoffTarget();
       handoffModeLabel.classList.remove('hidden');
       handoffMode.classList.remove('hidden');
       handoffTextLabel.textContent = 'Message — fully editable before sending';
@@ -1157,7 +1207,9 @@
       if (!handoffDraft || handoffDraft.id !== m.id) return;
       handoffDraft.phase = 'collecting';
       handoffDraft.details = m.details || '';
+      if (m.target) handoffDraft.target = m.target;
       handoffTitle.textContent = 'Create AgentMux handoff';
+      setHandoffTargets(m.targets, m.target || handoffDraft.target, m.source || handoffDraft.source);
       handoffModeLabel.classList.add('hidden');
       handoffMode.classList.add('hidden');
       handoffTextLabel.textContent = 'Optional details to include in the handoff';
@@ -1299,10 +1351,12 @@
       arbiterState.phase = 'verdict';
       arbiterMeta.textContent = 'Pick the answer to act on — the winner becomes the Pair Mode writer.';
       const side = (agent, text) => text
-        ? `<details open class="arb-answer"><summary>${agent === 'claude' ? 'Claude' : 'Codex'}</summary><pre>${esc(text)}</pre>`
-          + `<button class="primary" data-winner="${agent}">Use ${agent === 'claude' ? "Claude's" : "Codex's"} answer</button></details>`
-        : `<div class="sess-empty">${agent === 'claude' ? 'Claude' : 'Codex'} returned no marked answer.</div>`;
-      arbiterBody.innerHTML = side('claude', m.claude) + side('codex', m.codex);
+        ? `<details open class="arb-answer"><summary>${esc(cap(agent))}</summary><pre>${esc(text)}</pre>`
+          + `<button class="primary" data-winner="${esc(agent)}">Use ${esc(cap(agent))}'s answer</button></details>`
+        : `<div class="sess-empty">${esc(cap(agent))} returned no marked answer.</div>`;
+      const answered = m.answers || {};
+      const roster = (m.participants && m.participants.length) ? m.participants : AGENT_IDS;
+      arbiterBody.innerHTML = roster.map((agent) => side(agent, answered[agent])).join('');
       arbiterSend.classList.add('hidden');
       arbiterCancel.disabled = false;
     } else if (m.type === 'arbiterError') {
@@ -1346,30 +1400,30 @@
     } else if (m.type === 'sessions') {
       if (m.agent !== activeAgent) return;
       btnStart.disabled = false;
-      btnStart.textContent = `＋ Start new ${m.agent === 'claude' ? 'Claude' : 'Codex'}`;
-      if (m.agent === 'codex') {
-        if (m.list && m.list.length) {
-          overlayTitle.textContent = 'Attach to a Codex session';
-          setSessions(m.list);
-        } else {
-          overlayTitle.textContent = 'Start or resume Codex';
-          sessionFilter.classList.add('hidden');
-          sessionList.innerHTML = '<div class="sess-empty">No Codex conversations found for this workspace.</div>';
-        }
-        btnResume.classList.remove('hidden');
-      } else {
-        overlayTitle.textContent = (m.list && m.list.length)
-          ? 'Attach to a Claude session'
-          : 'No Claude session here yet';
-        btnResume.classList.add('hidden');
+      btnStart.textContent = `＋ Start new ${cap(m.agent)}`;
+      // Two shapes, driven by what the agent's CLI actually supports:
+      // an extension-side conversation list, and/or the CLI's own resume.
+      const label = cap(m.agent);
+      const canList = m.canList !== false;
+      const hasList = !!(m.list && m.list.length);
+      if (hasList) {
+        overlayTitle.textContent = `Attach to a ${label} session`;
         setSessions(m.list);
+      } else if (canList) {
+        overlayTitle.textContent = `No ${label} session here yet`;
+        setSessions(m.list);
+      } else {
+        overlayTitle.textContent = `Start or resume ${label}`;
+        sessionFilter.classList.add('hidden');
+        sessionList.innerHTML = `<div class="sess-empty">${esc(label)} keeps no per-folder conversation list here; “Resume previous session” continues its most recent one.</div>`;
       }
+      btnResume.classList.toggle('hidden', !m.canResumeLatest);
     } else if (m.type === 'noWorkspace') {
       if (m.agent !== activeAgent) return;
       screen.replaceChildren();
       overlay.classList.remove('hidden');
       overlayTitle.textContent = 'Open a workspace folder';
-      overlayFolder.textContent = 'Claude and Codex tmux sessions are never created outside a workspace.';
+      overlayFolder.textContent = 'Agent tmux sessions are never created outside a workspace.';
       sessionFilter.classList.add('hidden');
       sessionList.innerHTML = '';
       btnResume.classList.add('hidden');

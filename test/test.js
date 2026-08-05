@@ -18,6 +18,8 @@ const settings = new Map([
   ['codexReadClaudeRules', true],
   ['sessionPrefix', 'tmux_'],
   ['codexSessionPrefix', 'codex_'],
+  ['antigravityArgs', '--dangerously-skip-permissions'],
+  ['antigravitySessionPrefix', 'tmux_agy_'],
   ['scrollbackLines', 1000],
   // Keep tests hermetic: no ledger writes into the repo, no real transports,
   // no hook assets, no telemetry reads.
@@ -42,7 +44,8 @@ function execFile(command, args, options, callback) {
     if (format.includes('@claude_tmux_agent')) {
       if (agentInfoOutput != null) return callback(null, workspace + '\t' + agentInfoOutput, '');
       const target = args[args.indexOf('-t') + 1];
-      const agent = target.includes('codex_') ? 'codex' : 'claude';
+      const agent = target.includes('tmux_agy_') ? 'antigravity'
+        : target.includes('codex_') ? 'codex' : 'claude';
       return callback(null, `${workspace}\t${agent}\t1\t${agent}\t1700000000\tgen-a\n`, '');
     }
     return callback(null, '2,3,80,24,1700000000,240,0\n', '');
@@ -79,7 +82,7 @@ const vscode = {
 };
 
 const source = fs.readFileSync(path.join(root, 'extension.js'), 'utf8')
-  + '\nmodule.exports.__test = { ClaudeTmuxView, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions };';
+  + '\nmodule.exports.__test = { ClaudeTmuxView, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions, AGENTS, AGENT_IDS, launchArgs, paneLooksLikeAgent };';
 const moduleUnderTest = { exports: {} };
 const sandbox = {
   module: moduleUnderTest,
@@ -100,7 +103,7 @@ const sandbox = {
   clearInterval,
 };
 vm.runInNewContext(source, sandbox, { filename: 'extension.js' });
-const { ClaudeTmuxView, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions } = moduleUnderTest.exports.__test;
+const { ClaudeTmuxView, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions, AGENTS, AGENT_IDS, launchArgs, paneLooksLikeAgent } = moduleUnderTest.exports.__test;
 
 function makeProvider() {
   const provider = new ClaudeTmuxView({
@@ -371,7 +374,7 @@ async function run() {
   await provider.pollPresence(true);
   assert.strictEqual(
     calls.filter((call) => call.args[0] === 'display-message' && call.args.at(-1).includes('@claude_tmux_agent')).length,
-    2,
+    AGENT_IDS.length,
     'warm presence polling should verify each agent with one tmux process'
   );
 
@@ -671,6 +674,98 @@ async function run() {
   provider.cancelArbiter(provider.arbiter.id);
   assert.strictEqual(provider.arbiter, null);
 
+  // ---- Antigravity as a first-class third agent --------------------------------------
+  assert.ok(AGENT_IDS.includes('antigravity'), 'Antigravity must be a registered agent');
+  assert.strictEqual(AGENTS.antigravity.command, 'agy', 'Antigravity is driven by the agy CLI');
+  assert.strictEqual(AGENTS.antigravity.defaultPrefix, 'tmux_agy_');
+  assert.strictEqual(launchArgs('antigravity'), '--dangerously-skip-permissions');
+  assert.strictEqual(AGENTS.antigravity.resumeById('abc-1', '--x'), "agy --conversation 'abc-1' --x");
+  assert.strictEqual(AGENTS.antigravity.resumeLatest('--x'), 'agy --continue --x');
+  assert.strictEqual(AGENTS.antigravity.listSessions, null, 'Antigravity keeps no readable per-folder transcripts');
+
+  // Recognizing an agent started outside the extension must not cross the wires.
+  assert.ok(paneLooksLikeAgent('antigravity', '/home/u/.local/bin/agy'));
+  assert.ok(!paneLooksLikeAgent('claude', 'agy'), 'agy must never be mistaken for Claude');
+  assert.ok(!paneLooksLikeAgent('antigravity', 'codex'));
+  assert.ok(paneLooksLikeAgent('claude', 'node'), 'Claude still matches its node launcher');
+  agentInfoOutput = 'codex\t1\tcodex\t1700000000\tgen-a\n';
+  const claimed = await agentSessionInfo('antigravity', 'tmux_agy_claude-tmux-sidebar');
+  assert.strictEqual(claimed.ready, false, 'a pane already claimed by another agent must not read as this one');
+  agentInfoOutput = null;
+
+  // The overlay learns what this CLI supports instead of assuming Claude's shape.
+  messages.length = 0;
+  await provider.pushSessions('antigravity');
+  const antigravitySessions = messages.filter((msg) => msg.type === 'sessions').at(-1);
+  assert.strictEqual(antigravitySessions.canList, false);
+  assert.strictEqual(antigravitySessions.canResumeLatest, true);
+  assert.strictEqual(antigravitySessions.list.length, 0);
+  assert.strictEqual(await provider.tails.antigravity.poll(workspace), null, 'no transcript tail means no telemetry, not a crash');
+
+  // Handoff peers: a third agent turns the target into a real choice.
+  provider.handoff = null;
+  provider.arbiter = null;
+  provider.writerAgent = null;
+  for (const agent of AGENT_IDS) {
+    provider.agentState[agent].present = true;
+    provider.agentState[agent].status = 'idle';
+  }
+  assert.strictEqual(provider.handoffCandidates('claude').join(','), 'codex,antigravity');
+  provider.agentState.codex.present = false;
+  assert.strictEqual(provider.handoffCandidates('claude').join(','), 'antigravity,codex', 'running agents are offered first');
+  provider.agentState.codex.present = true;
+
+  messages.length = 0;
+  provider.prepareHandoff('claude');
+  const multiId = provider.handoff.id;
+  assert.strictEqual(messages.at(-1).targets.join(','), 'codex,antigravity', 'the details step offers every peer');
+  messages.length = 0;
+  await provider.createHandoff({ id: multiId, details: '', target: 'claude' });
+  assert.strictEqual(provider.handoff.phase, 'collecting', 'handing off to yourself must return to the editable step');
+  assert.strictEqual(messages.at(-1).type, 'handoffCreateError');
+  const realWaitForDraft = provider.waitForHandoffDraft.bind(provider);
+  provider.waitForHandoffDraft = async () => 'briefing for the third agent';
+  const retargetTx = provider.handoff;
+  await provider.createHandoff({ id: multiId, details: '', target: 'antigravity' });
+  assert.strictEqual(retargetTx.phase, 'review');
+  assert.strictEqual(retargetTx.target, 'antigravity', 'the details step can re-point the handoff at another agent');
+  provider.handoff = null;
+
+  // A findings round-trip pins its target and must ignore a re-point attempt.
+  provider.prepareHandoff('codex', { target: 'claude', findings: true });
+  const findingsTx = provider.handoff;
+  assert.strictEqual(findingsTx.lockedTarget, true);
+  await provider.createHandoff({ id: findingsTx.id, details: '', target: 'antigravity' });
+  assert.strictEqual(findingsTx.target, 'claude', 'a pinned findings target must ignore a re-point attempt');
+  provider.waitForHandoffDraft = realWaitForDraft;
+  provider.handoff = null;
+
+  // Arbiter rounds scale to every running agent.
+  for (const agent of AGENT_IDS) {
+    provider.agentState[agent].present = true;
+    provider.agentState[agent].status = 'idle';
+  }
+  provider.prepareArbiter();
+  assert.strictEqual(provider.arbiter.participants.join(','), AGENT_IDS.join(','), 'every running agent joins the round');
+  provider.cancelArbiter(provider.arbiter.id);
+  provider.agentState.antigravity.present = false;
+  provider.prepareArbiter();
+  assert.strictEqual(provider.arbiter.participants.join(','), 'claude,codex', 'a stopped agent sits the round out');
+  provider.cancelArbiter(provider.arbiter.id);
+  provider.agentState.antigravity.present = true;
+  provider.agentState.antigravity.status = 'working';
+  provider.prepareArbiter();
+  assert.strictEqual(provider.arbiter, null, 'a mid-turn running agent still blocks the round');
+  provider.agentState.antigravity.status = 'idle';
+
+  // The generated markup carries the whole roster, tabs included.
+  const markup = provider.html({ asWebviewUri: (u) => u, cspSource: 'vscode-resource:' });
+  assert.strictEqual((markup.match(/class="agent-tab/g) || []).length, AGENT_IDS.length, 'one tab per registered agent');
+  assert.match(markup, /data-agent="antigravity"/);
+  assert.match(markup, /Start Antigravity/);
+  assert.match(markup, /data-agents="/, 'the webview receives the roster');
+  assert.match(markup, /id="handoff-target"/);
+
   const webviewSource = fs.readFileSync(path.join(root, 'media/main.js'), 'utf8');
   assert.match(webviewSource, /tab\.classList\.toggle\('hidden', !present\)/);
   assert.match(webviewSource, /handoffText\.value/);
@@ -689,6 +784,9 @@ async function run() {
   assert.match(webviewSource, /path-link/);
   assert.match(webviewSource, /promptHistory/);
   assert.match(webviewSource, /updateVirtualWindow/);
+  assert.match(webviewSource, /dataset\.agents/, 'the webview builds its roster from the host registry');
+  assert.match(webviewSource, /setHandoffTargets/, 'the details step must offer a handoff peer');
+  assert.doesNotMatch(webviewSource, /\['claude', 'codex'\]/, 'no hardcoded two-agent roster may remain');
   assert.doesNotMatch(webviewSource, /notePredict|drawSpark|xtermWriteFull/, 'removed features must not linger in the webview');
 
   console.log('All extension tests passed.');

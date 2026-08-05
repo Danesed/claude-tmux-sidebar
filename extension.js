@@ -345,10 +345,67 @@ function workspaceFolder() {
   return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || null;
 }
 
+// The agent registry drives everything generic: tabs, presence, handoff peers,
+// arbiter participants, preflight and resume. Adding an agent here (plus its
+// two settings in package.json) is all a new CLI needs.
+//   paneRe/paneAliases — recognize an agent already running in a pane we did
+//     not launch (matched against basename(pane_current_command)).
+//   listSessions       — enumerate past conversations for the resume overlay,
+//     or null when the CLI keeps no readable local transcripts.
+//   resumeById         — command to resume one listed conversation.
+//   resumeLatest       — command behind "Resume previous session"; for CLIs
+//     with their own picker (or a --continue flag) this is what runs.
 const AGENTS = {
-  claude: { label: 'Claude', command: 'claude', prefixSetting: 'sessionPrefix', defaultPrefix: 'tmux_claude_' },
-  codex: { label: 'Codex', command: 'codex', prefixSetting: 'codexSessionPrefix', defaultPrefix: 'tmux_codex_' },
+  claude: {
+    label: 'Claude',
+    command: 'claude',
+    prefixSetting: 'sessionPrefix',
+    defaultPrefix: 'tmux_claude_',
+    argsSetting: 'claudeArgs',
+    paneRe: /claude/i,
+    paneAliases: ['node'],
+    listSessions: (cwd) => listSessions(getProjectDir(cwd)),
+    resumeById: (id, args) => `claude --resume ${shellQuote(id)}${args ? ' ' + args : ''}`,
+    resumeLatest: null, // the extension's own picker covers Claude
+  },
+  codex: {
+    label: 'Codex',
+    command: 'codex',
+    prefixSetting: 'codexSessionPrefix',
+    defaultPrefix: 'tmux_codex_',
+    argsSetting: 'codexArgs',
+    paneRe: /(?:^|-)codex(?:$|-)/i,
+    paneAliases: [],
+    listSessions: (cwd) => listCodexSessions(cwd),
+    resumeById: (id, args) => `codex resume ${shellQuote(id)}${args ? ' ' + args : ''}`,
+    resumeLatest: (args) => `codex resume${args ? ' ' + args : ''}`,
+  },
+  // Google Antigravity. Its conversations live in a local database rather than
+  // readable per-folder transcripts, so the resume overlay offers the CLI's own
+  // --continue instead of an extension-side list; --conversation still resumes
+  // a specific ID when one is known.
+  antigravity: {
+    label: 'Antigravity',
+    command: 'agy',
+    prefixSetting: 'antigravitySessionPrefix',
+    defaultPrefix: 'tmux_agy_',
+    argsSetting: 'antigravityArgs',
+    paneRe: /(?:^|-)(?:agy|antigravity)(?:$|-)/i,
+    paneAliases: [],
+    listSessions: null,
+    resumeById: (id, args) => `agy --conversation ${shellQuote(id)}${args ? ' ' + args : ''}`,
+    resumeLatest: (args) => `agy --continue${args ? ' ' + args : ''}`,
+  },
 };
+
+const AGENT_IDS = Object.keys(AGENTS);
+
+// Per-agent map built from the registry, so no call site has to know the roster.
+function byAgent(make) {
+  const out = {};
+  for (const agent of AGENT_IDS) out[agent] = make(agent);
+  return out;
+}
 
 // normalizedPath runs on every keystroke (queueInput/sendInputData), so cache
 // the realpath lookup briefly instead of hitting the filesystem each time.
@@ -676,6 +733,29 @@ function codexArgsHaveDeveloperOverride(configured = (cfg().get('codexArgs') || 
   return /(?:^|\s)(?:-c|--config)\s+[^\n]*developer_instructions\s*=/.test(configured);
 }
 
+// Antigravity exposes no hook/notify mechanism, so its state stays on the
+// frame-diff heuristic (the documented fallback) and its args pass through
+// verbatim — permissions are whatever the user configured.
+function antigravityLaunchArgs() {
+  return (cfg().get('antigravityArgs') || '').trim();
+}
+
+function launchArgs(agent) {
+  if (agent === 'claude') return claudeLaunchArgs();
+  if (agent === 'codex') return codexLaunchArgs();
+  if (agent === 'antigravity') return antigravityLaunchArgs();
+  return (cfg().get(AGENTS[agent]?.argsSetting) || '').trim();
+}
+
+// Does a pane already running something look like this agent, even though we
+// did not launch it (so it carries no @claude_tmux_agent marker)?
+function paneLooksLikeAgent(agent, command) {
+  const spec = AGENTS[agent];
+  if (!spec) return false;
+  const base = path.basename(command || '');
+  return spec.paneRe.test(base) || (spec.paneAliases || []).includes(base);
+}
+
 function isShellCommand(command) {
   return /^(?:ba|da|fi|k|tc|z)?sh$|^(?:fish|nu|pwsh|powershell)$/.test(path.basename(command || ''));
 }
@@ -697,9 +777,9 @@ async function agentSessionInfo(agent, name) {
     }
     return { exists: true, ready: running === '1', shell, command, created, generation, hookState, hookTool };
   }
-  const direct = agent === 'codex'
-    ? /(?:^|-)codex(?:$|-)/i.test(path.basename(command))
-    : /claude/i.test(path.basename(command)) || path.basename(command) === 'node';
+  // A pane already claimed by another agent must never read as this one.
+  const claimedByOther = marker && AGENTS[marker] && marker !== agent;
+  const direct = !claimedByOther && paneLooksLikeAgent(agent, command);
   return { exists: true, ready: direct, shell, command, created, generation, hookState, hookTool };
 }
 
@@ -870,7 +950,11 @@ class TranscriptTail {
       const now = Date.now();
       if (!this.file || now - this._scanAt > 5000) {
         this._scanAt = now;
-        const newest = this.agent === 'claude' ? this.newestClaude(cwd) : this.newestCodex(cwd);
+        // Agents without readable local transcripts (e.g. Antigravity, whose
+        // conversations live in a database) simply report no telemetry.
+        const newest = this.agent === 'claude' ? this.newestClaude(cwd)
+          : this.agent === 'codex' ? this.newestCodex(cwd)
+            : null;
         if (newest !== this.file) {
           this.reset();
           this.file = newest;
@@ -1114,15 +1198,9 @@ class ClaudeTmuxView {
     this.activeAgent = AGENTS[savedAgent] ? savedAgent : 'claude';
     const savedWriter = context.workspaceState.get('claudeTmux.pairWriter');
     this.writerAgent = AGENTS[savedWriter] ? savedWriter : null;
-    this.agentState = {
-      claude: this.newAgentState(),
-      codex: this.newAgentState(),
-    };
-    this.inputQueues = {
-      claude: this.newInputQueue(),
-      codex: this.newInputQueue(),
-    };
-    this.sessionCache = { claude: null, codex: null };
+    this.agentState = byAgent(() => this.newAgentState());
+    this.inputQueues = byAgent(() => this.newInputQueue());
+    this.sessionCache = byAgent(() => null);
     this.unseen = 0;   // changes seen while the view was hidden (badge count)
     this._lastHiddenTickAt = 0;
     this._tickRunning = false;
@@ -1136,7 +1214,7 @@ class ClaudeTmuxView {
     this._subscribed = { agent: null, name: null };
     this.pipeTap = new PipeTap();
     this.eventLog = new EventLog();
-    this.tails = { claude: new TranscriptTail('claude'), codex: new TranscriptTail('codex') };
+    this.tails = byAgent((agent) => new TranscriptTail(agent));
     this._statusItems = null;
     this.arbiter = null;
     this.lastCompletedHandoff = null;
@@ -1200,7 +1278,7 @@ class ClaudeTmuxView {
 
   invalidateSessionCache(agent) {
     if (agent) this.sessionCache[agent] = null;
-    else this.sessionCache = { claude: null, codex: null };
+    else this.sessionCache = byAgent(() => null);
   }
 
   resolveWebviewView(view) {
@@ -1779,29 +1857,24 @@ class ClaudeTmuxView {
     if (!this.view) return;
     const cwd = workspaceFolder();
     if (!cwd) return;
-    const list = agent === 'codex'
-      ? await listCodexSessions(cwd)
-      : await listSessions(getProjectDir(cwd));
+    const spec = AGENTS[agent];
+    const list = spec?.listSessions ? await spec.listSessions(cwd) : [];
     this.view.webview.postMessage({
       type: 'sessions',
       agent,
       folder: cwd,
       list: list.map((s) => ({ id: s.id, name: s.name, lastTs: s.lastTs })),
+      canResumeLatest: !!spec?.resumeLatest,
+      canList: !!spec?.listSessions,
     });
   }
 
-  // Create (or replace) the folder's tmux session running `claude --resume <id>`.
+  // Create (or replace) the folder's tmux session resuming one conversation.
   async startResumed(id, agent = 'claude') {
-    if (!id) return;
-    if (agent === 'codex') {
-      await this.warnCodexRuleConflict();
-      const codexArgs = codexLaunchArgs();
-      await this.replaceSession('codex', `codex resume ${shellQuote(id)}${codexArgs ? ' ' + codexArgs : ''}`, 'Resume');
-      return;
-    }
-    const args = claudeLaunchArgs();
-    const command = `claude --resume ${shellQuote(id)}${args ? ' ' + args : ''}`;
-    await this.replaceSession('claude', command, 'Resume');
+    const spec = AGENTS[agent];
+    if (!id || !spec?.resumeById) return;
+    if (agent === 'codex') await this.warnCodexRuleConflict();
+    await this.replaceSession(agent, spec.resumeById(id, launchArgs(agent)), 'Resume');
   }
 
   queueInput(agent, data, immediate = false, system = false) {
@@ -1925,21 +1998,26 @@ class ClaudeTmuxView {
   }
 
   // ---- preflight -------------------------------------------------------------
-  // One-shot environment check (never on the live path): are tmux, claude and
-  // codex actually reachable from a login shell on this (possibly remote) host?
+  // One-shot environment check (never on the live path): are tmux and every
+  // registered agent CLI actually reachable from a login shell on this
+  // (possibly remote) host?
   async runPreflight(force = false) {
     if (!this._preflight || force) {
       const shell = process.env.SHELL || '/bin/sh';
+      // One probe line per agent, keyed by index so agent ids stay out of the
+      // shell string entirely.
+      const probe = AGENT_IDS
+        .map((agent, i) => `echo "${i}:$(command -v ${AGENTS[agent].command})"`)
+        .join('; ');
       const [tmuxVersion, tools] = await Promise.all([
         runFile('tmux', ['-V']),
-        runFile(shell, ['-lc', 'echo "C:$(command -v claude)"; echo "X:$(command -v codex)"']),
+        runFile(shell, ['-lc', probe]),
       ]);
       const lines = (tools.out || '').split('\n');
       const found = (prefix) => lines.some((l) => l.startsWith(prefix) && l.slice(prefix.length).trim());
       this._preflight = {
         tmux: tmuxVersion.ok ? tmuxVersion.out.trim() : null,
-        claude: found('C:'),
-        codex: found('X:'),
+        agents: byAgent((agent) => found(`${AGENT_IDS.indexOf(agent)}:`)),
       };
     }
     if (this.view) this.view.webview.postMessage({ type: 'preflight', ...this._preflight });
@@ -2060,7 +2138,7 @@ class ClaudeTmuxView {
       queue.timer = null;
       queue.suspended = true;
     }
-    this.inputQueues = { claude: this.newInputQueue(), codex: this.newInputQueue() };
+    this.inputQueues = byAgent(() => this.newInputQueue());
   }
 
   async setSize(cols, rows) {
@@ -2102,7 +2180,7 @@ class ClaudeTmuxView {
   async startSession(agent = this.activeAgent) {
     if (!AGENTS[agent]) return;
     if (agent === 'codex') await this.warnCodexRuleConflict();
-    const args = agent === 'claude' ? claudeLaunchArgs() : codexLaunchArgs();
+    const args = launchArgs(agent);
     const command = `${AGENTS[agent].command}${args ? ' ' + args : ''}`;
     const s = await sessionName(agent);
     const existing = await agentSessionInfo(agent, s);
@@ -2435,7 +2513,7 @@ class ClaudeTmuxView {
     if (agent === 'codex') await this.warnCodexRuleConflict();
     const s = await sessionName(agent);
     if (!await sessionBelongsToWorkspace(s)) return this.startSession();
-    const args = agent === 'claude' ? claudeLaunchArgs() : codexLaunchArgs();
+    const args = launchArgs(agent);
     const command = `${AGENTS[agent].command}${args ? ' ' + args : ''}`;
     await this.replaceSession(agent, command, 'Restart');
   }
@@ -2464,7 +2542,7 @@ class ClaudeTmuxView {
     this.tick(true);
   }
 
-  // Manage only the Claude and Codex sessions whose session_path is this root.
+  // Manage only this workspace's agent sessions (session_path === this root).
   async killPick() {
     const items = [];
     for (const agent of Object.keys(AGENTS)) {
@@ -2483,7 +2561,7 @@ class ClaudeTmuxView {
       });
     }
     if (!items.length) {
-      vscode.window.showInformationMessage('No Claude or Codex tmux sessions for this workspace.');
+      vscode.window.showInformationMessage('No agent tmux sessions for this workspace.');
       return;
     }
     const picked = await vscode.window.showQuickPick(items, {
@@ -2511,25 +2589,32 @@ class ClaudeTmuxView {
     this.tick(true);
   }
 
-  // Claude uses the extension picker; Codex opens its cwd-filtered native picker.
+  // Agents with readable local transcripts (Claude) get the extension's picker;
+  // the others hand off to their own resume mechanism — Codex's cwd-filtered
+  // native picker, Antigravity's --continue.
   async attachExisting(agent = this.activeAgent) {
     const cwd = workspaceFolder();
     if (!cwd) {
       vscode.window.showWarningMessage('Open a folder before resuming an agent session.');
       return;
     }
-    if (agent === 'codex') {
-      await this.warnCodexRuleConflict();
-      const args = codexLaunchArgs();
-      await this.replaceSession('codex', `codex resume${args ? ' ' + args : ''}`, 'Resume');
+    const spec = AGENTS[agent];
+    if (!spec) return;
+    if (!spec.listSessions) {
+      if (!spec.resumeLatest) {
+        vscode.window.showInformationMessage(`${spec.label} does not support resuming a previous session.`);
+        return;
+      }
+      if (agent === 'codex') await this.warnCodexRuleConflict();
+      await this.replaceSession(agent, spec.resumeLatest(launchArgs(agent)), 'Resume');
       return;
     }
     const sessions = await vscode.window.withProgress(
-      { location: { viewId: 'claudeTmux.view' }, title: 'Loading Claude sessions…' },
-      () => listSessions(getProjectDir(cwd))
+      { location: { viewId: 'claudeTmux.view' }, title: `Loading ${spec.label} sessions…` },
+      () => spec.listSessions(cwd)
     );
     if (!sessions.length) {
-      vscode.window.showInformationMessage('No existing Claude sessions found for this folder.');
+      vscode.window.showInformationMessage(`No existing ${spec.label} sessions found for this folder.`);
       return;
     }
 
@@ -2540,12 +2625,12 @@ class ClaudeTmuxView {
       sessionId: s.id,
     }));
     const picked = await vscode.window.showQuickPick(items, {
-      placeHolder: 'Resume which Claude session in the side bar?',
+      placeHolder: `Resume which ${spec.label} session in the side bar?`,
       matchOnDescription: true,
       matchOnDetail: true,
     });
     if (!picked) return;
-    await this.startResumed(picked.sessionId, 'claude');
+    await this.startResumed(picked.sessionId, agent);
   }
 
   async warnCodexRuleConflict() {
@@ -2571,7 +2656,9 @@ class ClaudeTmuxView {
   cleanupChannel(id) {
     const cwd = workspaceFolder();
     if (!cwd || !id) return;
-    for (const name of [`draft-${id}.md`, `handoff-${id}.md`, `ack-${id}`, `answer-${id}-claude.md`, `answer-${id}-codex.md`]) {
+    const names = [`draft-${id}.md`, `handoff-${id}.md`, `ack-${id}`,
+      ...AGENT_IDS.map((agent) => `answer-${id}-${agent}.md`)];
+    for (const name of names) {
       fs.promises.unlink(path.join(cwd, '.claude', 'agentmux', name)).catch(() => {});
     }
   }
@@ -2645,16 +2732,39 @@ class ClaudeTmuxView {
       vscode.window.showInformationMessage(`Pair Mode writer is ${AGENTS[this.writerAgent].label}. Switch to that tab to hand off.`);
       return;
     }
-    const target = opts.target && AGENTS[opts.target] ? opts.target : (source === 'claude' ? 'codex' : 'claude');
+    // With more than two agents the peer is a real choice: offer every other
+    // agent, running ones first, and let the details step confirm it.
+    const candidates = this.handoffCandidates(source);
+    const target = opts.target && AGENTS[opts.target] && opts.target !== source
+      ? opts.target
+      : candidates[0];
+    if (!target) {
+      vscode.window.showInformationMessage('Start another agent to hand work off to.');
+      return;
+    }
     const id = crypto.randomBytes(8).toString('hex');
     this.handoff = {
       id, source, target, phase: 'collecting', details: '', createdAt: Date.now(),
       ackToken: crypto.randomBytes(12).toString('hex'),
       findings: !!opts.findings,
       parentId: opts.parentId || undefined,
+      lockedTarget: !!(opts.target && AGENTS[opts.target]), // findings round-trip
     };
     this.postAgents();
-    if (this.view) this.view.webview.postMessage({ type: 'handoffDetails', id, source, target, details: '', findings: !!opts.findings });
+    if (this.view) this.view.webview.postMessage({
+      type: 'handoffDetails', id, source, target, details: '', findings: !!opts.findings,
+      targets: this.handoff.lockedTarget ? [target] : candidates,
+    });
+  }
+
+  // Handoff peers for `source`: present agents first (the realistic targets),
+  // then the rest, so a handoff can still start one that is not running yet.
+  handoffCandidates(source) {
+    const others = AGENT_IDS.filter((agent) => agent !== source);
+    return [
+      ...others.filter((agent) => this.agentState[agent].present),
+      ...others.filter((agent) => !this.agentState[agent].present),
+    ];
   }
 
   updateHandoffDetails(message) {
@@ -2671,6 +2781,8 @@ class ClaudeTmuxView {
     this.postAgents();
     if (this.view) this.view.webview.postMessage({
       type: 'handoffCreateError', id: transaction.id, details: transaction.details || '', error,
+      source: transaction.source, target: transaction.target,
+      targets: transaction.lockedTarget ? [transaction.target] : this.handoffCandidates(transaction.source),
     });
   }
 
@@ -2685,6 +2797,13 @@ class ClaudeTmuxView {
     const endMarker = `HANDOFF_END:${transaction.id}`;
     if (details.includes(beginMarker) || details.includes(endMarker)) {
       return this.returnHandoffToDetails(transaction, 'Remove transaction markers from the optional details.');
+    }
+    // The details step may have re-pointed the handoff at another agent.
+    if (!transaction.lockedTarget && message.target && message.target !== transaction.target) {
+      if (!AGENTS[message.target] || message.target === transaction.source) {
+        return this.returnHandoffToDetails(transaction, 'Pick a valid agent to hand off to.');
+      }
+      transaction.target = message.target;
     }
     transaction.details = details;
     transaction.phase = 'checking';
@@ -2782,8 +2901,11 @@ class ClaudeTmuxView {
       try { todoText = fs.readFileSync(path.join(cwd, todoFile), 'utf8').slice(0, 2000).trim(); } catch { /* absent */ }
     }
     const resumePointers = [];
-    if (this.tails.claude.file) resumePointers.push(`Claude ${path.basename(this.tails.claude.file, '.jsonl')}`);
-    if (this.tails.codex.file) resumePointers.push(`Codex ${path.basename(this.tails.codex.file, '.jsonl').replace(/^rollout-/, '')}`);
+    for (const agent of AGENT_IDS) {
+      const file = this.tails[agent]?.file;
+      if (!file) continue; // no readable transcript for this CLI
+      resumePointers.push(`${AGENTS[agent].label} ${path.basename(file, '.jsonl').replace(/^rollout-/, '')}`);
+    }
     transaction.repository = {
       branch: branch.ok && branch.out.trim() ? branch.out.trim() : '(unavailable)',
       head: head.ok && head.out.trim() ? head.out.trim() : '(unavailable)',
@@ -3141,6 +3263,7 @@ class ClaudeTmuxView {
         source: transaction.source, target: transaction.target,
         details: transaction.details || '',
         findings: !!transaction.findings,
+        targets: transaction.lockedTarget ? [transaction.target] : this.handoffCandidates(transaction.source),
       });
       return;
     }
@@ -3181,9 +3304,15 @@ class ClaudeTmuxView {
   }
 
   // ---- arbiter mode --------------------------------------------------------------
-  // One question, both agents in parallel, answers gathered through the .claude
-  // channel (pane markers as fallback), verdict picked by the user; the winner
-  // becomes the Pair-Mode writer.
+  // One question, every running agent in parallel, answers gathered through the
+  // .claude channel (pane markers as fallback), verdict picked by the user; the
+  // winner becomes the Pair-Mode writer.
+  // Every RUNNING agent takes part; agents that are not started simply sit the
+  // round out, so a third agent never blocks a two-way arbiter.
+  arbiterParticipants() {
+    return AGENT_IDS.filter((agent) => this.agentState[agent].present);
+  }
+
   prepareArbiter() {
     if (this.handoff) {
       vscode.window.showInformationMessage('Finish or cancel the current handoff first.');
@@ -3193,16 +3322,20 @@ class ClaudeTmuxView {
       vscode.window.showInformationMessage('An arbiter round is already in progress.');
       return;
     }
-    for (const agent of Object.keys(AGENTS)) {
-      if (!this.agentState[agent].present || ['working', 'needs-input'].includes(this.agentState[agent].status)) {
-        vscode.window.showInformationMessage('Both agents must be running and back at their prompts for an arbiter round.');
-        return;
-      }
+    const participants = this.arbiterParticipants();
+    if (participants.length < 2) {
+      vscode.window.showInformationMessage('At least two agents must be running for an arbiter round.');
+      return;
+    }
+    // A mid-turn agent cannot take a parallel question, so the round waits.
+    if (participants.some((agent) => ['working', 'needs-input'].includes(this.agentState[agent].status))) {
+      vscode.window.showInformationMessage('Every running agent must be back at its prompt for an arbiter round.');
+      return;
     }
     const id = crypto.randomBytes(8).toString('hex');
-    this.arbiter = { id, phase: 'collecting', createdAt: Date.now() };
+    this.arbiter = { id, phase: 'collecting', createdAt: Date.now(), participants };
     this.postAgents();
-    if (this.view) this.view.webview.postMessage({ type: 'arbiterPrompt', id });
+    if (this.view) this.view.webview.postMessage({ type: 'arbiterPrompt', id, participants });
   }
 
   arbiterPrompt(agent, id, question) {
@@ -3257,12 +3390,13 @@ class ClaudeTmuxView {
       }
       return ok ? name : null;
     };
-    const [claudeName, codexName] = await Promise.all([deliver('claude'), deliver('codex')]);
+    const participants = (arb.participants || []).filter((agent) => AGENTS[agent]);
+    const names = await Promise.all(participants.map((agent) => deliver(agent)));
     if (this.arbiter !== arb) return;
-    if (!claudeName || !codexName) {
+    if (names.some((name) => !name)) {
       this.arbiter = null;
       this.postAgents();
-      if (this.view) this.view.webview.postMessage({ type: 'arbiterError', id: arb.id, error: 'The question could not be delivered to both agents.' });
+      if (this.view) this.view.webview.postMessage({ type: 'arbiterError', id: arb.id, error: 'The question could not be delivered to every participating agent.' });
       return;
     }
     arb.phase = 'gathering';
@@ -3277,23 +3411,24 @@ class ClaudeTmuxView {
       timeoutMs: 180000,
       active: () => this.arbiter === arb && arb.phase === 'gathering',
     });
-    const [claudeAnswer, codexAnswer] = await Promise.all([gather('claude', claudeName), gather('codex', codexName)]);
+    const gathered = await Promise.all(participants.map((agent, i) => gather(agent, names[i])));
     if (this.arbiter !== arb || arb.phase !== 'gathering') return;
-    if (!claudeAnswer && !codexAnswer) {
+    const answers = {};
+    participants.forEach((agent, i) => { answers[agent] = gathered[i]; });
+    if (!participants.some((agent) => answers[agent])) {
       this.arbiter = null;
       this.cleanupChannel(arb.id);
       this.postAgents();
-      if (this.view) this.view.webview.postMessage({ type: 'arbiterError', id: arb.id, error: 'Neither agent returned a marked answer in time.' });
+      if (this.view) this.view.webview.postMessage({ type: 'arbiterError', id: arb.id, error: 'No agent returned a marked answer in time.' });
       return;
     }
     arb.phase = 'verdict';
-    arb.answers = { claude: claudeAnswer, codex: codexAnswer };
+    arb.answers = answers;
     this.postAgents();
     if (this.view) {
       this.view.webview.postMessage({
-        type: 'arbiterVerdict', id: arb.id, question,
-        claude: claudeAnswer ? claudeAnswer.slice(0, 20000) : null,
-        codex: codexAnswer ? codexAnswer.slice(0, 20000) : null,
+        type: 'arbiterVerdict', id: arb.id, question, participants,
+        answers: byAgent((agent) => (answers[agent] ? answers[agent].slice(0, 20000) : null)),
       });
     }
   }
@@ -3356,6 +3491,30 @@ class ClaudeTmuxView {
       `style-src ${webview.cspSource} 'unsafe-inline'`,
       `script-src 'nonce-${nonce}'`,
     ].join('; ');
+
+    // Everything agent-shaped in the markup is generated from the registry, so
+    // the webview never hardcodes a roster. Ids/labels are registry constants
+    // (no user input), and the roster also travels as a data attribute the
+    // script parses to build its per-agent state.
+    const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    const roster = AGENT_IDS.map((agent) => ({
+      id: agent,
+      label: AGENTS[agent].label,
+      canList: !!AGENTS[agent].listSessions,
+      canResumeLatest: !!AGENTS[agent].resumeLatest,
+    }));
+    const tabsHtml = roster.map((a) => `
+      <button id="tab-${esc(a.id)}" class="agent-tab hidden" role="tab" data-agent="${esc(a.id)}" aria-selected="false" aria-controls="screen">
+        <span class="agent-label">${esc(a.label)}</span><span class="writer-mark" aria-hidden="true">◆</span><span class="agent-state" aria-hidden="true"></span>
+      </button>`).join('');
+    const launchMenuHtml = roster.map((a) => `
+        <button role="menuitem" data-action="start" data-agent="${esc(a.id)}">Start ${esc(a.label)}</button>`
+      + (a.canList || a.canResumeLatest
+        ? `\n        <button role="menuitem" data-action="attach" data-agent="${esc(a.id)}">Resume ${esc(a.label)}…</button>`
+        : '')).join('');
+    const launcherHtml = roster.map((a) =>
+      `\n            <button data-launch-agent="${esc(a.id)}">Start ${esc(a.label)}</button>`).join('');
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -3369,20 +3528,10 @@ class ClaudeTmuxView {
 </style>
 </head>
 <body>
-  <div id="app" data-cursor="${cursorStyle}" data-links="${flag('fileLinks')}">
-    <div id="agent-tabs" role="tablist" aria-label="Tmux agent">
-      <button id="tab-claude" class="agent-tab hidden" role="tab" data-agent="claude" aria-selected="false" aria-controls="screen">
-        <span class="agent-label">Claude</span><span class="writer-mark" aria-hidden="true">◆</span><span class="agent-state" aria-hidden="true"></span>
-      </button>
-      <button id="tab-codex" class="agent-tab hidden" role="tab" data-agent="codex" aria-selected="false" aria-controls="screen">
-        <span class="agent-label">Codex</span><span class="writer-mark" aria-hidden="true">◆</span><span class="agent-state" aria-hidden="true"></span>
-      </button>
+  <div id="app" data-cursor="${cursorStyle}" data-links="${flag('fileLinks')}" data-agents="${esc(JSON.stringify(roster))}">
+    <div id="agent-tabs" role="tablist" aria-label="Tmux agent">${tabsHtml}
       <button id="tab-add" class="tab-add" type="button" aria-label="Start or resume an agent" title="Start or resume an agent" aria-expanded="false" aria-controls="agent-launch-menu">＋</button>
-      <div id="agent-launch-menu" class="launch-menu hidden" role="menu">
-        <button role="menuitem" data-action="start" data-agent="claude">Start Claude</button>
-        <button role="menuitem" data-action="attach" data-agent="claude">Resume Claude…</button>
-        <button role="menuitem" data-action="start" data-agent="codex">Start Codex</button>
-        <button role="menuitem" data-action="attach" data-agent="codex">Resume Codex…</button>
+      <div id="agent-launch-menu" class="launch-menu hidden" role="menu">${launchMenuHtml}
       </div>
     </div>
     <div id="screen-wrap">
@@ -3413,14 +3562,12 @@ class ClaudeTmuxView {
               <path fill="currentColor" fill-rule="evenodd" d="M13.8 5.2 H18.6 A2.6 2.6 0 0 1 21.2 7.8 V16.2 A2.6 2.6 0 0 1 18.6 18.8 H13.8 Z M17.5 10 L18 11.5 L19.5 12 L18 12.5 L17.5 14 L17 12.5 L15.5 12 L17 11.5 Z"/>
             </svg>
           </div>
-          <div class="card-title" id="overlay-title">Attach to a Claude session</div>
+          <div class="card-title" id="overlay-title">Attach to an agent session</div>
           <div class="card-sub" id="overlay-folder"></div>
           <div id="preflight" class="hidden" aria-label="Environment check"></div>
           <input id="session-filter" class="hidden" type="text" placeholder="Filter sessions…" aria-label="Filter sessions" />
-          <div id="session-list" aria-label="Existing Claude sessions"></div>
-          <div id="launcher-actions" class="card-actions hidden">
-            <button data-launch-agent="claude">Start Claude</button>
-            <button data-launch-agent="codex">Start Codex</button>
+          <div id="session-list" aria-label="Existing agent sessions"></div>
+          <div id="launcher-actions" class="card-actions hidden">${launcherHtml}
           </div>
           <div class="card-actions">
             <button id="btn-start" class="primary">＋ Start new session</button>
@@ -3462,6 +3609,8 @@ class ClaudeTmuxView {
       <div class="modal-card">
         <div class="modal-title" id="handoff-title">AgentMux handoff</div>
         <div class="modal-meta" id="handoff-meta"></div>
+        <label id="handoff-target-label" for="handoff-target" class="hidden">Hand off to</label>
+        <select id="handoff-target" class="hidden"></select>
         <label id="handoff-mode-label" for="handoff-mode">Mode</label>
         <select id="handoff-mode">
           <option value="continue">Continue task</option>

@@ -1,10 +1,10 @@
 # AgentMux
 
-**Two agents. One terminal flow.**
+**Three agents. One terminal flow.**
 
-Run **Claude Code** and **OpenAI Codex CLI** in persistent tmux sessions, switch
-between them instantly, and hand work from one agent to the other from a single
-VS Code side-bar view.
+Run **Claude Code**, **OpenAI Codex CLI** and **Google Antigravity** (`agy`) in
+persistent tmux sessions, switch between them instantly, and hand work from one
+agent to another from a single VS Code side-bar view.
 
 ![AgentMux in action: the Claude tab mirrored in the side bar with live state and telemetry footer](media/agentmux.0.10.0.png)
 
@@ -12,12 +12,13 @@ The extension is deliberately workspace-scoped:
 
 - the Claude tab controls only `tmux_claude_<folder>`;
 - the Codex tab controls only `tmux_codex_<folder>`;
+- the Antigravity tab controls only `tmux_agy_<folder>`;
 - every existing session is accepted only when its tmux `session_path` matches
   the current VS Code workspace root;
 - projects with the same folder name receive a stable path hash when needed,
   so one project can never attach to another project's tmux session.
 
-Both agents survive VS Code restarts, Remote-SSH drops and local disconnects.
+Every agent survives VS Code restarts, Remote-SSH drops and local disconnects.
 
 ## What the view does
 
@@ -202,6 +203,8 @@ settings.
 | `claudeTmux.codexReadClaudeRules` | `true` | Tell Codex to read every Markdown file recursively under `.claude`. |
 | `claudeTmux.sessionPrefix` | `tmux_claude_` | Claude session prefix. |
 | `claudeTmux.codexSessionPrefix` | `tmux_codex_` | Codex session prefix. |
+| `claudeTmux.antigravitySessionPrefix` | `tmux_agy_` | Antigravity session prefix. |
+| `claudeTmux.antigravityArgs` | `--dangerously-skip-permissions` | Arguments passed to `agy`. |
 | `claudeTmux.scrollbackLines` | `1000` | Captured history lines, from 0 to 5000. |
 | `claudeTmux.fontFamily` | `""` | Empty inherits `terminal.integrated.fontFamily`. |
 | `claudeTmux.fontSize` | `0` | Zero inherits `terminal.integrated.fontSize`. |

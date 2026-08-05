@@ -28,7 +28,10 @@ html, body {
 }
 .agent-tab {
   flex: 1 1 0;
-  min-width: 68px;
+  /* Three or more tabs must still fit a narrow side bar: let them shrink and
+     ellipsize the label rather than overflowing the tab strip. */
+  min-width: 0;
+  overflow: hidden;
   padding: 5px 8px 6px;
   border: 0;
   border-bottom: 2px solid transparent;
@@ -42,6 +45,7 @@ html, body {
   justify-content: center;
   gap: 6px;
 }
+.agent-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .agent-tab:hover { background: var(--vscode-list-hoverBackground, rgba(255,255,255,0.06)); }
 .agent-tab.active {
   color: var(--vscode-foreground, #ddd);

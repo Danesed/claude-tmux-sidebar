@@ -37,6 +37,10 @@ agent.
 ### Codex tab
 
 - **Start new Codex** creates `tmux_codex_<folder>` in the workspace root.
+- **Start new Antigravity** creates `tmux_agy_<folder>` in the workspace root and
+  runs Google's `agy` CLI. Antigravity keeps its conversations in a local
+  database rather than per-folder transcripts, so the side bar offers no
+  conversation list for it; **Resume previous session** runs `agy --continue`.
 - Start, resume and restart use Full Access by default. Disable
   `claudeTmux.codexFullAccess` if approvals and sandboxing are required.
 - The launcher card now lists this workspace's Codex conversations natively
@@ -131,8 +135,8 @@ The name is not the security boundary. Before capture, input, resize, restart or
 kill, the extension checks that tmux reports `session_path` equal to the current
 workspace root. Tmux targets also use exact-name syntax.
 
-If another project with the same basename already owns `tmux_claude_<folder>` or
-`tmux_codex_<folder>`, this project uses `<name>-<path-hash>`. Unrelated sessions are
+If another project with the same basename already owns `tmux_claude_<folder>`,
+`tmux_codex_<folder>` or `tmux_agy_<folder>`, this project uses `<name>-<path-hash>`. Unrelated sessions are
 never shown by **Manage this workspace's tmux sessions…**.
 
 No workspace means no operation: the view asks you to open a folder and does not
