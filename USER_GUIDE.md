@@ -37,6 +37,10 @@ agent.
 ### Codex tab
 
 - **Start new Codex** creates `tmux_codex_<folder>` in the workspace root.
+- **Start new OpenCode** creates `tmux_opencode_<folder>` and runs `opencode`.
+  OpenCode publishes its own session index, so the side bar lists real past
+  conversations for the folder and resumes one with `opencode --session <id>`;
+  **Resume previous session** runs `opencode --continue`.
 - **Start new Antigravity** creates `tmux_agy_<folder>` in the workspace root and
   runs Google's `agy` CLI. Antigravity keeps its conversations in a local
   database rather than per-folder transcripts, so the side bar offers no
@@ -136,7 +140,7 @@ kill, the extension checks that tmux reports `session_path` equal to the current
 workspace root. Tmux targets also use exact-name syntax.
 
 If another project with the same basename already owns `tmux_claude_<folder>`,
-`tmux_codex_<folder>` or `tmux_agy_<folder>`, this project uses `<name>-<path-hash>`. Unrelated sessions are
+`tmux_codex_<folder>`, `tmux_opencode_<folder>` or `tmux_agy_<folder>`, this project uses `<name>-<path-hash>`. Unrelated sessions are
 never shown by **Manage this workspace's tmux sessions…**.
 
 No workspace means no operation: the view asks you to open a folder and does not

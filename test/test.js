@@ -12,12 +12,15 @@ let agentInfoOutput = null;
 let holdNextSend = false;
 let heldSendCallback = null;
 let captureOutput = 'terminal frame\n';
+let opencodeSessionsJson = null;
 const settings = new Map([
   ['codexArgs', '--no-alt-screen'],
   ['codexFullAccess', true],
   ['codexReadClaudeRules', true],
   ['sessionPrefix', 'tmux_'],
   ['codexSessionPrefix', 'codex_'],
+  ['opencodeArgs', '--auto'],
+  ['opencodeSessionPrefix', 'tmux_opencode_'],
   ['antigravityArgs', '--dangerously-skip-permissions'],
   ['antigravitySessionPrefix', 'tmux_agy_'],
   ['scrollbackLines', 1000],
@@ -37,6 +40,10 @@ const settings = new Map([
 
 function execFile(command, args, options, callback) {
   calls.push({ command, args: [...args] });
+  if (command === 'opencode') {
+    if (opencodeSessionsJson == null) return callback(new Error('opencode not installed'), '', '');
+    return callback(null, opencodeSessionsJson, '');
+  }
   if (command !== 'tmux') return callback(null, '', '');
   if (args[0] === 'display-message') {
     const format = args[args.length - 1];
@@ -44,8 +51,9 @@ function execFile(command, args, options, callback) {
     if (format.includes('@claude_tmux_agent')) {
       if (agentInfoOutput != null) return callback(null, workspace + '\t' + agentInfoOutput, '');
       const target = args[args.indexOf('-t') + 1];
-      const agent = target.includes('tmux_agy_') ? 'antigravity'
-        : target.includes('codex_') ? 'codex' : 'claude';
+      const agent = target.includes('tmux_opencode_') ? 'opencode'
+        : target.includes('tmux_agy_') ? 'antigravity'
+          : target.includes('codex_') ? 'codex' : 'claude';
       return callback(null, `${workspace}\t${agent}\t1\t${agent}\t1700000000\tgen-a\n`, '');
     }
     return callback(null, '2,3,80,24,1700000000,240,0\n', '');
@@ -82,7 +90,7 @@ const vscode = {
 };
 
 const source = fs.readFileSync(path.join(root, 'extension.js'), 'utf8')
-  + '\nmodule.exports.__test = { ClaudeTmuxView, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions, AGENTS, AGENT_IDS, launchArgs, paneLooksLikeAgent };';
+  + '\nmodule.exports.__test = { ClaudeTmuxView, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions, AGENTS, AGENT_IDS, launchArgs, paneLooksLikeAgent, listOpencodeSessions };';
 const moduleUnderTest = { exports: {} };
 const sandbox = {
   module: moduleUnderTest,
@@ -103,7 +111,7 @@ const sandbox = {
   clearInterval,
 };
 vm.runInNewContext(source, sandbox, { filename: 'extension.js' });
-const { ClaudeTmuxView, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions, AGENTS, AGENT_IDS, launchArgs, paneLooksLikeAgent } = moduleUnderTest.exports.__test;
+const { ClaudeTmuxView, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions, AGENTS, AGENT_IDS, launchArgs, paneLooksLikeAgent, listOpencodeSessions } = moduleUnderTest.exports.__test;
 
 function makeProvider() {
   const provider = new ClaudeTmuxView({
@@ -710,15 +718,20 @@ async function run() {
     provider.agentState[agent].present = true;
     provider.agentState[agent].status = 'idle';
   }
-  assert.strictEqual(provider.handoffCandidates('claude').join(','), 'codex,antigravity');
+  const othersOf = (source) => AGENT_IDS.filter((agent) => agent !== source);
+  assert.strictEqual(provider.handoffCandidates('claude').join(','), othersOf('claude').join(','));
   provider.agentState.codex.present = false;
-  assert.strictEqual(provider.handoffCandidates('claude').join(','), 'antigravity,codex', 'running agents are offered first');
+  assert.strictEqual(
+    provider.handoffCandidates('claude').join(','),
+    othersOf('claude').filter((agent) => agent !== 'codex').concat('codex').join(','),
+    'running agents are offered first'
+  );
   provider.agentState.codex.present = true;
 
   messages.length = 0;
   provider.prepareHandoff('claude');
   const multiId = provider.handoff.id;
-  assert.strictEqual(messages.at(-1).targets.join(','), 'codex,antigravity', 'the details step offers every peer');
+  assert.strictEqual(messages.at(-1).targets.join(','), othersOf('claude').join(','), 'the details step offers every peer');
   messages.length = 0;
   await provider.createHandoff({ id: multiId, details: '', target: 'claude' });
   assert.strictEqual(provider.handoff.phase, 'collecting', 'handing off to yourself must return to the editable step');
@@ -750,13 +763,57 @@ async function run() {
   provider.cancelArbiter(provider.arbiter.id);
   provider.agentState.antigravity.present = false;
   provider.prepareArbiter();
-  assert.strictEqual(provider.arbiter.participants.join(','), 'claude,codex', 'a stopped agent sits the round out');
+  assert.strictEqual(
+    provider.arbiter.participants.join(','),
+    AGENT_IDS.filter((agent) => agent !== 'antigravity').join(','),
+    'a stopped agent sits the round out'
+  );
   provider.cancelArbiter(provider.arbiter.id);
   provider.agentState.antigravity.present = true;
   provider.agentState.antigravity.status = 'working';
   provider.prepareArbiter();
   assert.strictEqual(provider.arbiter, null, 'a mid-turn running agent still blocks the round');
   provider.agentState.antigravity.status = 'idle';
+
+  // ---- OpenCode as a fourth agent ------------------------------------------------------
+  assert.ok(AGENT_IDS.includes('opencode'), 'OpenCode must be a registered agent');
+  assert.strictEqual(AGENTS.opencode.command, 'opencode');
+  assert.strictEqual(AGENTS.opencode.defaultPrefix, 'tmux_opencode_');
+  assert.strictEqual(launchArgs('opencode'), '--auto');
+  assert.strictEqual(AGENTS.opencode.resumeById('s7', '--auto'), "opencode --session 's7' --auto");
+  assert.strictEqual(AGENTS.opencode.resumeLatest('--auto'), 'opencode --continue --auto');
+  assert.ok(paneLooksLikeAgent('opencode', '/home/u/.opencode/bin/opencode'));
+  assert.ok(!paneLooksLikeAgent('opencode', 'codex'));
+  assert.ok(!paneLooksLikeAgent('claude', 'opencode'), 'opencode must never be mistaken for Claude');
+
+  // Unlike the others, OpenCode's session index comes from the CLI itself. The
+  // parser must tolerate the schema drifting rather than break the overlay.
+  opencodeSessionsJson = JSON.stringify([
+    { id: 's1', title: 'refactor the tick loop', time: { updated: 1767225600000 } },
+    { sessionID: 's2', summary: 'fix the scroll jump', updated: '2026-02-02T03:04:05Z' },
+    { id: 's3' },
+    { noIdHere: true },
+    'garbage',
+  ]);
+  const ocSessions = await listOpencodeSessions(workspace);
+  assert.strictEqual(ocSessions.length, 3, 'rows without an id are skipped, the rest survive');
+  assert.strictEqual(ocSessions[0].id, 's2', 'sessions are newest first');
+  assert.strictEqual(ocSessions[0].name, 'fix the scroll jump');
+  assert.strictEqual(ocSessions[1].name, 'refactor the tick loop', 'a millisecond stamp is understood too');
+  assert.strictEqual(ocSessions[2].name, 's3', 'a titleless session falls back to its id');
+  opencodeSessionsJson = 'this is not json';
+  assert.strictEqual((await listOpencodeSessions(workspace)).length, 0, 'unparseable output degrades to no list');
+  opencodeSessionsJson = null;
+  assert.strictEqual((await listOpencodeSessions(workspace)).length, 0, 'a missing CLI degrades to no list');
+
+  // Preflight must re-probe with an interactive shell: installers routinely export
+  // PATH from ~/.bashrc, which a non-interactive login shell (-lc) skips entirely.
+  calls.length = 0;
+  provider._preflight = null;
+  await provider.runPreflight(true);
+  assert.ok(calls.some((call) => call.args?.[0] === '-lc'), 'the fast non-interactive probe runs first');
+  assert.ok(calls.some((call) => call.args?.[0] === '-lic'), 'a CLI that looks absent triggers an interactive re-probe');
+  assert.ok('opencode' in (messages.at(-1).agents || {}), 'preflight reports every registered agent');
 
   // The generated markup carries the whole roster, tabs included.
   const markup = provider.html({ asWebviewUri: (u) => u, cspSource: 'vscode-resource:' });

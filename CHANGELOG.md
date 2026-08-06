@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.11.1
+- Add **OpenCode** (`opencode`) as a fourth agent, on the same footing as the others: its own tab, tmux session (`tmux_opencode_<folder>`, `claudeTmux.opencodeSessionPrefix`), launch arguments (`claudeTmux.opencodeArgs`, default `--auto`), presence and status tracking, input pump, handoffs in both directions, arbiter participation, Pair Mode, status bar item, timeline events and preflight check.
+  - OpenCode publishes its own session index, so unlike Antigravity it gets a real resume list: the overlay is filled from `opencode session list --format json` (run in the workspace) and resumes a pick with `opencode --session <id>`, while **Resume previous session** runs `opencode --continue`. The JSON is parsed defensively across field names and degrades to "no list offered" rather than breaking the overlay.
+- Fix a preflight false negative that affected any CLI installed by a `~/.bashrc` PATH export — OpenCode's installer among them. The check ran the login shell non-interactively (`-lc`), and `~/.bashrc` returns immediately for non-interactive shells, so the CLI was reported "not on PATH" even though the interactive shell tmux starts finds it and the agent launches fine. Missing agents are now re-probed with `-lic`; the fast non-interactive probe still runs first.
+- `runFile` accepts an optional timeout, used to bound the new third-party CLI probes.
+
 ## 0.11.0
 - Add **Google Antigravity** (`agy`) as a first-class third agent, working exactly like Claude and Codex: its own tab, tmux session (`tmux_agy_<folder>`, `claudeTmux.antigravitySessionPrefix`), launch arguments (`claudeTmux.antigravityArgs`, default `--dangerously-skip-permissions`), presence and status tracking, input pump, handoffs in both directions, arbiter participation, Pair Mode, status bar item, timeline events and preflight check.
   - Resume mirrors what the CLI actually offers: Antigravity keeps conversations in a local database instead of readable per-folder transcripts, so the overlay shows no conversation list and **Resume previous session** runs `agy --continue`; a known ID resumes with `agy --conversation <id>`.

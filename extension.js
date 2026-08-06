@@ -329,9 +329,11 @@ class PipeTap {
   }
 }
 
-function runFile(command, args, cwd) {
+// timeout is optional (0/undefined = none) so a probe of a third-party CLI can
+// never wedge a one-shot path; existing callers keep their old behaviour.
+function runFile(command, args, cwd, timeout) {
   return new Promise((resolve) => {
-    execFile(command, args, { cwd, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
+    execFile(command, args, { cwd, timeout, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
       resolve({ ok: !err, out: stdout || '', err: stderr || '' });
     });
   });
@@ -379,6 +381,20 @@ const AGENTS = {
     listSessions: (cwd) => listCodexSessions(cwd),
     resumeById: (id, args) => `codex resume ${shellQuote(id)}${args ? ' ' + args : ''}`,
     resumeLatest: (args) => `codex resume${args ? ' ' + args : ''}`,
+  },
+  // opencode. Unlike the others it exposes its own session index as JSON, so the
+  // resume overlay is populated by asking the CLI instead of reading transcripts.
+  opencode: {
+    label: 'OpenCode',
+    command: 'opencode',
+    prefixSetting: 'opencodeSessionPrefix',
+    defaultPrefix: 'tmux_opencode_',
+    argsSetting: 'opencodeArgs',
+    paneRe: /(?:^|-)opencode(?:$|-)/i,
+    paneAliases: [],
+    listSessions: (cwd) => listOpencodeSessions(cwd),
+    resumeById: (id, args) => `opencode --session ${shellQuote(id)}${args ? ' ' + args : ''}`,
+    resumeLatest: (args) => `opencode --continue${args ? ' ' + args : ''}`,
   },
   // Google Antigravity. Its conversations live in a local database rather than
   // readable per-folder transcripts, so the resume overlay offers the CLI's own
@@ -855,6 +871,49 @@ async function listSessions(projectDir) {
       ({ name, firstUserMsg } = sessionFromTranscriptLines(lines));
     } catch { /* skip unreadable file */ }
     sessions.push({ id, name: name || firstUserMsg || id, lastTs });
+  }
+  sessions.sort((a, b) => (b.lastTs || '').localeCompare(a.lastTs || ''));
+  return sessions;
+}
+
+// opencode owns its session index (a local database), and the supported way to
+// read it is asking the CLI: `opencode session list --format json`. Run in the
+// workspace so the answer is that project's sessions. Every field is read
+// defensively across plausible names — opencode ships fast, and a schema change
+// must degrade to "no list offered", never to a broken overlay or a throw.
+async function listOpencodeSessions(cwd) {
+  if (!cwd) return [];
+  const result = await runFile(
+    AGENTS.opencode.command, ['session', 'list', '--format', 'json', '-n', '40'], cwd, 15000
+  );
+  if (!result.ok) return [];
+  let parsed;
+  try { parsed = JSON.parse(result.out); } catch { return []; }
+  const rows = Array.isArray(parsed) ? parsed
+    : (Array.isArray(parsed?.sessions) ? parsed.sessions : []);
+  const pick = (...values) => values.find((v) => v != null && v !== '');
+  const stamp = (value) => {
+    if (typeof value === 'number' && isFinite(value)) {
+      // Seconds or milliseconds, both seen in the wild.
+      return new Date(value > 1e12 ? value : value * 1000).toISOString();
+    }
+    if (typeof value === 'string') {
+      const parsedTs = Date.parse(value);
+      if (!isNaN(parsedTs)) return new Date(parsedTs).toISOString();
+    }
+    return null;
+  };
+  const sessions = [];
+  for (const row of rows) {
+    if (!row || typeof row !== 'object') continue;
+    const id = pick(row.id, row.sessionID, row.sessionId, row.session_id);
+    if (!id) continue;
+    const name = pick(row.title, row.summary, row.description, row.name) || String(id);
+    const lastTs = stamp(pick(
+      row.time?.updated, row.updated, row.updatedAt, row.modified,
+      row.time?.created, row.created, row.createdAt
+    ));
+    sessions.push({ id: String(id), name: String(name).slice(0, 80), lastTs });
   }
   sessions.sort((a, b) => (b.lastTs || '').localeCompare(a.lastTs || ''));
   return sessions;
@@ -2011,13 +2070,29 @@ class ClaudeTmuxView {
         .join('; ');
       const [tmuxVersion, tools] = await Promise.all([
         runFile('tmux', ['-V']),
-        runFile(shell, ['-lc', probe]),
+        runFile(shell, ['-lc', probe], undefined, 8000),
       ]);
-      const lines = (tools.out || '').split('\n');
-      const found = (prefix) => lines.some((l) => l.startsWith(prefix) && l.slice(prefix.length).trim());
+      const seen = (out) => {
+        const lines = (out || '').split('\n');
+        return (prefix) => lines.some((l) => l.startsWith(prefix) && l.slice(prefix.length).trim());
+      };
+      let found = seen(tools.out);
+      const agents = byAgent((agent) => found(`${AGENT_IDS.indexOf(agent)}:`));
+      // Installers commonly export PATH from ~/.bashrc, which a NON-interactive
+      // login shell skips outright — while the interactive shell tmux starts
+      // runs it in full. Without this re-probe an agent that launches perfectly
+      // in the pane is reported "not on PATH". Interactive only as a fallback:
+      // it is the slower, noisier shell, so the fast path stays the common one.
+      if (AGENT_IDS.some((agent) => !agents[agent])) {
+        const interactive = await runFile(shell, ['-lic', probe], undefined, 8000);
+        found = seen(interactive.out);
+        for (const agent of AGENT_IDS) {
+          if (!agents[agent] && found(`${AGENT_IDS.indexOf(agent)}:`)) agents[agent] = true;
+        }
+      }
       this._preflight = {
         tmux: tmuxVersion.ok ? tmuxVersion.out.trim() : null,
-        agents: byAgent((agent) => found(`${AGENT_IDS.indexOf(agent)}:`)),
+        agents,
       };
     }
     if (this.view) this.view.webview.postMessage({ type: 'preflight', ...this._preflight });

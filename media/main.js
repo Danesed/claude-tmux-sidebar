@@ -754,6 +754,7 @@
   const INSTALL_CMD = {
     claude: 'npm install -g @anthropic-ai/claude-code',
     codex: 'npm install -g @openai/codex',
+    opencode: 'curl -fsSL https://opencode.ai/install | bash',
     antigravity: 'Install Google Antigravity and ensure its "agy" CLI is on PATH',
   };
   function renderPreflight(m) {

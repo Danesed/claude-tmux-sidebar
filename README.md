@@ -1,10 +1,11 @@
 # AgentMux
 
-**Three agents. One terminal flow.**
+**Four agents. One terminal flow.**
 
-Run **Claude Code**, **OpenAI Codex CLI** and **Google Antigravity** (`agy`) in
-persistent tmux sessions, switch between them instantly, and hand work from one
-agent to another from a single VS Code side-bar view.
+Run **Claude Code**, **OpenAI Codex CLI**, **OpenCode** and **Google
+Antigravity** (`agy`) in persistent tmux sessions, switch between them
+instantly, and hand work from one agent to another from a single VS Code
+side-bar view.
 
 ![AgentMux in action: the Claude tab mirrored in the side bar with live state and telemetry footer](media/agentmux.0.10.0.png)
 
@@ -12,6 +13,7 @@ The extension is deliberately workspace-scoped:
 
 - the Claude tab controls only `tmux_claude_<folder>`;
 - the Codex tab controls only `tmux_codex_<folder>`;
+- the OpenCode tab controls only `tmux_opencode_<folder>`;
 - the Antigravity tab controls only `tmux_agy_<folder>`;
 - every existing session is accepted only when its tmux `session_path` matches
   the current VS Code workspace root;
@@ -203,6 +205,8 @@ settings.
 | `claudeTmux.codexReadClaudeRules` | `true` | Tell Codex to read every Markdown file recursively under `.claude`. |
 | `claudeTmux.sessionPrefix` | `tmux_claude_` | Claude session prefix. |
 | `claudeTmux.codexSessionPrefix` | `tmux_codex_` | Codex session prefix. |
+| `claudeTmux.opencodeSessionPrefix` | `tmux_opencode_` | OpenCode session prefix. |
+| `claudeTmux.opencodeArgs` | `--auto` | Arguments passed to `opencode`. |
 | `claudeTmux.antigravitySessionPrefix` | `tmux_agy_` | Antigravity session prefix. |
 | `claudeTmux.antigravityArgs` | `--dangerously-skip-permissions` | Arguments passed to `agy`. |
 | `claudeTmux.scrollbackLines` | `1000` | Captured history lines, from 0 to 5000. |
