@@ -1,17 +1,47 @@
 {
   "name": "claude-tmux-sidebar",
-  "displayName": "AgentMux — Claude, Codex, OpenCode & Antigravity in tmux",
-  "description": "Four agents, one terminal flow: switch fast and hand off work intelligently between Claude Code, Codex, OpenCode and Google Antigravity in tmux.",
-  "version": "0.11.1",
+  "displayName": "AgentMux — Claude, Codex, OpenCode, Hermes & Antigravity in tmux",
+  "description": "Five agents, one terminal flow: switch fast and hand off work intelligently between Claude Code, Codex, OpenCode, Hermes and Google Antigravity in tmux.",
+  "version": "0.12.0",
   "publisher": "Danesed",
   "license": "MIT",
   "icon": "icon.png",
-  "engines": { "vscode": "^1.80.0" },
-  "categories": ["Other", "AI", "Machine Learning"],
-  "keywords": ["claude", "claude-code", "codex", "gpt", "antigravity", "gemini", "opencode", "tmux", "terminal", "sidebar", "ai", "remote-ssh", "agent"],
-  "galleryBanner": { "color": "#0e1b2a", "theme": "dark" },
-  "repository": { "type": "git", "url": "https://github.com/Danesed/claude-tmux-sidebar" },
-  "bugs": { "url": "https://github.com/Danesed/claude-tmux-sidebar/issues" },
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other",
+    "AI",
+    "Machine Learning"
+  ],
+  "keywords": [
+    "claude",
+    "claude-code",
+    "codex",
+    "gpt",
+    "antigravity",
+    "gemini",
+    "opencode",
+    "nous-research",
+    "hermes",
+    "tmux",
+    "terminal",
+    "sidebar",
+    "ai",
+    "remote-ssh",
+    "agent"
+  ],
+  "galleryBanner": {
+    "color": "#0e1b2a",
+    "theme": "dark"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Danesed/claude-tmux-sidebar"
+  },
+  "bugs": {
+    "url": "https://github.com/Danesed/claude-tmux-sidebar/issues"
+  },
   "homepage": "https://github.com/Danesed/claude-tmux-sidebar#readme",
   "activationEvents": [],
   "main": "./extension.js",
@@ -85,25 +115,78 @@
         "command": "claudeTmux.clearPromptHistory",
         "title": "Clear prompt history for this workspace",
         "category": "AgentMux"
+      },
+      {
+        "command": "claudeTmux.explainState",
+        "title": "Explain the active agent's state",
+        "category": "AgentMux",
+        "icon": "$(question)"
+      },
+      {
+        "command": "claudeTmux.cleanupSessions",
+        "title": "Clean up this project's leftover tmux sessions…",
+        "category": "AgentMux",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "claudeTmux.removeIntegrations",
+        "title": "Remove agent integrations (hooks and plugins)",
+        "category": "AgentMux"
       }
     ],
     "menus": {
       "view/title": [
-        { "command": "claudeTmux.attach", "when": "view == claudeTmux.view", "group": "navigation@1" },
-        { "command": "claudeTmux.restart", "when": "view == claudeTmux.view", "group": "navigation@2" },
-        { "command": "claudeTmux.handoff", "when": "view == claudeTmux.view", "group": "navigation@3" },
-        { "command": "claudeTmux.kill", "when": "view == claudeTmux.view", "group": "navigation@4" },
-        { "command": "claudeTmux.killPick", "when": "view == claudeTmux.view", "group": "1_manage@1" }
+        {
+          "command": "claudeTmux.attach",
+          "when": "view == claudeTmux.view",
+          "group": "navigation@1"
+        },
+        {
+          "command": "claudeTmux.handoff",
+          "when": "view == claudeTmux.view",
+          "group": "navigation@2"
+        },
+        {
+          "command": "claudeTmux.kill",
+          "when": "view == claudeTmux.view",
+          "group": "navigation@3"
+        }
       ],
       "commandPalette": [
-        { "command": "claudeTmux.attach" },
-        { "command": "claudeTmux.restart" },
-        { "command": "claudeTmux.handoff" },
-        { "command": "claudeTmux.arbiter" },
-        { "command": "claudeTmux.kill" },
-        { "command": "claudeTmux.killPick" },
-        { "command": "claudeTmux.clearPromptHistory" },
-        { "command": "claudeTmux.focusAgent", "when": "false" }
+        {
+          "command": "claudeTmux.attach"
+        },
+        {
+          "command": "claudeTmux.restart"
+        },
+        {
+          "command": "claudeTmux.handoff"
+        },
+        {
+          "command": "claudeTmux.arbiter"
+        },
+        {
+          "command": "claudeTmux.kill"
+        },
+        {
+          "command": "claudeTmux.killPick"
+        },
+        {
+          "command": "claudeTmux.clearPromptHistory"
+        },
+        {
+          "command": "claudeTmux.focusAgent",
+          "when": "false"
+        },
+        {
+          "command": "claudeTmux.explainState"
+        },
+        {
+          "command": "claudeTmux.cleanupSessions"
+        },
+        {
+          "command": "claudeTmux.removeIntegrations"
+        }
       ]
     },
     "keybindings": [
@@ -152,6 +235,16 @@
           "default": "tmux_opencode_",
           "description": "OpenCode tmux session prefix. Session = <prefix><folder name> (e.g. tmux_opencode_my-project)."
         },
+        "claudeTmux.hermesArgs": {
+          "type": "string",
+          "default": "--cli --yolo",
+          "description": "Arguments passed to `hermes` (Nous Research) when starting or resuming a session. `--cli` runs the classic REPL, which keeps real tmux scrollback in the mirror; use `--tui` for the Ink terminal UI instead (an alternate-screen app, so tmux keeps no scrollback for it). `--yolo` bypasses dangerous-command approval prompts — remove it to be asked. The persistent approval policy is `approvals.mode` in ~/.hermes/config.yaml."
+        },
+        "claudeTmux.hermesSessionPrefix": {
+          "type": "string",
+          "default": "tmux_hermes_",
+          "description": "Hermes tmux session prefix. Session = <prefix><folder name> (e.g. tmux_hermes_my-project)."
+        },
         "claudeTmux.antigravityArgs": {
           "type": "string",
           "default": "--dangerously-skip-permissions",
@@ -191,7 +284,11 @@
         },
         "claudeTmux.cursorStyle": {
           "type": "string",
-          "enum": ["block", "bar", "underline"],
+          "enum": [
+            "block",
+            "bar",
+            "underline"
+          ],
           "default": "block",
           "description": "Cursor shape in the mirror."
         },
@@ -202,7 +299,12 @@
         },
         "claudeTmux.transport": {
           "type": "string",
-          "enum": ["auto", "control", "pipe", "poll"],
+          "enum": [
+            "auto",
+            "control",
+            "pipe",
+            "poll"
+          ],
           "default": "auto",
           "description": "How tmux is driven. auto: persistent control-mode client with push notifications, falling back to a pipe-pane tap, then polling. control: control mode only. pipe: pipe-pane output tap. poll: classic polling only."
         },
@@ -219,7 +321,7 @@
         "claudeTmux.statusBarItems": {
           "type": "boolean",
           "default": true,
-          "description": "Show one status bar item per running agent with live state, elapsed time, and telemetry tooltip."
+          "description": "Show a single status bar item for the active agent (all present agents listed in its tooltip; click to cycle focus). Off hides it entirely."
         },
         "claudeTmux.notifyPrompts": {
           "type": "boolean",
@@ -267,6 +369,41 @@
           "type": "string",
           "default": "",
           "description": "Optional command (e.g. 'npm run check') executed once at handoff-draft time, in the workspace, with a 60s timeout; its output tail is included in the briefing. Requires a trusted workspace. Empty disables."
+        },
+        "claudeTmux.ansiPalette": {
+          "type": "string",
+          "enum": [
+            "theme",
+            "terminal"
+          ],
+          "default": "theme",
+          "enumDescriptions": [
+            "Map ANSI colours onto the VS Code terminal theme, so the mirror matches the rest of the editor.",
+            "Use the classic xterm palette, so the mirror shows the colours the program actually asked for — what you would see in a real terminal."
+          ],
+          "description": "Which palette the mirror uses for ANSI colours."
+        },
+        "claudeTmux.detectionRules": {
+          "type": "object",
+          "default": {},
+          "description": "Per-agent screen detection rules used when an agent reports no lifecycle state. Keys are agent ids (claude, codex, opencode, hermes, antigravity); each may set \"needsInput\" and \"working\" to an array of case-insensitive regular expressions. A provided array REPLACES the built-in list for that agent, so [] disables a noisy rule. Run \"AgentMux: Explain the active agent's state\" to see which rule matched.",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "needsInput": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "working": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
         }
       }
     }

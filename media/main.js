@@ -125,7 +125,19 @@
 
   // ---- ANSI colour palette (themed where possible) -------------------------
   const NAMES = ['Black','Red','Green','Yellow','Blue','Magenta','Cyan','White'];
-  function basic(i, bright) { return `var(--vscode-terminal-ansi${bright ? 'Bright' : ''}${NAMES[i]})`; }
+  // 'theme' remaps ANSI onto the VS Code terminal theme (default, matches the
+  // rest of the editor). 'terminal' uses the classic xterm palette, so the
+  // mirror shows the colours the program actually asked for — what you would
+  // see attaching to the same tmux session in a real terminal.
+  const XTERM = [
+    ['#000000', '#cd0000', '#00cd00', '#cdcd00', '#0000ee', '#cd00cd', '#00cdcd', '#e5e5e5'],
+    ['#7f7f7f', '#ff0000', '#00ff00', '#ffff00', '#5c5cff', '#ff00ff', '#00ffff', '#ffffff'],
+  ];
+  const useXterm = app?.dataset.palette === 'terminal';
+  function basic(i, bright) {
+    if (useXterm) return XTERM[bright ? 1 : 0][i];
+    return `var(--vscode-terminal-ansi${bright ? 'Bright' : ''}${NAMES[i]})`;
+  }
   function xterm256(n) {
     if (n < 16) return basic(n % 8, n >= 8);
     if (n >= 232) { const v = 8 + (n - 232) * 10; return `rgb(${v},${v},${v})`; }
@@ -750,13 +762,8 @@
     btnUnlock.classList.toggle('hidden', !writerAgent);
   }
 
-  // Install hints per agent; an agent with no known hint simply shows no button.
-  const INSTALL_CMD = {
-    claude: 'npm install -g @anthropic-ai/claude-code',
-    codex: 'npm install -g @openai/codex',
-    opencode: 'curl -fsSL https://opencode.ai/install | bash',
-    antigravity: 'Install Google Antigravity and ensure its "agy" CLI is on PATH',
-  };
+  // Install hints come from the host registry (roster), so a missing agent just
+  // shows its own command; an agent with no known hint shows no button.
   function renderPreflight(m) {
     const agents = m.agents || {};
     const missing = !m.tmux || AGENT_IDS.some((agent) => !agents[agent]);
@@ -770,7 +777,7 @@
       + AGENT_IDS.map((agent) => row(
         !!agents[agent],
         agents[agent] ? `${cap(agent)} found` : `${cap(agent)} not on PATH`,
-        INSTALL_CMD[agent] || ''
+        AGENT_META[agent]?.installCmd || ''
       )).join('')
       + '<button id="pf-recheck">Recheck</button>';
   }
@@ -1070,10 +1077,13 @@
     if (!list.length) { sessionList.innerHTML = '<div class="sess-empty">No match.</div>'; return; }
     let html = '';
     for (const s of list) {
-      html += `<button class="sess-item" data-id="${esc(s.id)}" title="${esc(s.id)}">`
+      html += `<div class="sess-row">`
+            + `<button class="sess-item" data-id="${esc(s.id)}" title="${esc(s.id)}">`
             + `<span class="sess-name">${esc(s.name || s.id)}</span>`
             + `<span class="sess-date">${esc(relTime(s.lastTs))} · ${esc((s.id || '').slice(0, 8))}</span>`
-            + `</button>`;
+            + `</button>`
+            + `<button class="sess-del" data-del="${esc(s.id)}" title="Delete this conversation" aria-label="Delete conversation">✕</button>`
+            + `</div>`;
     }
     sessionList.innerHTML = html;
   }
@@ -1084,6 +1094,12 @@
   }
   sessionFilter.addEventListener('input', renderSessions);
   sessionList.addEventListener('click', (e) => {
+    const del = e.target.closest('.sess-del');
+    if (del && del.dataset.del) {
+      e.stopPropagation();
+      vscode.postMessage({ type: 'deleteSession', agent: activeAgent, id: del.dataset.del });
+      return;
+    }
     const item = e.target.closest('.sess-item');
     if (item && item.dataset.id) vscode.postMessage({ type: 'resume', agent: activeAgent, id: item.dataset.id });
   });

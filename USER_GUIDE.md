@@ -38,9 +38,24 @@ agent.
 
 - **Start new Codex** creates `tmux_codex_<folder>` in the workspace root.
 - **Start new OpenCode** creates `tmux_opencode_<folder>` and runs `opencode`.
+  Its live state comes from a small AgentMux plugin installed into
+  `~/.config/opencode/plugins/`; it only ever acts on panes AgentMux launched
+  (they carry `AGENTMUX=1`), and **AgentMux: Remove agent integrations** deletes it.
   OpenCode publishes its own session index, so the side bar lists real past
-  conversations for the folder and resumes one with `opencode --session <id>`;
+  conversations for the folder — only sessions rooted in this workspace are
+  offered, because OpenCode binds a resumed session to the directory it was
+  created in — and resumes one with `opencode --session <id>`;
   **Resume previous session** runs `opencode --continue`.
+- **Start new Hermes** creates `tmux_hermes_<folder>` and runs Nous Research's
+  `hermes`. Past conversations come from the CLI's own store (`hermes sessions
+  list`), so the side bar lists real sessions for the folder and resumes one
+  with `hermes --resume <id> --in <workspace>` — the `--in` pins the agent to
+  the open project, because Hermes would otherwise `cd` into the resumed
+  session's recorded directory (possibly another folder). **Resume previous
+  session** runs `hermes --continue --in <workspace>` (workspace-scoped most
+  recent), and `hermes sessions browse` opens its own picker inside the pane.
+  Approvals are set with `approvals.mode` in `~/.hermes/config.yaml`, not by
+  a launch flag.
 - **Start new Antigravity** creates `tmux_agy_<folder>` in the workspace root and
   runs Google's `agy` CLI. Antigravity keeps its conversations in a local
   database rather than per-folder transcripts, so the side bar offers no

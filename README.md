@@ -1,11 +1,11 @@
 # AgentMux
 
-**Four agents. One terminal flow.**
+**Five agents. One terminal flow.**
 
-Run **Claude Code**, **OpenAI Codex CLI**, **OpenCode** and **Google
-Antigravity** (`agy`) in persistent tmux sessions, switch between them
-instantly, and hand work from one agent to another from a single VS Code
-side-bar view.
+Run **Claude Code**, **OpenAI Codex CLI**, **OpenCode**, **Hermes** (Nous
+Research) and **Google Antigravity** (`agy`) in persistent tmux sessions, switch
+between them instantly, and hand work from one agent to another from a single
+VS Code side-bar view.
 
 ![AgentMux in action: the Claude tab mirrored in the side bar with live state and telemetry footer](media/agentmux.0.10.0.png)
 
@@ -14,6 +14,7 @@ The extension is deliberately workspace-scoped:
 - the Claude tab controls only `tmux_claude_<folder>`;
 - the Codex tab controls only `tmux_codex_<folder>`;
 - the OpenCode tab controls only `tmux_opencode_<folder>`;
+- the Hermes tab controls only `tmux_hermes_<folder>`;
 - the Antigravity tab controls only `tmux_agy_<folder>`;
 - every existing session is accepted only when its tmux `session_path` matches
   the current VS Code workspace root;
@@ -36,10 +37,10 @@ It mirrors the selected tmux pane instead of opening another VS Code terminal:
   the pane is static, watchdog-only when push notifications are live;
 - one ordered input pump merges pending keystrokes under backpressure, while
   bracketed paste preserves large UTF-8 input;
-- a **Claude** or **Codex** tab appears only while that workspace's matching
-  tmux session exists; tabs carry live state dots;
-- the `+` menu starts or resumes an absent agent (Codex conversations are now
-  listed natively from `~/.codex/sessions`, workspace-filtered);
+- a tab appears only while that workspace's matching tmux session exists, and
+  only for agents whose CLI is installed; tabs carry live state dots;
+- the `+` menu starts or resumes an absent agent (past conversations are listed
+  per workspace for Claude, Codex, OpenCode and Hermes);
 - `Cmd/Ctrl+click` a `path/file.js:42` in agent output to open it in the editor;
 - `Alt+Up` recalls previously submitted prompts (reconstructed locally from
   your keystrokes, never from agent output);
@@ -58,13 +59,15 @@ normally the remote host.
 tmux -V
 claude --version
 codex --version
+opencode --version
+hermes --version
 ```
 
 - tmux 2.9 or newer;
-- Claude Code CLI on `PATH` for the Claude tab;
-- Codex CLI on `PATH` for the Codex tab.
+- at least one agent CLI on `PATH` — Claude Code, OpenAI Codex, OpenCode,
+  Hermes (Nous Research) or Google Antigravity (`agy`) — for its tab.
 
-You may use either tab when only one agent CLI is installed.
+You may use any tab when only one agent CLI is installed.
 
 ## Build and install
 
@@ -73,7 +76,7 @@ From this repository:
 ```bash
 npm run check
 npm run package
-code --install-extension claude-tmux-sidebar-0.10.0.vsix --force
+code --install-extension claude-tmux-sidebar-0.12.0.vsix --force
 ```
 
 Alternatively use VS Code: **Extensions → … → Install from VSIX…**, select the
@@ -88,11 +91,11 @@ Secondary Side Bar; VS Code remembers the layout.
 ## Daily workflow
 
 1. Open a project folder in VS Code.
-2. Open **AgentMux**. If no agent is running, choose Claude or Codex from the
-   central launcher. Use `+` later to add the other agent.
+2. Open **AgentMux**. If no agent is running, choose one from the central
+   launcher. Use `+` later to add the others.
 3. Start or resume:
-   - Claude shows conversations read only from this folder's Claude project data;
-   - Codex opens `codex resume` in this folder, using Codex's cwd-filtered picker.
+   - each agent lists its own past conversations for this folder, when its CLI
+     exposes them (Claude, Codex, OpenCode, Hermes);
 4. Click the mirror and type. Switch visible tabs whenever you want; both tmux
    sessions continue running independently.
 5. Scroll with the wheel or scrollbar. Use `Shift+PageUp/PageDown` from the
@@ -102,11 +105,11 @@ The toolbar actions always target the selected tab:
 
 | Action | Result |
 |---|---|
-| Resume / switch | Resume a Claude conversation or open the Codex resume picker. |
+| Resume / switch | Resume the selected agent's past conversation(s) for this folder. |
 | Restart | Replace only the selected workspace tmux and relaunch its agent cleanly. |
-| Hand off | Open the editable Pair Mode handoff to the other agent. |
+| Hand off | Open the editable Pair Mode handoff to another agent. |
 | Kill | Kill only the selected agent's workspace session. |
-| Manage | List at most the Claude and Codex sessions belonging to this workspace. |
+| Manage | List this workspace's agent tmux sessions. |
 
 ## Pair Mode
 
@@ -138,10 +141,10 @@ either side is detected as working:
 
 ### Arbiter mode
 
-`⚖` (or **AgentMux: Ask both agents**) sends one question to Claude and Codex
-in parallel — answers only, no file changes. Both replies are gathered through
-the `.claude/agentmux` channel and shown side by side; the answer you pick makes
-that agent the Pair Mode writer and tells it to proceed.
+`⚖` (or **AgentMux: Ask both agents**) sends one question to two running
+agents in parallel — answers only, no file changes. Both replies are gathered
+through the `.claude/agentmux` channel and shown side by side; the answer you
+pick makes that agent the Pair Mode writer and tells it to proceed.
 
 The briefing capsule now includes recent commits, capped real diff hunks, your
 task file (`claudeTmux.handoffTodoFile`), optional verify-command output
@@ -157,14 +160,15 @@ snapshots and local file reads; nothing new runs on the live refresh path and
 nothing leaves your machine.
 
 Agent state is no longer only a heuristic: managed launches install Claude Code
-lifecycle hooks and a Codex notify program that stamp `working` /
-`needs-input` / `done` (and the current tool) into tmux pane options, which the
-extension already reads for free. Per-agent **status bar items** mirror this
-everywhere in VS Code, the view badge counts agents that finished or are
-waiting, and when a hidden agent asks a numbered question a notification offers
-its options as one-click answer buttons (explicit, identity-pinned, never
-automatic). Anyone attached to the tmux session from a real terminal sees the
-same facts on the tmux status line.
+lifecycle hooks, a Codex notify program and an OpenCode state plugin that stamp
+`working` / `needs-input` / `done` (and the current tool) into tmux pane
+options, which the extension already reads for free. A single consolidated
+**status bar item** mirrors the active agent everywhere in VS Code (every
+present agent in its tooltip, click to cycle focus), the view badge counts
+agents that finished or are waiting, and when a hidden agent asks a numbered
+question a notification offers its options as one-click answer buttons
+(explicit, identity-pinned, never automatic). Anyone attached to the tmux
+session from a real terminal sees the same facts on the tmux status line.
 
 The lock coordinates input sent through this side bar; it cannot stop a turn
 that was launched outside the extension or prevent a user/process attached to
@@ -207,8 +211,12 @@ settings.
 | `claudeTmux.codexSessionPrefix` | `tmux_codex_` | Codex session prefix. |
 | `claudeTmux.opencodeSessionPrefix` | `tmux_opencode_` | OpenCode session prefix. |
 | `claudeTmux.opencodeArgs` | `--auto` | Arguments passed to `opencode`. |
+| `claudeTmux.hermesSessionPrefix` | `tmux_hermes_` | Hermes session prefix. |
+| `claudeTmux.hermesArgs` | `--cli --yolo` | Arguments passed to `hermes`; `--cli` keeps tmux scrollback, `--tui` uses the Ink UI. |
 | `claudeTmux.antigravitySessionPrefix` | `tmux_agy_` | Antigravity session prefix. |
 | `claudeTmux.antigravityArgs` | `--dangerously-skip-permissions` | Arguments passed to `agy`. |
+| `claudeTmux.ansiPalette` | `theme` | `theme` remaps ANSI onto the VS Code terminal theme; `terminal` uses the classic xterm palette. |
+| `claudeTmux.detectionRules` | `{}` | Per-agent screen rules (`needsInput` / `working` regex lists) used when an agent reports no lifecycle state. |
 | `claudeTmux.scrollbackLines` | `1000` | Captured history lines, from 0 to 5000. |
 | `claudeTmux.fontFamily` | `""` | Empty inherits `terminal.integrated.fontFamily`. |
 | `claudeTmux.fontSize` | `0` | Zero inherits `terminal.integrated.fontSize`. |
@@ -217,7 +225,7 @@ settings.
 | `claudeTmux.transport` | `auto` | `auto` (control mode → pipe tap → polling), `control`, `pipe`, or `poll`. |
 | `claudeTmux.fileLinks` | `true` | Cmd/Ctrl+click `file:line` tokens to open them in the editor. |
 | `claudeTmux.promptHistory` | `true` | Alt+Up prompt recall (workspace-local; clear via command). |
-| `claudeTmux.statusBarItems` | `true` | One status bar item per running agent. |
+| `claudeTmux.statusBarItems` | `true` | A single status bar item for the active agent (all present agents in its tooltip; click to cycle focus). |
 | `claudeTmux.notifyPrompts` | `true` | Notification with answer buttons when a background agent asks. |
 | `claudeTmux.stateHooks` | `true` | Ground-truth state via Claude hooks / Codex notify. |
 | `claudeTmux.telemetry` | `true` | Token/turn/tool chips tailed from local CLI transcripts. |

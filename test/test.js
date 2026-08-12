@@ -13,6 +13,12 @@ let holdNextSend = false;
 let heldSendCallback = null;
 let captureOutput = 'terminal frame\n';
 let opencodeSessionsJson = null;
+let hermesSessionsTable = null;
+let warningAnswer;
+let quickPickAnswer;
+let quickPickItems = null;
+let sessionListOutput = null;
+const outputLines = [];
 const settings = new Map([
   ['codexArgs', '--no-alt-screen'],
   ['codexFullAccess', true],
@@ -20,6 +26,8 @@ const settings = new Map([
   ['sessionPrefix', 'tmux_'],
   ['codexSessionPrefix', 'codex_'],
   ['opencodeArgs', '--auto'],
+  ['hermesArgs', '--cli --yolo'],
+  ['hermesSessionPrefix', 'tmux_hermes_'],
   ['opencodeSessionPrefix', 'tmux_opencode_'],
   ['antigravityArgs', '--dangerously-skip-permissions'],
   ['antigravitySessionPrefix', 'tmux_agy_'],
@@ -44,19 +52,33 @@ function execFile(command, args, options, callback) {
     if (opencodeSessionsJson == null) return callback(new Error('opencode not installed'), '', '');
     return callback(null, opencodeSessionsJson, '');
   }
+  if (command === 'hermes') {
+    if (args[0] === 'sessions' && args[1] === 'list') return callback(null, hermesSessionsTable || '', '');
+    return callback(null, '', '');
+  }
   if (command !== 'tmux') return callback(null, '', '');
   if (args[0] === 'display-message') {
     const format = args[args.length - 1];
-    if (format === '#{session_path}') return callback(null, workspace + '\n', '');
+    if (format === '#{session_path}') {
+      const target = args[args.indexOf('-t') + 1] || '';
+      // Sessions named *_other belong to a different project, so ownership
+      // checks on them must fail exactly as they would in reality.
+      if (target.includes('_other')) return callback(null, '/tmp/another-project\n', '');
+      return callback(null, workspace + '\n', '');
+    }
     if (format.includes('@claude_tmux_agent')) {
       if (agentInfoOutput != null) return callback(null, workspace + '\t' + agentInfoOutput, '');
       const target = args[args.indexOf('-t') + 1];
-      const agent = target.includes('tmux_opencode_') ? 'opencode'
+      const agent = target.includes('tmux_hermes_') ? 'hermes'
+        : target.includes('tmux_opencode_') ? 'opencode'
         : target.includes('tmux_agy_') ? 'antigravity'
           : target.includes('codex_') ? 'codex' : 'claude';
       return callback(null, `${workspace}\t${agent}\t1\t${agent}\t1700000000\tgen-a\n`, '');
     }
     return callback(null, '2,3,80,24,1700000000,240,0\n', '');
+  }
+  if (args[0] === 'list-sessions' && sessionListOutput != null) {
+    return callback(null, sessionListOutput, '');
   }
   if (args[0] === 'capture-pane') {
     // Live ticks fuse the meta display-message into the same invocation.
@@ -82,15 +104,21 @@ const vscode = {
     },
   },
   window: {
-    showWarningMessage: async () => undefined,
+    showWarningMessage: async () => warningAnswer,
     showInformationMessage: async () => undefined,
     showErrorMessage: async () => undefined,
+    showQuickPick: async (items) => { quickPickItems = await items; return quickPickAnswer; },
+    createOutputChannel: () => ({
+      appendLine: (line) => outputLines.push(line),
+      show: () => {},
+      dispose: () => {},
+    }),
   },
   Uri: { joinPath: (...parts) => parts.join('/') },
 };
 
 const source = fs.readFileSync(path.join(root, 'extension.js'), 'utf8')
-  + '\nmodule.exports.__test = { ClaudeTmuxView, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions, AGENTS, AGENT_IDS, launchArgs, paneLooksLikeAgent, listOpencodeSessions };';
+  + '\nmodule.exports.__test = { ClaudeTmuxView, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions, AGENTS, AGENT_IDS, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, detectionRules, detectScreenState, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath };';
 const moduleUnderTest = { exports: {} };
 const sandbox = {
   module: moduleUnderTest,
@@ -111,11 +139,12 @@ const sandbox = {
   clearInterval,
 };
 vm.runInNewContext(source, sandbox, { filename: 'extension.js' });
-const { ClaudeTmuxView, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions, AGENTS, AGENT_IDS, launchArgs, paneLooksLikeAgent, listOpencodeSessions } = moduleUnderTest.exports.__test;
+const { ClaudeTmuxView, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions, AGENTS, AGENT_IDS, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, detectionRules, detectScreenState, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath } = moduleUnderTest.exports.__test;
 
 function makeProvider() {
   const provider = new ClaudeTmuxView({
     extensionUri: root,
+    subscriptions: [],
     workspaceState: {
       get: (key) => state.get(key),
       update: async (key, value) => state.set(key, value),
@@ -789,9 +818,10 @@ async function run() {
   // Unlike the others, OpenCode's session index comes from the CLI itself. The
   // parser must tolerate the schema drifting rather than break the overlay.
   opencodeSessionsJson = JSON.stringify([
-    { id: 's1', title: 'refactor the tick loop', time: { updated: 1767225600000 } },
-    { sessionID: 's2', summary: 'fix the scroll jump', updated: '2026-02-02T03:04:05Z' },
+    { id: 's1', title: 'refactor the tick loop', time: { updated: 1767225600000 }, directory: workspace },
+    { sessionID: 's2', summary: 'fix the scroll jump', updated: '2026-02-02T03:04:05Z', directory: workspace },
     { id: 's3' },
+    { id: 's4', title: 'another project', updated: 1769999999000, directory: '/elsewhere/other-project' },
     { noIdHere: true },
     'garbage',
   ]);
@@ -801,6 +831,8 @@ async function run() {
   assert.strictEqual(ocSessions[0].name, 'fix the scroll jump');
   assert.strictEqual(ocSessions[1].name, 'refactor the tick loop', 'a millisecond stamp is understood too');
   assert.strictEqual(ocSessions[2].name, 's3', 'a titleless session falls back to its id');
+  assert.ok(!ocSessions.some((s) => s.id === 's4'),
+    'a session rooted in another folder is never offered: opencode binds the resumed session to its stored directory');
   opencodeSessionsJson = 'this is not json';
   assert.strictEqual((await listOpencodeSessions(workspace)).length, 0, 'unparseable output degrades to no list');
   opencodeSessionsJson = null;
@@ -815,6 +847,165 @@ async function run() {
   assert.ok(calls.some((call) => call.args?.[0] === '-lic'), 'a CLI that looks absent triggers an interactive re-probe');
   assert.ok('opencode' in (messages.at(-1).agents || {}), 'preflight reports every registered agent');
 
+  // ---- per-agent screen detection rules ------------------------------------------------
+  // The old code applied one shared regex to every agent; rules are now per-agent
+  // and user-overridable, and report which pattern won.
+  assert.strictEqual(detectScreenState('codex', 'Approval required\n[y/n]').status, 'needs-input');
+  assert.ok(detectScreenState('codex', 'Approval required').pattern, 'the matched rule is named for Explain');
+  assert.strictEqual(detectScreenState('claude', 'thinking… (esc to interrupt)').status, 'working',
+    'a per-agent working rule is applied');
+  assert.strictEqual(detectScreenState('claude', 'just some output').status, null);
+  assert.strictEqual(detectScreenState('antigravity', 'Do you trust the contents of this project?').status,
+    'needs-input', 'Antigravity has its own observed prompt rules');
+
+  settings.set('detectionRules', { claude: { needsInput: ['^ready to deploy'], working: [] } });
+  assert.strictEqual(detectScreenState('claude', 'ready to deploy?').status, 'needs-input', 'an override adds rules');
+  assert.strictEqual(detectScreenState('claude', 'Do you want to proceed?').status, null,
+    'an override REPLACES the built-in list, so a noisy rule can be removed');
+  assert.strictEqual(detectScreenState('codex', 'Do you want to proceed?').status, 'needs-input',
+    'overriding one agent must not touch the others');
+  settings.set('detectionRules', { claude: { needsInput: ['([unclosed'] } });
+  assert.doesNotThrow(() => detectScreenState('claude', 'anything'), 'a malformed user regex is skipped, not thrown');
+  settings.set('detectionRules', {});
+  assert.ok(detectionRules('claude').needsInput.length > 0, 'built-ins return once the override is cleared');
+
+  // Hook state still wins over screen rules.
+  provider.agentState.claude.status = 'idle';
+  provider.applyHookState('claude', 'working', 'Bash');
+  assert.strictEqual(provider.agentState.claude.status, 'working');
+  assert.strictEqual(provider.agentState.claude.lastTool, 'Bash');
+
+  // ---- OpenCode plugin integration -----------------------------------------------------
+  assert.match(OPENCODE_PLUGIN, /AGENTMUX/, 'the plugin is inert unless AgentMux launched the pane');
+  assert.match(OPENCODE_PLUGIN, /session\.idle/);
+  assert.match(OPENCODE_PLUGIN, /permission\.asked/);
+  assert.match(OPENCODE_PLUGIN, /@agentmux_session_id/, 'session identity is captured for exact resume');
+  const fakeConfig = fs.mkdtempSync(path.join(os.tmpdir(), 'agentmux-cfg-'));
+  const priorXdg = process.env.XDG_CONFIG_HOME;
+  process.env.XDG_CONFIG_HOME = fakeConfig;
+  settings.set('stateHooks', true);
+  try {
+    assert.strictEqual(ensureOpencodePlugin(), true);
+    const pluginFile = opencodePluginPath();
+    assert.ok(pluginFile.includes(path.join('opencode', 'plugins')), 'the plugin lands in OpenCode\'s plugin directory');
+    assert.strictEqual(fs.readFileSync(pluginFile, 'utf8'), OPENCODE_PLUGIN);
+    assert.strictEqual(removeOpencodePlugin(), true);
+    assert.strictEqual(fs.existsSync(pluginFile), false, 'the integration is fully removable');
+    settings.set('stateHooks', false);
+    assert.strictEqual(ensureOpencodePlugin(), false, 'stateHooks=false must not write into another tool\'s config');
+  } finally {
+    if (priorXdg == null) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = priorXdg;
+    fs.rmSync(fakeConfig, { recursive: true, force: true });
+  }
+
+  // Every launch marks its pane as AgentMux-owned, which is what the plugin checks.
+  calls.length = 0;
+  await provider.runAgentCommand('opencode', 'tmux_opencode_x', 'opencode --auto');
+  const launchKeys = calls.find((call) => call.args[0] === 'send-keys' && call.args.includes('Enter'));
+  assert.match(launchKeys.args[3], /^AGENTMUX=1 opencode --auto;/, 'the launch command carries the ownership guard');
+
+  // ---- leftover session cleanup ---------------------------------------------------------
+  // Cleanup must NEVER reach outside the open project: another window may be
+  // driving those agents. Only session_path === this workspace qualifies.
+  sessionListOutput = [
+    `tmux_claude_other\t/tmp/another-project\t1700000000\t0\t1`,     // another project
+    `tmux_claude_gone\t/tmp/deleted-project\t1700000000\t0\t1`,      // another project, folder gone
+    `_agentmux_ctl_9999\t/\t1700000000\t1\t1`,                       // control client, not this project
+    `my-own-work\t${workspace}\t1700000000\t0\t3`,                   // here, but not ours
+    `tmux_claude_claude-tmux-sidebar\t${workspace}\t1700000000\t1\t1`,
+    `tmux_claude-tmux-sidebar\t${workspace}\t1700000000\t0\t1`,      // pre-0.10.2 prefix, same project
+  ].join('\n');
+  quickPickAnswer = undefined; // user cancels: nothing may be killed
+  quickPickItems = null;
+  calls.length = 0;
+  await provider.cleanupSessions();
+  const offered = (quickPickItems || []).map((item) => item.session).sort();
+  assert.strictEqual(offered.join(','), 'tmux_claude-tmux-sidebar,tmux_claude_claude-tmux-sidebar',
+    'only this project\'s AgentMux sessions may ever be offered');
+  for (const forbidden of ['tmux_claude_other', 'tmux_claude_gone', '_agentmux_ctl_9999']) {
+    assert.ok(!offered.includes(forbidden), `${forbidden} belongs to another project and must never be listed`);
+  }
+  assert.ok(!offered.includes('my-own-work'), 'a session AgentMux did not create is never offered');
+  assert.strictEqual((quickPickItems || []).filter((item) => item.picked).length, 0,
+    'nothing is pre-selected: every kill in the open project is an explicit choice');
+  assert.strictEqual(calls.filter((call) => call.args[0] === 'kill-session').length, 0, 'cancelling kills nothing');
+
+  // Belt and braces: even if a foreign session reached the kill list (a stale
+  // snapshot, a crafted message), the kill path re-verifies and refuses.
+  quickPickAnswer = [{ session: 'tmux_claude_other' }, { session: 'tmux_claude_claude-tmux-sidebar' }];
+  warningAnswer = 'Kill';
+  calls.length = 0;
+  await provider.cleanupSessions();
+  const killedNames = calls.filter((call) => call.args[0] === 'kill-session').map((call) => call.args.at(-1));
+  assert.strictEqual(killedNames.join(','), '=tmux_claude_claude-tmux-sidebar',
+    'a foreign session survives the kill path even when explicitly selected');
+  warningAnswer = undefined;
+  quickPickAnswer = undefined;
+  sessionListOutput = null;
+  quickPickItems = null;
+
+  // ---- Hermes as a fifth agent ----------------------------------------------------------
+  assert.ok(AGENT_IDS.includes('hermes'), 'Hermes must be a registered agent');
+  assert.strictEqual(AGENTS.hermes.command, 'hermes');
+  assert.strictEqual(AGENTS.hermes.defaultPrefix, 'tmux_hermes_');
+  assert.strictEqual(launchArgs('hermes'), '--cli --yolo');
+  assert.strictEqual(AGENTS.hermes.resumeById('ses-9', '--cli --yolo'), "hermes --resume 'ses-9' --cli --yolo");
+  assert.strictEqual(AGENTS.hermes.resumeLatest('--cli --yolo'), 'hermes --continue --cli --yolo');
+  assert.strictEqual(
+    AGENTS.hermes.resumeById('ses-9', '--cli --yolo', '/home/u/work/proj'),
+    "hermes --resume 'ses-9' --in '/home/u/work/proj' --cli --yolo",
+    'resume pins the session to the open project with --in (Hermes would otherwise cd into the session\'s recorded dir)');
+  assert.strictEqual(
+    AGENTS.hermes.resumeLatest('--cli --yolo', '/home/u/work/proj'),
+    "hermes --continue --in '/home/u/work/proj' --cli --yolo",
+    'Resume previous session is workspace-scoped via --in');
+  assert.strictEqual(typeof AGENTS.hermes.listSessions, 'function',
+    'Hermes lists past sessions through its own CLI store');
+  assert.ok(paneLooksLikeAgent('hermes', '/home/u/.local/bin/hermes'));
+  assert.ok(!paneLooksLikeAgent('hermes', 'opencode'));
+  assert.ok(!paneLooksLikeAgent('claude', 'hermes'), 'hermes must never be mistaken for Claude');
+
+  // The resume list is parsed from the CLI's fixed-width table; column
+  // boundaries come from the header line, so titles containing spaces are safe.
+  const hermesHeader = 'Title'.padEnd(29) + 'Workspace'.padEnd(10) + 'Last Active'.padEnd(12) + 'ID';
+  const hermesRow = (title, ws, rel, id) => title.padEnd(29) + ws.padEnd(10) + rel.padEnd(12) + id;
+  hermesSessionsTable = [
+    hermesHeader,
+    hermesRow('', '', '', '─'.repeat(hermesHeader.length)),
+    hermesRow('Fix the login bug', 'my-project', 'just now', '20260812_090310_348b8f'),
+    hermesRow('Add OpenCode agent support', 'proj2', '2h ago', '20260811_150412_9f3a2c'),
+    hermesRow('multi word title with  spaces', 'proj3', '3d ago', '20260809_080000_000001'),
+  ].join('\n');
+  const hermesList = await listHermesSessions(workspace);
+  assert.strictEqual(hermesList.length, 3, 'rows are parsed from the hermes table');
+  assert.strictEqual(hermesList[0].id, '20260812_090310_348b8f', 'the ID column is read');
+  assert.strictEqual(hermesList[0].name, 'Fix the login bug', 'titles are trimmed to the Workspace column');
+  assert.strictEqual(hermesList[2].name, 'multi word title with  spaces', 'titles with spaces are sliced by column, not by word');
+  assert.ok(hermesList[1].lastTs && hermesList[1].lastTs < new Date().toISOString(), 'relative times become timestamps');
+  hermesSessionsTable = null;
+  assert.strictEqual((await listHermesSessions(workspace)).length, 0, 'an unparseable or missing table degrades to no list');
+
+  messages.length = 0;
+  await provider.pushSessions('hermes');
+  const hermesSessions = messages.filter((msg) => msg.type === 'sessions').at(-1);
+  assert.strictEqual(hermesSessions.canList, true, 'Hermes now gets a real resume list from its CLI');
+  assert.strictEqual(hermesSessions.list.length, 0, 'no table output means an empty list, not a broken overlay');
+  assert.strictEqual(hermesSessions.canResumeLatest, true, 'Resume runs the CLI\'s own --continue');
+  assert.strictEqual(await provider.tails.hermes.poll(workspace), null, 'no readable transcript means no telemetry, not a crash');
+
+  // Rules taken from a live --cli pane: the running turn advertises how to
+  // interrupt it, the idle prompt is a bare chevron.
+  assert.strictEqual(
+    detectScreenState('hermes', '⚕ ❯ msg=interrupt · /queue · /bg · /steer · Ctrl+C cancel').status,
+    'working', 'a running Hermes turn is recognised from its interrupt affordance');
+  assert.strictEqual(detectScreenState('hermes', '❯').status, null,
+    'the idle prompt must not read as working');
+  assert.strictEqual(
+    detectScreenState('hermes', ' ⚕ deepseek-v4-flash │ 20.7K/1M │ 1m │ ⏲ 3s │ ✓ 0s │ ⚠ YOLO').status,
+    null, 'the finished status bar must not read as working');
+  assert.strictEqual(detectScreenState('hermes', 'Do you want to proceed?').status, 'needs-input',
+    'the shared baseline still applies');
+
   // The generated markup carries the whole roster, tabs included.
   const markup = provider.html({ asWebviewUri: (u) => u, cspSource: 'vscode-resource:' });
   assert.strictEqual((markup.match(/class="agent-tab/g) || []).length, AGENT_IDS.length, 'one tab per registered agent');
@@ -822,6 +1013,7 @@ async function run() {
   assert.match(markup, /Start Antigravity/);
   assert.match(markup, /data-agents="/, 'the webview receives the roster');
   assert.match(markup, /id="handoff-target"/);
+  assert.match(markup, /data-palette="theme"/, 'the mirror is told which ANSI palette to use');
 
   const webviewSource = fs.readFileSync(path.join(root, 'media/main.js'), 'utf8');
   assert.match(webviewSource, /tab\.classList\.toggle\('hidden', !present\)/);
@@ -844,6 +1036,8 @@ async function run() {
   assert.match(webviewSource, /dataset\.agents/, 'the webview builds its roster from the host registry');
   assert.match(webviewSource, /setHandoffTargets/, 'the details step must offer a handoff peer');
   assert.doesNotMatch(webviewSource, /\['claude', 'codex'\]/, 'no hardcoded two-agent roster may remain');
+  assert.match(webviewSource, /XTERM/, 'the original-terminal palette is available');
+  assert.match(webviewSource, /deleteSession/, 'conversations can be deleted from the resume list');
   assert.doesNotMatch(webviewSource, /notePredict|drawSpark|xtermWriteFull/, 'removed features must not linger in the webview');
 
   console.log('All extension tests passed.');

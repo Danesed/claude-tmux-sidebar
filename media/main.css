@@ -350,6 +350,23 @@ html, body {
   overflow-y: auto;
   margin-top: 2px;
 }
+.sess-row { display: flex; align-items: stretch; gap: 4px; width: 100%; }
+.sess-row .sess-item { flex: 1 1 auto; min-width: 0; }
+.sess-del {
+  flex: 0 0 auto;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--vscode-descriptionForeground, #999);
+  font-size: 11px;
+  opacity: 0;
+  transition: opacity .12s;
+}
+.sess-row:hover .sess-del, .sess-del:focus-visible { opacity: 1; }
+.sess-del:hover {
+  color: var(--vscode-errorForeground, #f48771);
+  background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,.08));
+}
 .sess-item {
   display: flex;
   flex-direction: column;
