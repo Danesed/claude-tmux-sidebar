@@ -34,7 +34,11 @@ html, body {
   overflow: hidden;
   padding: 5px 8px 6px;
   border: 0;
-  border-bottom: 2px solid transparent;
+  /* The underline carries the agent's product colour. It costs no horizontal
+     space, which matters with six tabs, and it identifies a tab whose label has
+     already ellipsized to "Cl…". --agent-accent is set per tab by the host as
+     "r, g, b" so any alpha can be built from it. */
+  border-bottom: 2px solid rgba(var(--agent-accent, 128,128,128), .34);
   border-radius: 3px 3px 0 0;
   color: var(--vscode-descriptionForeground, #999);
   background: transparent;
@@ -44,12 +48,25 @@ html, body {
   align-items: center;
   justify-content: center;
   gap: 6px;
+  container-type: inline-size;
 }
 .agent-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+/* Stands in for the label once the tab is too narrow to show one. */
+.agent-mark {
+  display: none;
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  letter-spacing: .04em;
+  color: rgb(var(--agent-accent, 128,128,128));
+}
+@container (max-width: 78px) {
+  .agent-label { display: none; }
+  .agent-mark { display: inline; }
+}
 .agent-tab:hover { background: var(--vscode-list-hoverBackground, rgba(255,255,255,0.06)); }
 .agent-tab.active {
   color: var(--vscode-foreground, #ddd);
-  border-bottom-color: var(--vscode-focusBorder, #0e639c);
+  border-bottom-color: rgb(var(--agent-accent, 14,99,156));
   background: var(--vscode-list-activeSelectionBackground, rgba(255,255,255,0.08));
 }
 .agent-tab:focus-visible { outline: 1px solid var(--vscode-focusBorder, #0e639c); outline-offset: -1px; }
@@ -124,6 +141,17 @@ html, body {
 }
 .launch-menu button { text-align: left; padding: 6px 8px; border: 0; background: transparent; }
 .launch-menu button:hover { background: var(--vscode-menu-selectionBackground, #094771); }
+/* The agent's colour, ahead of its name, wherever the name appears. */
+.agent-swatch {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 7px;
+  border-radius: 2px;
+  vertical-align: baseline;
+  background: rgb(var(--agent-accent, 128,128,128));
+}
+#launcher-actions button { text-align: left; }
 
 /* ---- terminal mirror area ------------------------------------------------ */
 #screen-wrap {

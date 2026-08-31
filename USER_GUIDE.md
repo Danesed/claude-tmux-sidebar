@@ -10,11 +10,11 @@ npm run check
 npm run package
 ```
 
-Install `claude-tmux-sidebar-0.10.0.vsix` from **Extensions → … → Install from
+Install `claude-tmux-sidebar-0.13.0.vsix` from **Extensions → … → Install from
 VSIX…**, then reload VS Code. From a shell you can instead run:
 
 ```bash
-code --install-extension claude-tmux-sidebar-0.10.0.vsix --force
+code --install-extension claude-tmux-sidebar-0.13.0.vsix --force
 ```
 
 With Remote-SSH, perform the install from the connected VS Code window so the
@@ -56,6 +56,19 @@ agent.
   recent), and `hermes sessions browse` opens its own picker inside the pane.
   Approvals are set with `approvals.mode` in `~/.hermes/config.yaml`, not by
   a launch flag.
+- **Start new Pi** creates `tmux_pi_<folder>` and runs Earendil's `pi`. Its live
+  state comes from a small AgentMux extension installed into
+  `~/.pi/agent/extensions/`; like the OpenCode plugin it only ever acts on panes
+  AgentMux launched (they carry `AGENTMUX=1`), and **AgentMux: Remove agent
+  integrations** deletes it. pi keeps readable per-folder transcripts, so the
+  side bar lists real past conversations (with their `/name` titles) and resumes
+  one with `pi --session <id>`; **Resume previous session** runs `pi --continue`.
+  Both stay inside the open project: pi looks an id up in the current project
+  before anywhere else, and AgentMux only ever offers ids from this folder.
+  `claudeTmux.piArgs` is empty by default because pi has no approval prompts to
+  bypass — it ships no sandbox. The one prompt it does show is a first-run
+  *project trust* question about loading the repository's own `.pi` settings and
+  extensions; answer it once in the pane, or add `-a` to answer it for every run.
 - **Start new Antigravity** creates `tmux_agy_<folder>` in the workspace root and
   runs Google's `agy` CLI. Antigravity keeps its conversations in a local
   database rather than per-folder transcripts, so the side bar offers no
@@ -131,6 +144,23 @@ explicit value in `claudeTmux.codexArgs` wins and triggers a one-time warning;
 global developer instructions are replaced for bridged launches. Put the shared
 project constraints in `.claude`, or disable the bridge and merge them manually.
 
+## Multi-line prompts
+
+`Shift+Enter` breaks the line instead of submitting. There is no single byte
+sequence every agent understands for this, so each one's was measured in a live
+pane: Claude, Codex and OpenCode read CSI-u; Hermes, pi and Antigravity read
+xterm modifyOtherKeys. Plain `Enter` still submits.
+
+You do **not** need `set -g extended-keys on` in `~/.tmux.conf` for this, even
+though pi's own documentation asks for it. That setting controls how tmux
+translates keys from a terminal; AgentMux writes the bytes straight into the
+pane and never asks tmux to translate anything. The line in your `.tmux.conf`
+still matters if you attach to the same session from a real terminal.
+
+A free-mode agent declares its own with `modEnter` (`"\\x1b[13;2u"` or
+`"\\x1b[27;2;13~"`). Without one, `Shift+Enter` submits, as it always did — the
+wrong sequence types visible junk into the input box, so it is never guessed.
+
 ## Scroll and input
 
 - Mouse wheel and the scrollbar load and navigate up to
@@ -155,11 +185,23 @@ kill, the extension checks that tmux reports `session_path` equal to the current
 workspace root. Tmux targets also use exact-name syntax.
 
 If another project with the same basename already owns `tmux_claude_<folder>`,
-`tmux_codex_<folder>`, `tmux_opencode_<folder>` or `tmux_agy_<folder>`, this project uses `<name>-<path-hash>`. Unrelated sessions are
-never shown by **Manage this workspace's tmux sessions…**.
+`tmux_codex_<folder>`, `tmux_opencode_<folder>`, `tmux_hermes_<folder>`,
+`tmux_pi_<folder>` or `tmux_agy_<folder>`, this project uses
+`<name>-<path-hash>`. Unrelated sessions are never shown by **Manage this
+workspace's tmux sessions…**.
 
 No workspace means no operation: the view asks you to open a folder and does not
 use the home directory as a fallback. Multi-root workspaces use the first root.
+
+**Free mode is the deliberate exception.** A `claudeTmux.customAgents` entry with
+a `session` name mirrors a tmux session you started yourself, wherever it lives —
+that is the point of the mode. Because AgentMux did not create it, it is also
+excluded from everything that destroys: it is never created, restarted or
+resumed over, never offered by **Manage this workspace's tmux sessions…**, and
+never listed by **Clean up this project's leftover tmux sessions…**. The single
+**Kill active agent session** command can still stop it, and says so explicitly.
+Add one from the palette with **AgentMux: Mirror an existing tmux session (free
+mode)…**; entries with a `command` instead are managed like any built-in agent.
 
 ## Status and toolbar
 
@@ -172,8 +214,20 @@ The footer and each tab show a discreet state:
 - **stopped**: no matching workspace session exists.
 
 With `claudeTmux.stateHooks` on (default), managed launches also install Claude
-Code lifecycle hooks and a Codex notify program that stamp the true state and
-current tool into tmux pane options — the heuristics then only fill gaps. When
+Code lifecycle hooks, Codex's native lifecycle hooks, an OpenCode plugin and a
+pi extension that stamp the true state and current tool into tmux pane options —
+the heuristics then only fill gaps. Each integration acts only on panes carrying
+`AGENTMUX=1`. Run **AgentMux: Agent integrations: show, install or remove…** to
+see every one of them: where it lives, whether it is installed and up to date,
+and what it is for. **AgentMux: Remove agent integrations** deletes them all in
+one step.
+
+Codex is the one that needs a keypress: its hooks are passed at launch with
+`-c`, and Codex asks once to trust the command set ("N hooks need review before
+they can run" — press `t`). Until you do, they stay inactive and Codex's
+`notify` program still reports `done`; AgentMux shows the tab as *needs input*
+while that prompt is up. Nothing is written to your `config.toml` except the
+trust record Codex itself writes. When
 hooks are unavailable, `working` starts on a submitted Enter and `finished`
 appears after output has been stable for four seconds; a silent long-running
 tool or an external tmux client can still make the result imperfect. Motion is
@@ -191,6 +245,27 @@ re-verifying the exact pane identity, and only when you click.
 
 Toolbar actions are scoped to the active tab. The manage action shows zero, one
 or two entries and rechecks the workspace path immediately before killing.
+
+Agents that write a summary into the tmux pane title — Claude Code does — show
+it as the second line of the tab tooltip, so you can tell two tabs apart without
+switching.
+
+## Getting to the right agent
+
+With six or more tabs, "next agent" is rarely what you want. Press
+`Ctrl/Cmd+Shift+Alt+A` (**AgentMux: Go to the agent that needs you**) to jump to
+whichever agent is blocked on you, or failing that the most recent completion.
+**Go back to the previous agent** toggles between the last two you used, and
+`nextAgent` / `prevAgent` / `jumpAgent` walk the running ones. Clicking the
+status bar item does the same thing as the first command when something wants
+you, and cycles otherwise.
+
+A pane is only recognised as an agent it did not launch when the running command
+names one. When that command is a plain interpreter (`node`, `python`, `bun`,
+`deno`), only the pane title may identify it — otherwise every Node or Python
+process running in the folder would appear as an agent tab. Hermes runs as
+`python` and does not set a title, so a Hermes you start yourself outside
+AgentMux will not be adopted; one AgentMux starts is unaffected.
 
 ## Troubleshooting
 

@@ -1,11 +1,11 @@
 # AgentMux
 
-**Five agents. One terminal flow.**
+**Six agents. One terminal flow. Plus any tmux you already have.**
 
 Run **Claude Code**, **OpenAI Codex CLI**, **OpenCode**, **Hermes** (Nous
-Research) and **Google Antigravity** (`agy`) in persistent tmux sessions, switch
-between them instantly, and hand work from one agent to another from a single
-VS Code side-bar view.
+Research), **pi** (Earendil) and **Google Antigravity** (`agy`) in persistent
+tmux sessions, switch between them instantly, and hand work from one agent to
+another from a single VS Code side-bar view.
 
 ![AgentMux in action: the Claude tab mirrored in the side bar with live state and telemetry footer](media/agentmux.0.10.0.png)
 
@@ -15,11 +15,16 @@ The extension is deliberately workspace-scoped:
 - the Codex tab controls only `tmux_codex_<folder>`;
 - the OpenCode tab controls only `tmux_opencode_<folder>`;
 - the Hermes tab controls only `tmux_hermes_<folder>`;
+- the pi tab controls only `tmux_pi_<folder>`;
 - the Antigravity tab controls only `tmux_agy_<folder>`;
 - every existing session is accepted only when its tmux `session_path` matches
   the current VS Code workspace root;
 - projects with the same folder name receive a stable path hash when needed,
   so one project can never attach to another project's tmux session.
+
+The single exception is **free mode**, below: a tab you point at a tmux session
+by name. You named it, so it is shown wherever it lives — and in exchange
+AgentMux never creates, restarts, resumes over or cleans up that session.
 
 Every agent survives VS Code restarts, Remote-SSH drops and local disconnects.
 
@@ -40,7 +45,11 @@ It mirrors the selected tmux pane instead of opening another VS Code terminal:
 - a tab appears only while that workspace's matching tmux session exists, and
   only for agents whose CLI is installed; tabs carry live state dots;
 - the `+` menu starts or resumes an absent agent (past conversations are listed
-  per workspace for Claude, Codex, OpenCode and Hermes);
+  per workspace for Claude, Codex, OpenCode, Hermes and pi);
+- each tab carries its agent's colour on the underline it already had, and swaps
+  its label for a two-glyph mark once the side bar is too narrow to show one;
+- `Shift+Enter` breaks the line instead of submitting (each agent's encoding was
+  measured in a live pane; no `~/.tmux.conf` change is needed);
 - `Cmd/Ctrl+click` a `path/file.js:42` in agent output to open it in the editor;
 - `Alt+Up` recalls previously submitted prompts (reconstructed locally from
   your keystrokes, never from agent output);
@@ -61,13 +70,16 @@ claude --version
 codex --version
 opencode --version
 hermes --version
+pi --version
 ```
 
 - tmux 2.9 or newer;
 - at least one agent CLI on `PATH` — Claude Code, OpenAI Codex, OpenCode,
-  Hermes (Nous Research) or Google Antigravity (`agy`) — for its tab.
+  Hermes (Nous Research), pi (Earendil) or Google Antigravity (`agy`) — for its
+  tab.
 
-You may use any tab when only one agent CLI is installed.
+You may use any tab when only one agent CLI is installed. A **free mode** tab
+needs no CLI at all: it mirrors a tmux session you already have.
 
 ## Build and install
 
@@ -76,7 +88,7 @@ From this repository:
 ```bash
 npm run check
 npm run package
-code --install-extension claude-tmux-sidebar-0.12.0.vsix --force
+code --install-extension claude-tmux-sidebar-0.13.0.vsix --force
 ```
 
 Alternatively use VS Code: **Extensions → … → Install from VSIX…**, select the
@@ -95,7 +107,7 @@ Secondary Side Bar; VS Code remembers the layout.
    launcher. Use `+` later to add the others.
 3. Start or resume:
    - each agent lists its own past conversations for this folder, when its CLI
-     exposes them (Claude, Codex, OpenCode, Hermes);
+     exposes them (Claude, Codex, OpenCode, Hermes, pi);
 4. Click the mirror and type. Switch visible tabs whenever you want; both tmux
    sessions continue running independently.
 5. Scroll with the wheel or scrollbar. Use `Shift+PageUp/PageDown` from the
@@ -195,6 +207,106 @@ Codex is also started in **Full Access** by default. This was chosen for the
 requested workflow, but it disables Codex approvals and sandboxing. Turn off
 `claudeTmux.codexFullAccess` for repositories you do not fully trust.
 
+## Driving AgentMux from a script
+
+Four commands take arguments and return values, so AgentMux can be driven from a
+keybinding, a task or another extension instead of only by hand:
+
+| Command | Arguments | Returns |
+|---|---|---|
+| `claudeTmux.send` | `{ agent, text, submit }` | `{ ok, agent, reason }` |
+| `claudeTmux.capture` | `{ agent, lines, quiet }` | `{ ok, agent, session, text }` |
+| `claudeTmux.status` | `{ agent }` (omit for all) | `{ <agent>: { present, status, forMs, tool, title, writer } }` |
+| `claudeTmux.waitFor` | `{ agent, status, timeoutMs }` | `{ ok, agent, status, reason }` |
+
+Together they make *send → wait for done → capture* a three-line script. They
+obey exactly the rules the side bar does — the workspace check, the Pair Mode
+lock, the handoff freeze — and return the reason for a refusal (`not-running`,
+`pair-locked`, `transaction-in-progress`) rather than swallowing it.
+
+A keybinding example:
+
+```jsonc
+{ "key": "ctrl+alt+t", "command": "claudeTmux.send",
+  "args": { "agent": "claude", "text": "run the tests and summarize failures" } }
+```
+
+## Getting to the right agent
+
+| Command | Default key | What it does |
+|---|---|---|
+| `claudeTmux.gotoAttention` | `Ctrl/Cmd+Shift+Alt+A` | Jump to the agent blocked on you, else the most recent completion. |
+| `claudeTmux.lastAgent` | — | Toggle back to the agent you were on before. |
+| `claudeTmux.nextAgent` / `prevAgent` | — | Walk the running agents. |
+| `claudeTmux.jumpAgent` | — | `{ "index": 2 }` — the Nth running agent. |
+
+Clicking the status bar item goes to the agent that wants you when there is one,
+and only falls back to cycling.
+
+## Agent integrations
+
+With `claudeTmux.stateHooks` on (the default), a managed launch wires each agent
+to report its true state instead of leaving it to screen heuristics: Claude Code
+lifecycle hooks, Codex's native hooks, an OpenCode plugin and a pi extension.
+Every one acts only on panes carrying `AGENTMUX=1`, so an agent you start
+yourself is untouched.
+
+**AgentMux: Agent integrations: show, install or remove…** lists all of them —
+where each file lives, whether it is installed *and up to date*, and what it is
+for — with install, reinstall, remove and reveal. Content is compared, so a file
+left behind by an older version reads as *out of date* rather than silently
+doing the wrong thing. **AgentMux: Remove agent integrations** deletes them all
+in one step.
+
+Codex is the one that needs a keypress: its hooks travel as `-c` launch
+arguments (never written to your `config.toml`) and Codex asks once to trust the
+command set — *"N hooks need review before they can run"*, press `t`. Until you
+do, they stay inactive and Codex's `notify` program still reports `done`.
+
+## Free mode: any tmux, any agent, no release
+
+The six built-in agents are the ones AgentMux knows how to install, resume and
+introspect. **Free mode** covers everything else, through
+`claudeTmux.customAgents`, so a new CLI never has to wait for a new version of
+this extension. Two shapes:
+
+```jsonc
+"claudeTmux.customAgents": [
+  // 1. A new agent AgentMux manages exactly like a built-in one.
+  {
+    "id": "aider",
+    "label": "Aider",
+    "command": "aider",
+    "args": "--yes",
+    "resume": { "latest": "aider --restore {args}" }
+  },
+  // 2. A tmux session YOU started, mirrored in a tab.
+  { "id": "build", "label": "Build loop", "session": "my-build-loop" }
+]
+```
+
+A **launch** entry (`command`) is a first-class agent: its own tmux session
+(`tmux_<id>_<folder>`, override with `sessionPrefix`), presence and status,
+input, handoffs, arbiter rounds, Pair Mode, preflight and cleanup. Add `pane` to
+adopt an instance you started outside AgentMux, `detection` for its TUI's
+prompts, `resume` templates (`{args}`, `{id}`) if its CLI can resume, `accent`
+and `mark` for its tab, and `modEnter` for the bytes it reads as a newline —
+`"\\x1b[13;2u"` or `"\\x1b[27;2;13~"`, the two encodings the built-in agents
+use. Without one, `Shift+Enter` submits, as it did before.
+
+A **mirror** entry (`session`) is the "free" one: the tab shows a tmux session
+AgentMux did not create. It is the only tab not tied to the workspace root —
+you named the session, so it is shown wherever it lives. In exchange, nothing
+destructive reaches it: AgentMux never creates, restarts or resumes over it,
+never offers it in bulk kill, and never lists it as a leftover to clean up.
+Killing it is possible from the single **Kill** command, which states plainly
+that AgentMux did not create it.
+
+The easy path is the palette: **AgentMux: Mirror an existing tmux session (free
+mode)…** lists your running tmux sessions and writes the entry for you;
+**AgentMux: Remove a custom agent…** removes it and leaves the session running.
+The roster is built once at activation, so both offer a window reload.
+
 ## Settings
 
 The existing `claudeTmux.*` namespace is retained so upgrades keep current user
@@ -206,6 +318,7 @@ settings.
 | `claudeTmux.claudeArgs` | `--dangerously-skip-permissions --ide` | Arguments used for Claude start/resume. |
 | `claudeTmux.codexArgs` | `--no-alt-screen` | Arguments used for Codex start/resume; the default preserves scrollback. |
 | `claudeTmux.codexFullAccess` | `true` | Add Codex's approval/sandbox bypass flag. Disable for untrusted repositories. |
+| `claudeTmux.codexHooks` | `true` | Pass Codex's native lifecycle hooks at launch (working / needs input / done as ground truth). Codex asks once to trust them. Needs Codex 0.147+. |
 | `claudeTmux.codexReadClaudeRules` | `true` | Tell Codex to read every Markdown file recursively under `.claude`. |
 | `claudeTmux.sessionPrefix` | `tmux_claude_` | Claude session prefix. |
 | `claudeTmux.codexSessionPrefix` | `tmux_codex_` | Codex session prefix. |
@@ -213,8 +326,11 @@ settings.
 | `claudeTmux.opencodeArgs` | `--auto` | Arguments passed to `opencode`. |
 | `claudeTmux.hermesSessionPrefix` | `tmux_hermes_` | Hermes session prefix. |
 | `claudeTmux.hermesArgs` | `--cli --yolo` | Arguments passed to `hermes`; `--cli` keeps tmux scrollback, `--tui` uses the Ink UI. |
+| `claudeTmux.piSessionPrefix` | `tmux_pi_` | pi session prefix. |
+| `claudeTmux.piArgs` | `""` | Arguments passed to `pi`. Empty on purpose: pi has no approval prompts to bypass. Add `-a` to auto-answer its project-trust question. |
 | `claudeTmux.antigravitySessionPrefix` | `tmux_agy_` | Antigravity session prefix. |
 | `claudeTmux.antigravityArgs` | `--dangerously-skip-permissions` | Arguments passed to `agy`. |
+| `claudeTmux.customAgents` | `[]` | Free mode: extra agents declared in settings — a new CLI to manage, or an existing tmux session to mirror. |
 | `claudeTmux.ansiPalette` | `theme` | `theme` remaps ANSI onto the VS Code terminal theme; `terminal` uses the classic xterm palette. |
 | `claudeTmux.detectionRules` | `{}` | Per-agent screen rules (`needsInput` / `working` regex lists) used when an agent reports no lifecycle state. |
 | `claudeTmux.scrollbackLines` | `1000` | Captured history lines, from 0 to 5000. |
@@ -227,7 +343,7 @@ settings.
 | `claudeTmux.promptHistory` | `true` | Alt+Up prompt recall (workspace-local; clear via command). |
 | `claudeTmux.statusBarItems` | `true` | A single status bar item for the active agent (all present agents in its tooltip; click to cycle focus). |
 | `claudeTmux.notifyPrompts` | `true` | Notification with answer buttons when a background agent asks. |
-| `claudeTmux.stateHooks` | `true` | Ground-truth state via Claude hooks / Codex notify. |
+| `claudeTmux.stateHooks` | `true` | Ground-truth state via Claude hooks, Codex notify, the OpenCode plugin and the pi extension. |
 | `claudeTmux.telemetry` | `true` | Token/turn/tool chips tailed from local CLI transcripts. |
 | `claudeTmux.eventLog` | `true` | Timeline ledger at `.claude/agentmux/ledger.jsonl`. |
 | `claudeTmux.tmuxStatusBar` | `true` | AgentMux facts on the tmux status line of agent sessions. |
@@ -240,9 +356,19 @@ settings.
 
 - A workspace folder is required; the extension never falls back to `$HOME`.
 - In a multi-root workspace, the first root is used.
+- A free-mode **mirror** tab is the one exception to workspace scoping, by
+  design; it is also the one tab AgentMux will not create, restart or clean up.
+- The agent roster is assembled at activation, so a `claudeTmux.customAgents`
+  edit takes effect after a window reload.
 - With `stateHooks` off (or unmanaged launches), `working`, `finished` and
   `needs input` fall back to visual heuristics based on submitted input, pane
   changes and common prompts; they can occasionally be wrong.
+- Codex's hooks stay inactive until you trust them once in the pane; the tab
+  shows *needs input* while that prompt is up, and `notify` still reports `done`.
+- A pane whose running command is an interpreter (`node`, `python`, …) is only
+  recognised as an agent when its **pane title** identifies one, so an agent
+  that neither names itself in the command nor sets a title — Hermes, measured —
+  is not adopted unless AgentMux launched it.
 - The control-mode client parks on a private `_agentmux_ctl_<pid>` session and
   rides along on the active agent session to receive push notifications; it is
   excluded from the footer's client count and cleans up after itself.

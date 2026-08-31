@@ -1,5 +1,6 @@
 const assert = require('assert');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const vm = require('vm');
 
@@ -54,6 +55,15 @@ function execFile(command, args, options, callback) {
   }
   if (command === 'hermes') {
     if (args[0] === 'sessions' && args[1] === 'list') return callback(null, hermesSessionsTable || '', '');
+    if (args[0] === 'profile' && args[1] === 'create') {
+      const root = process.env.HERMES_HOME || path.join(os.homedir(), '.hermes');
+      const dir = path.join(root, 'profiles', args[2]);
+      try {
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(path.join(dir, 'config.yaml'), 'model: {}\n');
+      } catch { /* readonly */ }
+      return callback(null, `Profile '${args[2]}' created\n`, '');
+    }
     return callback(null, '', '');
   }
   if (command !== 'tmux') return callback(null, '', '');
@@ -64,11 +74,22 @@ function execFile(command, args, options, callback) {
       // Sessions named *_other belong to a different project, so ownership
       // checks on them must fail exactly as they would in reality.
       if (target.includes('_other')) return callback(null, '/tmp/another-project\n', '');
+      // tmux 3.4 answers a MISSING '=name:' target with exit 0 and an empty
+      // line instead of an error, which is what *_missing reproduces here.
+      // A *_legacy session exists ONLY under its path-hashed name, the way an
+      // older AgentMux would have created it.
+      if (target.includes('_legacy')) return callback(null, /-[0-9a-f]{8}:?$/.test(target) ? workspace + '\n' : '\n', '');
+      if (target.includes('_missing')) return callback(null, '\n', '');
       return callback(null, workspace + '\n', '');
     }
     if (format.includes('@claude_tmux_agent')) {
       if (agentInfoOutput != null) return callback(null, workspace + '\t' + agentInfoOutput, '');
       const target = args[args.indexOf('-t') + 1];
+      // Same conventions as #{session_path} above: a *_other session lives in a
+      // different project, and a *_missing target does not exist at all (tmux
+      // 3.4 still exits 0 for it, with every field empty).
+      if (target.includes('_other')) return callback(null, '/tmp/another-project\tclaude\t1\tclaude\t1700000000\tgen-a\n', '');
+      if (target.includes('_missing')) return callback(null, '\t\t\t\t\t\n', '');
       const agent = target.includes('tmux_hermes_') ? 'hermes'
         : target.includes('tmux_opencode_') ? 'opencode'
         : target.includes('tmux_agy_') ? 'antigravity'
@@ -94,19 +115,43 @@ function execFile(command, args, options, callback) {
   callback(null, '', '');
 }
 
+// The presence loop posts 'agents' asynchronously, so "the last message" is not
+// a stable way to assert about a specific one: look up the newest of a type.
+function byAgentIds(make) {
+  const out = {};
+  for (const id of AGENT_IDS) out[id] = make(id);
+  return out;
+}
+
+function lastOfType(type) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].type === type) return messages[i];
+  }
+  return null;
+}
+
 const state = new Map();
+const executedCommands = [];
+let inputBoxAnswer;
 const vscode = {
   workspace: {
     workspaceFolders: [{ uri: { fsPath: workspace } }],
     getConfiguration(section) {
       if (section === 'terminal.integrated') return { get: () => undefined };
-      return { get: (key) => settings.get(key) };
+      return {
+        get: (key) => settings.get(key),
+        // The free-mode roster is read and written per scope; the test host
+        // models a single (user-level) scope.
+        inspect: (key) => ({ globalValue: settings.get(key) }),
+        update: async (key, value) => settings.set(key, value),
+      };
     },
   },
   window: {
     showWarningMessage: async () => warningAnswer,
     showInformationMessage: async () => undefined,
     showErrorMessage: async () => undefined,
+    showInputBox: async () => inputBoxAnswer,
     showQuickPick: async (items) => { quickPickItems = await items; return quickPickAnswer; },
     createOutputChannel: () => ({
       appendLine: (line) => outputLines.push(line),
@@ -114,11 +159,14 @@ const vscode = {
       dispose: () => {},
     }),
   },
+  env: { clipboard: { writeText: async () => {} } },
+  commands: { executeCommand: async (name) => { executedCommands.push(name); } },
+  ConfigurationTarget: { Global: 1, Workspace: 2, WorkspaceFolder: 3 },
   Uri: { joinPath: (...parts) => parts.join('/') },
 };
 
 const source = fs.readFileSync(path.join(root, 'extension.js'), 'utf8')
-  + '\nmodule.exports.__test = { ClaudeTmuxView, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions, AGENTS, AGENT_IDS, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, detectionRules, detectScreenState, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath };';
+  + '\nmodule.exports.__test = { ClaudeTmuxView, sessionName, accentChannels, derivedAccent, derivedMark, decodeEscapes, AGENT_DETECTION, paneIdentity, identityMatches, STATE_HOOK_SCRIPT, setStateHookDir, codexHookArgs, tomlString, listPiSessions, piSessionDir, piExtensionPath, ensurePiExtension, removePiExtension, PI_EXTENSION, customAgentSpecs, registerCustomAgents, freeAgentId, mirroredSessionNames, baseSessionName, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions, AGENTS, AGENT_IDS, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, hermesProfileSlug, hermesProfileHome, ensureHermesProfile, launchEnvPrefix, detectionRules, detectScreenState, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath };';
 const moduleUnderTest = { exports: {} };
 const sandbox = {
   module: moduleUnderTest,
@@ -139,7 +187,7 @@ const sandbox = {
   clearInterval,
 };
 vm.runInNewContext(source, sandbox, { filename: 'extension.js' });
-const { ClaudeTmuxView, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions, AGENTS, AGENT_IDS, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, detectionRules, detectScreenState, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath } = moduleUnderTest.exports.__test;
+const { ClaudeTmuxView, sessionName, accentChannels, derivedAccent, derivedMark, decodeEscapes, AGENT_DETECTION, paneIdentity, identityMatches, STATE_HOOK_SCRIPT, setStateHookDir, codexHookArgs, tomlString, listPiSessions, piSessionDir, piExtensionPath, ensurePiExtension, removePiExtension, PI_EXTENSION, customAgentSpecs, registerCustomAgents, freeAgentId, mirroredSessionNames, baseSessionName, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions, AGENTS, AGENT_IDS, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, hermesProfileSlug, hermesProfileHome, ensureHermesProfile, launchEnvPrefix, detectionRules, detectScreenState, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath } = moduleUnderTest.exports.__test;
 
 function makeProvider() {
   const provider = new ClaudeTmuxView({
@@ -207,6 +255,70 @@ async function run() {
   settings.set('codexArgs', `--no-alt-screen -c 'developer_instructions="custom"'`);
   assert.doesNotMatch(codexLaunchArgs(), /workspace \.claude directory/);
   settings.set('codexArgs', '--no-alt-screen');
+
+  // ---- Codex native lifecycle hooks -----------------------------------------------------
+  // notify could only ever report `done`; the hook set reports the whole
+  // lifecycle, PermissionRequest included (real approval detection, not a guess
+  // at prompt wording). Verified against the CLI, which prints "hook: <Event>"
+  // for each one as it runs.
+  const hookDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentmux-hooks-'));
+  setStateHookDir(hookDir);
+  settings.set('stateHooks', true);
+  const hooked = codexLaunchArgs();
+  for (const event of ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PermissionRequest', 'Stop']) {
+    assert.ok(hooked.includes(`hooks.${event}=[`), `codex launch must register the ${event} hook`);
+  }
+  assert.match(hooked, /notify=/, 'notify stays as the fallback for a user who declines the hook trust prompt');
+  assert.ok(hooked.includes('-c '), 'hooks travel per launch as -c overrides, never into the user\'s config.toml');
+
+  // Assert the generated TOML on its own, where the outer shell quoting of the
+  // -c argument does not obscure it. The script path is shell-quoted INSIDE the
+  // TOML string because Codex runs a hook `command` as a shell command line —
+  // an unquoted macOS path ("Application Support") would otherwise split.
+  const hookArgs = codexHookArgs('/opt/Application Support/agentmux-state.sh');
+  const byEvent = {};
+  for (const arg of hookArgs) {
+    const m = /^-c '(hooks\.([A-Za-z]+)=.*)'$/s.exec(arg.replace(/'"'"'/g, "'"));
+    assert.ok(m, `each hook is one -c override: ${arg}`);
+    byEvent[m[2]] = m[1];
+  }
+  assert.strictEqual(
+    byEvent.PermissionRequest,
+    `hooks.PermissionRequest=[{matcher="*",hooks=[{type="command",command="'/opt/Application Support/agentmux-state.sh' needs-input"}]}]`,
+    'PermissionRequest stamps needs-input, with a path safe to hand to a shell');
+  assert.ok(byEvent.SessionStart.includes('matcher="startup|resume|clear"')
+    && byEvent.SessionStart.includes(' register"'),
+    'SessionStart only registers the conversation id — a session that just started has not finished');
+  assert.ok(byEvent.Stop.includes(' done"') && !byEvent.Stop.includes('matcher'));
+
+  settings.set('codexHooks', false);
+  assert.doesNotMatch(codexLaunchArgs(), /hooks\./, 'claudeTmux.codexHooks=false drops the hook set');
+  assert.match(codexLaunchArgs(), /notify=/, '…but notify still reports done');
+  settings.set('codexHooks', true);
+
+  settings.set('codexArgs', `--no-alt-screen -c 'hooks.Stop=[]'`);
+  assert.doesNotMatch(codexLaunchArgs(), /hooks\.PermissionRequest/,
+    'an explicit hooks override in codexArgs wins outright');
+  settings.set('codexArgs', '--no-alt-screen');
+
+  // Codex's one-time "trust these hook commands" prompt genuinely waits for a key.
+  assert.strictEqual(detectScreenState('codex', '⚠ 2 hooks need review before they can run.').status,
+    'needs-input', 'the hook trust prompt is waiting for the user');
+  assert.strictEqual(detectScreenState('codex', 'Press t to trust all; enter to review hooks; esc to close').status,
+    'needs-input');
+
+  // The shared hook script reads its JSON payload once and serves both CLIs.
+  assert.match(STATE_HOOK_SCRIPT, /head -c 4000/, 'the payload is read once, bounded');
+  assert.match(STATE_HOOK_SCRIPT, /"session_id"/, 'the conversation id is captured for exact resume');
+  assert.match(STATE_HOOK_SCRIPT, /if \[ "\$state" != "register" \]/,
+    'register records identity without claiming a state');
+  assert.strictEqual(fs.readFileSync(path.join(hookDir, 'agentmux-state.sh'), 'utf8'), STATE_HOOK_SCRIPT,
+    'the shared script is materialized before it is referenced');
+  // A path with a quote must not break out of the TOML string it travels in.
+  assert.strictEqual(tomlString('a"b\\c'), '"a\\"b\\\\c"');
+  settings.set('stateHooks', false);
+  setStateHookDir(null);
+  fs.rmSync(hookDir, { recursive: true, force: true });
 
   const provider = makeProvider();
   calls.length = 0;
@@ -540,7 +652,7 @@ async function run() {
     text: 'Custom handoff\nHANDOFF_ACK:current-secret-token',
   });
   assert.strictEqual(provider.handoff.phase, 'review', 'a draft containing the current ACK marker must be rejected');
-  assert.strictEqual(messages.at(-1).ok, false);
+  assert.strictEqual(lastOfType('handoffResult').ok, false);
   calls.length = 0;
   holdNextSend = true;
   provider.queueInput('codex', '\x04', true);
@@ -561,8 +673,8 @@ async function run() {
   await provider.confirmHandoff({ id, source: 'claude', target: 'codex', mode: 'continue', text: edited });
   assert.strictEqual(provider.writerAgent, null, 'failed delivery must not transfer Pair Mode ownership');
   assert.strictEqual(provider.handoff.phase, 'review', 'failed delivery must return to the editable review phase');
-  assert.strictEqual(messages.at(-1).type, 'handoffResult');
-  assert.strictEqual(messages.at(-1).ok, false);
+  assert.ok(lastOfType('handoffResult'), 'a failed delivery must report a handoff result');
+  assert.strictEqual(lastOfType('handoffResult').ok, false);
   failPaste = false;
   calls.length = 0;
   await provider.confirmHandoff({ id, source: 'claude', target: 'codex', mode: 'continue', text: edited });
@@ -623,7 +735,6 @@ async function run() {
   settings.set('promptHistory', false);
 
   // ---- .claude/agentmux file channel ---------------------------------------------
-  const os = require('os');
   const channelWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), 'agentmux-test-'));
   vscode.workspace.workspaceFolders[0].uri.fsPath = channelWorkspace;
   settings.set('fileChannel', true);
@@ -724,7 +835,82 @@ async function run() {
   assert.ok(paneLooksLikeAgent('antigravity', '/home/u/.local/bin/agy'));
   assert.ok(!paneLooksLikeAgent('claude', 'agy'), 'agy must never be mistaken for Claude');
   assert.ok(!paneLooksLikeAgent('antigravity', 'codex'));
-  assert.ok(paneLooksLikeAgent('claude', 'node'), 'Claude still matches its node launcher');
+  // ---- pane identity: the command names an interpreter, not an agent --------------------
+  // 'node' was a Claude alias until 0.13.0, which made every Node process in
+  // the workspace read as Claude — `npm run dev` would have become an agent tab
+  // AgentMux types into. An interpreter is now unidentified unless the pane
+  // TITLE, which a TUI sets deliberately, resolves it.
+  assert.ok(!paneLooksLikeAgent('claude', 'node'),
+    'a bare node process is no longer claimed as Claude');
+  assert.ok(paneLooksLikeAgent('claude', 'node', 'Claude Code — refactor the tick loop'),
+    'a node pane whose title names Claude is adopted');
+  assert.ok(!paneLooksLikeAgent('claude', 'node', 'npm run dev'),
+    'an unrelated node pane stays unclaimed whatever its title says');
+  assert.ok(!paneLooksLikeAgent('claude', 'vite', 'Claude Code'),
+    'the title is consulted ONLY for an interpreter, never to override a real command name');
+  // Some Claude builds report their own version as the pane command.
+  assert.ok(paneLooksLikeAgent('claude', '2.1.118'), 'a bare version string is Claude');
+  assert.ok(!paneLooksLikeAgent('codex', '2.1.118'), 'and only Claude');
+  assert.ok(!paneLooksLikeAgent('claude', '2'), 'a lone number is not a version string');
+  assert.ok(paneLooksLikeAgent('pi', 'node', 'π — pi v0.84.4'),
+    'pi is resolved from its product mark when it runs as node');
+  // Measured live: Hermes runs as python AND leaves the tmux title at the
+  // hostname, so neither signal identifies it. Claiming `python` anyway would
+  // hand every Python process an agent tab.
+  assert.ok(!paneLooksLikeAgent('hermes', 'python', 'oracle'),
+    'Hermes started outside AgentMux is still not adopted, by design');
+
+  // A title-derived identity has to be sticky: Claude rewrites that title with
+  // the conversation summary, and re-deriving it every poll would make an
+  // adopted agent blink out of the side bar mid-session.
+  // Fields after the workspace path:
+  // marker, running, command, created, generation, hookState, hookTool,
+  // hookSessionId, panePid, serverPid, title.
+  const paneInfo = (command, title, panePid = '4242', serverPid = '999') =>
+    `\t\t${command}\t1700000000\tgen-a\t\t\t\t${panePid}\t${serverPid}\t${title}\n`;
+
+  agentInfoOutput = paneInfo('node', 'Claude Code — refactor the tick loop');
+  assert.strictEqual((await agentSessionInfo('claude', 'adopted_pane')).ready, true,
+    'the title identifies the interpreter on the first look');
+  agentInfoOutput = paneInfo('node', '⠂ Debug the SSH rendering issue');
+  assert.strictEqual((await agentSessionInfo('claude', 'adopted_pane')).ready, true,
+    'the agent survives the title drifting away from the pattern');
+  assert.strictEqual((await agentSessionInfo('codex', 'adopted_pane')).ready, false,
+    'the sticky identity belongs to the agent that earned it, not to any agent');
+  // A recreated pane or a restarted tmux server is a different process, whatever
+  // the session name and creation second say.
+  assert.strictEqual((await agentSessionInfo('claude', 'adopted_pane')).ready, true);
+  agentInfoOutput = paneInfo('node', '⠂ Debug the SSH rendering issue', '5555', '999');
+  assert.strictEqual((await agentSessionInfo('claude', 'adopted_pane')).ready, false,
+    'a new pane shell pid is a different pane, so the sticky identity does not carry over');
+  agentInfoOutput = paneInfo('node', '⠂ Debug the SSH rendering issue', '4242', '1000');
+  assert.strictEqual((await agentSessionInfo('claude', 'adopted_pane')).ready, false,
+    'a restarted tmux server invalidates it too');
+  agentInfoOutput = paneInfo('node', 'Claude Code — refactor the tick loop');
+  assert.strictEqual((await agentSessionInfo('claude', 'adopted_pane')).ready, true);
+  agentInfoOutput = paneInfo('zsh', '⠂ Debug the SSH rendering issue');
+  assert.strictEqual((await agentSessionInfo('claude', 'adopted_pane')).ready, false,
+    'falling back to a shell means the agent exited, and the identity is dropped');
+  agentInfoOutput = paneInfo('node', '⠂ Debug the SSH rendering issue');
+  assert.strictEqual((await agentSessionInfo('claude', 'adopted_pane')).ready, false,
+    'and it is not resurrected without a fresh identifying signal');
+
+  // What a handoff pins, and what invalidates it.
+  const pinned = await (async () => {
+    agentInfoOutput = paneInfo('claude', 'Claude Code');
+    const info = await agentSessionInfo('claude', 'pinned_pane');
+    return { targetIdentity: paneIdentity(info) };
+  })();
+  assert.strictEqual(pinned.targetIdentity, '1700000000:gen-a:4242:999');
+  assert.strictEqual(identityMatches(await agentSessionInfo('claude', 'pinned_pane'), pinned), true);
+  agentInfoOutput = paneInfo('claude', 'Claude Code', '4242', '1000');
+  assert.strictEqual(identityMatches(await agentSessionInfo('claude', 'pinned_pane'), pinned), false,
+    'a tmux server restart must never let a briefing land in a look-alike pane');
+  // A transaction pinned by an older AgentMux recorded only created+generation.
+  const legacyPin = { targetCreated: '1700000000', targetGeneration: 'gen-a' };
+  assert.strictEqual(identityMatches(await agentSessionInfo('claude', 'pinned_pane'), legacyPin), true,
+    'a pre-0.13.0 pin is still honoured on the pair it actually recorded');
+  agentInfoOutput = null;
   agentInfoOutput = 'codex\t1\tcodex\t1700000000\tgen-a\n';
   const claimed = await agentSessionInfo('antigravity', 'tmux_agy_claude-tmux-sidebar');
   assert.strictEqual(claimed.ready, false, 'a pane already claimed by another agent must not read as this one');
@@ -880,6 +1066,69 @@ async function run() {
   assert.match(OPENCODE_PLUGIN, /session\.idle/);
   assert.match(OPENCODE_PLUGIN, /permission\.asked/);
   assert.match(OPENCODE_PLUGIN, /@agentmux_session_id/, 'session identity is captured for exact resume');
+
+  // Run the real plugin source against an event sequence. opencode runs
+  // subagents as CHILD sessions with their own idle events, so the aggregate is
+  // the whole point: the first idle must not mark the pane done.
+  {
+    const pluginCalls = [];
+    const pluginSandbox = {
+      module: { exports: {} },
+      process: { env: { TMUX_PANE: '%7', AGENTMUX: '1' } },
+      __exec: (cmd, args, cb) => { pluginCalls.push(args); cb(); },
+      console,
+      setTimeout,
+    };
+    pluginSandbox.exports = pluginSandbox.module.exports;
+    const pluginSource = OPENCODE_PLUGIN
+      .replace("await import('node:child_process')", '({ execFile: __exec })')
+      .replace('export const AgentMuxState', 'const AgentMuxState')
+      + '\nmodule.exports = { AgentMuxState };';
+    vm.runInNewContext(pluginSource, pluginSandbox, { filename: 'agentmux-state.js' });
+    const plugin = await pluginSandbox.module.exports.AgentMuxState();
+    const fire = async (type, properties) => { await plugin.event({ event: { type, properties } }); };
+    const stamped = () => pluginCalls
+      .filter((a) => a[4] === '@agentmux_state')
+      .map((a) => a[5]);
+    const optionFor = (name) => (pluginCalls.filter((a) => a[4] === name).at(-1) || [])[5];
+
+    await fire('session.created', { sessionID: 'parent' });
+    assert.strictEqual(optionFor('@agentmux_session_id'), 'parent', 'the session id is recorded on creation');
+
+    await fire('message.updated', { sessionID: 'parent', info: { role: 'user' } });
+    assert.strictEqual(stamped().at(-1), 'working');
+
+    await fire('session.status', { sessionID: 'child', status: { type: 'busy' } });
+    await fire('session.idle', { sessionID: 'child' });
+    assert.strictEqual(stamped().at(-1), 'working',
+      'a subagent going idle must NOT mark the pane done while the parent still works');
+
+    await fire('session.idle', { sessionID: 'parent' });
+    assert.strictEqual(stamped().at(-1), 'done', 'the pane is done only once every session is');
+
+    await fire('session.status', { sessionID: 'parent', status: { type: 'busy' } });
+    assert.strictEqual(stamped().at(-1), 'done',
+      'the stale trailing busy opencode emits after idle is ignored');
+
+    await fire('message.updated', { sessionID: 'parent', info: { role: 'user' } });
+    assert.strictEqual(stamped().at(-1), 'working', 'a new user message re-arms the session');
+
+    await fire('tool.execute.before', { sessionID: 'parent', tool: 'bash' });
+    assert.strictEqual(optionFor('@agentmux_tool'), 'bash', 'the running tool is reported');
+
+    await fire('permission.asked', { sessionID: 'parent' });
+    assert.strictEqual(stamped().at(-1), 'needs-input');
+    assert.strictEqual(optionFor('@agentmux_tool'), '', 'the tool chip clears when work stops');
+    await fire('question.replied', { sessionID: 'parent' });
+    assert.strictEqual(stamped().at(-1), 'working');
+
+    const before = stamped().length;
+    await fire('message.part.updated', { sessionID: 'parent' });
+    assert.strictEqual(stamped().length, before, 'an unchanged aggregate is not re-written');
+
+    await fire('session.deleted', { info: { id: 'parent' } });
+    assert.strictEqual(stamped().at(-1), 'done', 'deleting the last live session settles the pane');
+  }
   const fakeConfig = fs.mkdtempSync(path.join(os.tmpdir(), 'agentmux-cfg-'));
   const priorXdg = process.env.XDG_CONFIG_HOME;
   process.env.XDG_CONFIG_HOME = fakeConfig;
@@ -1006,6 +1255,214 @@ async function run() {
   assert.strictEqual(detectScreenState('hermes', 'Do you want to proceed?').status, 'needs-input',
     'the shared baseline still applies');
 
+  // ---- naming a session tmux 3.4 says nothing about --------------------------------------
+  // The <base>-<hash> name exists only to avoid attaching to a session another
+  // project already owns. tmux 3.4 answers a missing '=name:' target with exit 0
+  // and an empty line rather than an error, so "not ok" alone did not mean
+  // "free" and every new session was needlessly named <base>-<hash>.
+  settings.set('piSessionPrefix', 'tmux_missing_');
+  assert.strictEqual(await sessionName('pi'), `tmux_missing_${path.basename(workspace)}`,
+    'a name no session holds is used as-is, not disambiguated with a path hash');
+  assert.strictEqual((await agentSessionInfo('pi', 'tmux_missing_x')).exists, false,
+    'an empty session_path means the target does not exist');
+  settings.set('piSessionPrefix', 'tmux_other_');
+  assert.match(await sessionName('pi'), /^tmux_other_.+-[0-9a-f]{8}$/,
+    'a name another project already holds still falls back to the path-hashed variant');
+  // Sessions an affected tmux already named <base>-<hash> must be adopted, not
+  // orphaned by starting a second agent under the now-free clean name.
+  settings.set('piSessionPrefix', 'tmux_legacy_');
+  assert.match(await sessionName('pi'), /^tmux_legacy_.+-[0-9a-f]{8}$/,
+    'a hashed session that belongs to this workspace is adopted when the plain name is free');
+  settings.delete('piSessionPrefix');
+
+  // ---- pi as a sixth agent --------------------------------------------------------------
+  assert.ok(AGENT_IDS.includes('pi'), 'pi must be a registered agent');
+  assert.strictEqual(AGENTS.pi.command, 'pi');
+  assert.strictEqual(AGENTS.pi.defaultPrefix, 'tmux_pi_');
+  settings.set('piArgs', '');
+  assert.strictEqual(launchArgs('pi'), '', 'pi has no permission flag to add: it ships no approval prompts');
+  settings.set('piArgs', '-a');
+  assert.strictEqual(launchArgs('pi'), '-a', 'configured pi arguments are passed through');
+  assert.strictEqual(AGENTS.pi.resumeById('01H8-abc', '-a'), "pi --session '01H8-abc' -a");
+  assert.strictEqual(AGENTS.pi.resumeLatest('-a'), 'pi --continue -a');
+  // Verified live: pi sets its own process title, so the pane really reads "pi"
+  // and an externally started instance is adopted without aliasing "node"
+  // (which Claude already owns).
+  assert.ok(paneLooksLikeAgent('pi', '/usr/local/bin/pi'));
+  assert.ok(!paneLooksLikeAgent('pi', 'node'), 'pi must not claim every node process');
+  assert.ok(!paneLooksLikeAgent('pi', 'pip'), 'the pane rule is anchored, not a substring match');
+  assert.ok(!paneLooksLikeAgent('claude', 'pi'), 'pi must never be mistaken for Claude');
+
+  // The resume list is read from pi's own per-directory transcripts. Layout and
+  // cwd encoding are the CLI's (verified in its core/session-manager.js).
+  const fakePiDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentmux-pi-'));
+  const priorPiDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = fakePiDir;
+  try {
+    assert.strictEqual(
+      piSessionDir('/home/u/work/proj'),
+      path.join(fakePiDir, 'sessions', '--home-u-work-proj--'),
+      'the cwd encoding matches pi: leading separator stripped, separators become dashes');
+    const dir = piSessionDir(workspace);
+    fs.mkdirSync(dir, { recursive: true });
+    const transcript = (id, cwd, entries) => [
+      JSON.stringify({ type: 'session', version: 3, id, timestamp: '2026-08-30T10:00:00.000Z', cwd }),
+      ...entries.map((e) => JSON.stringify(e)),
+    ].join('\n') + '\n';
+    fs.writeFileSync(path.join(dir, '2026-08-30T10-00-00-000Z_aaa.jsonl'), transcript('aaa', workspace, [
+      { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'refactor the tick loop please' }] } },
+    ]));
+    fs.writeFileSync(path.join(dir, '2026-08-30T11-00-00-000Z_bbb.jsonl'), transcript('bbb', workspace, [
+      { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'the first prompt' }] } },
+      { type: 'session_info', name: 'Renamed later' },
+    ]));
+    // A transcript filed under this directory but recorded elsewhere: resuming
+    // it would move pi out of the project, so it is never offered.
+    fs.writeFileSync(path.join(dir, '2026-08-30T12-00-00-000Z_ccc.jsonl'), transcript('ccc', '/elsewhere/other', []));
+    fs.writeFileSync(path.join(dir, 'not-a-session.jsonl'), 'garbage\n');
+    const piList = await listPiSessions(workspace);
+    assert.strictEqual(piList.length, 2, 'malformed and foreign-cwd transcripts are skipped');
+    assert.ok(!piList.some((s) => s.id === 'ccc'), 'a session recorded in another folder is never offered');
+    const renamed = piList.find((s) => s.id === 'bbb');
+    assert.strictEqual(renamed.name, 'Renamed later', 'a /name entry wins over the first user message');
+    assert.strictEqual(piList.find((s) => s.id === 'aaa').name, 'refactor the tick loop please',
+      'the first user message is the fallback title');
+    assert.ok(piList.every((s) => s.lastTs), 'every entry carries a timestamp for the overlay');
+    assert.strictEqual(await AGENTS.pi.deleteConversation('aaa', workspace), true);
+    assert.strictEqual((await listPiSessions(workspace)).length, 1, 'deleting removes the transcript from disk');
+    assert.strictEqual(await AGENTS.pi.deleteConversation('nope', workspace), false, 'an unknown id is a no-op');
+
+    // pi discovers extensions from its own config dir; the file is inert unless
+    // AGENTMUX=1, exactly like the OpenCode plugin.
+    settings.set('stateHooks', true);
+    assert.match(PI_EXTENSION, /AGENTMUX/, 'the extension is inert unless AgentMux launched the pane');
+    assert.match(PI_EXTENSION, /agent_settled/, 'settled, not agent_end, is what "done" means for pi');
+    assert.match(PI_EXTENSION, /ui_prompt_start/, 'blocking prompts report as needs-input');
+    assert.match(PI_EXTENSION, /@agentmux_session_id/, 'session identity is captured for exact resume');
+    assert.strictEqual(ensurePiExtension(), true);
+    const piFile = piExtensionPath();
+    assert.strictEqual(piFile, path.join(fakePiDir, 'extensions', 'agentmux-state.ts'),
+      'the extension lands in pi\'s auto-discovered extension directory');
+    assert.strictEqual(fs.readFileSync(piFile, 'utf8'), PI_EXTENSION);
+    assert.strictEqual(removePiExtension(), true);
+    assert.strictEqual(fs.existsSync(piFile), false, 'the integration is fully removable');
+    settings.set('stateHooks', false);
+    assert.strictEqual(ensurePiExtension(), false, 'stateHooks=false must not write into another tool\'s config');
+  } finally {
+    if (priorPiDir == null) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = priorPiDir;
+    fs.rmSync(fakePiDir, { recursive: true, force: true });
+  }
+
+  // Rules taken from a live pane. The startup banner is the trap: it prints
+  // "escape interrupt · …" and stays on screen until the chat scrolls it away.
+  assert.strictEqual(detectScreenState('pi', 'Working... (escape to interrupt)').status, 'working');
+  assert.strictEqual(
+    detectScreenState('pi', ' escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more').status,
+    null, 'pi\'s startup banner must never read as a running turn');
+  assert.strictEqual(detectScreenState('pi', ' Trust project folder?').status, 'needs-input',
+    'the first-run project-trust prompt is waiting for the user');
+  assert.strictEqual(detectScreenState('pi', ' ↑↓ navigate  enter select  escape/ctrl+c cancel').status, 'needs-input',
+    'the trust prompt footer is waiting for the user');
+  assert.strictEqual(
+    detectScreenState('pi', '  Enter to select · Ctrl+S to set as default · Esc to cancel').status,
+    'needs-input',
+    'pi\'s built-in pickers are not extension UI, so the hook never sees them: the screen rule must');
+  assert.strictEqual(detectScreenState('pi', 'the idle prompt with nothing to answer').status, null);
+
+  // ---- free mode: agents declared in settings --------------------------------------------
+  settings.set('customAgents', [
+    { id: 'aider', label: 'Aider', command: 'aider', args: '--yes', resume: { latest: 'aider --restore {args}', byId: 'aider --session {id} {args}' } },
+    { id: 'build', label: 'Build loop', session: 'my-build-loop' },
+    { id: 'claude', label: 'Impostor', command: 'evil' },     // shadows a built-in
+    { id: 'Bad Id', command: 'x' },                            // invalid id
+    { id: 'aider', command: 'twice' },                         // duplicate
+    { id: 'empty' },                                           // neither command nor session
+    { id: 'colon', session: 'has:colon' },                     // unaddressable tmux target
+    { id: 'spacey', session: 'has space' },
+  ]);
+  const specs = customAgentSpecs();
+  assert.strictEqual(specs.map((s) => s.id).join(','), 'aider,build',
+    'invalid, duplicate and built-in-shadowing entries are dropped');
+  assert.strictEqual(specs[0].defaultPrefix, 'tmux_aider_', 'a launch-mode agent gets a derived session prefix');
+  assert.strictEqual(specs[0].launchArgs(), '--yes');
+  assert.strictEqual(specs[0].resumeLatest('--yes'), 'aider --restore --yes', '{args} expands in a resume template');
+  assert.strictEqual(specs[0].resumeById('s7', '--yes'), "aider --session 's7' --yes", '{id} is shell-quoted');
+  assert.strictEqual(specs[1].attachSession, 'my-build-loop');
+  assert.strictEqual(specs[1].command, null, 'a mirror entry has nothing to launch');
+  assert.ok(!specs[1].resumeLatest, 'a mirror entry offers no resume');
+
+  assert.strictEqual(freeAgentId('my-build-loop', []), 'my-build-loop');
+  assert.strictEqual(freeAgentId('9-build', []), 's-9-build', 'an id must start with a letter');
+  assert.strictEqual(freeAgentId('claude', []), 'claude-2', 'a built-in id is never reused');
+  assert.strictEqual(freeAgentId('x', [{ id: 'x' }]), 'x-2', 'an id already in the list is never reused');
+
+  registerCustomAgents();
+  assert.ok(AGENT_IDS.includes('aider') && AGENT_IDS.includes('build'), 'custom agents join the roster');
+  assert.strictEqual(AGENTS.claude.command, 'claude', 'a built-in agent can never be shadowed');
+  assert.strictEqual(baseSessionName('aider', '/home/u/work/proj'), 'tmux_aider_proj',
+    'a launch-mode agent gets a workspace session like any built-in');
+  assert.strictEqual(baseSessionName('build', '/home/u/work/proj'), 'my-build-loop',
+    'a mirrored agent uses the session name the user gave, not a derived one');
+  assert.strictEqual(mirroredSessionNames().has('my-build-loop'), true);
+
+  // A mirrored session is deliberately exempt from the workspace-root gate —
+  // that is the point of the mode — while a managed one is not.
+  const foreign = await agentSessionInfo('build', 'my-build-loop_other');
+  assert.strictEqual(foreign.ready, true, 'a mirrored session is shown wherever it lives');
+  const foreignManaged = await agentSessionInfo('claude', 'tmux_claude_other');
+  assert.strictEqual(foreignManaged.exists, false, 'a managed session outside the workspace is still invisible');
+
+  // …but nothing destructive may reach it.
+  const freeProvider = makeProvider();
+  sessionListOutput = [
+    `my-build-loop\t${workspace}\t1700000000\t0\t1`,               // mirrored, in this project
+    `tmux_aider_claude-tmux-sidebar\t${workspace}\t1700000000\t0\t1`,
+  ].join('\n');
+  quickPickAnswer = undefined;
+  quickPickItems = null;
+  await freeProvider.cleanupSessions();
+  const freeOffered = (quickPickItems || []).map((item) => item.session);
+  assert.ok(!freeOffered.includes('my-build-loop'),
+    'a session AgentMux only mirrors is never a leftover of ours, even inside the project');
+  assert.ok(freeOffered.includes('tmux_aider_claude-tmux-sidebar'),
+    'a custom agent AgentMux does launch is cleaned up like any other');
+  sessionListOutput = null;
+  quickPickItems = null;
+
+  quickPickAnswer = undefined;
+  quickPickItems = null;
+  await freeProvider.killPick();
+  assert.ok(!(quickPickItems || []).some((item) => item.agent === 'build'),
+    'bulk kill never offers a mirrored session');
+
+  // An arbiter round needs a marked answer from every participant and fails as
+  // a whole if one cannot give it — and a mirrored session may be a plain shell.
+  for (const agent of AGENT_IDS) freeProvider.agentState[agent].present = true;
+  assert.ok(!freeProvider.arbiterParticipants().includes('build'),
+    'a mirrored session never joins an arbiter round');
+  assert.ok(freeProvider.arbiterParticipants().includes('aider'),
+    'a custom agent AgentMux launches does take part');
+  for (const agent of AGENT_IDS) freeProvider.agentState[agent].present = false;
+
+  // Free mode never launches: a missing mirrored session is reported, not created.
+  agentInfoOutput = null;
+  calls.length = 0;
+  await freeProvider.startSession('build');
+  assert.strictEqual(calls.filter((call) => call.args[0] === 'new-session').length, 0,
+    'free mode never creates a tmux session');
+  calls.length = 0;
+  freeProvider.activeAgent = 'build';
+  await freeProvider.restart();
+  assert.strictEqual(calls.filter((call) => call.args[0] === 'kill-session').length, 0,
+    'free mode never restarts a session it did not create');
+  await freeProvider.attachExisting('build');
+  assert.strictEqual(calls.filter((call) => call.args[0] === 'kill-session').length, 0,
+    'free mode never replaces a session to resume it');
+  freeProvider.activeAgent = 'claude';
+
+  settings.set('customAgents', []);
+  settings.set('piArgs', '');
+
   // The generated markup carries the whole roster, tabs included.
   const markup = provider.html({ asWebviewUri: (u) => u, cspSource: 'vscode-resource:' });
   assert.strictEqual((markup.match(/class="agent-tab/g) || []).length, AGENT_IDS.length, 'one tab per registered agent');
@@ -1039,6 +1496,251 @@ async function run() {
   assert.match(webviewSource, /XTERM/, 'the original-terminal palette is available');
   assert.match(webviewSource, /deleteSession/, 'conversations can be deleted from the resume list');
   assert.doesNotMatch(webviewSource, /notePredict|drawSpark|xtermWriteFull/, 'removed features must not linger in the webview');
+
+  // ---- navigation: go to the agent that needs you ---------------------------------------
+  {
+    const nav = makeProvider();
+    for (const agent of AGENT_IDS) nav.agentState[agent].present = false;
+    nav.activeAgent = 'claude';
+    for (const agent of ['claude', 'codex', 'opencode']) nav.agentState[agent].present = true;
+    const at = (agent, status, since) => {
+      nav.agentState[agent].status = status;
+      nav.agentState[agent].statusSince = since;
+    };
+    at('claude', 'working', 1000);
+    at('codex', 'done', 2000);
+    at('opencode', 'done', 3000);
+    assert.strictEqual(nav.pickAttentionAgent(), 'opencode', 'the most recent completion wins among equals');
+    at('codex', 'needs-input', 500);
+    assert.strictEqual(nav.pickAttentionAgent(), 'codex',
+      'an agent BLOCKED on you outranks a newer completion — it cannot make progress');
+    at('codex', 'working', 500);
+    at('opencode', 'working', 3000);
+    assert.strictEqual(nav.pickAttentionAgent(), null, 'nothing to go to while everyone works');
+
+    // Cycling walks only the agents that are actually running.
+    at('claude', 'idle', 0); at('codex', 'idle', 0); at('opencode', 'idle', 0);
+    assert.deepStrictEqual(nav.presentAgents().join(','), 'claude,codex,opencode');
+    assert.strictEqual(await nav.cycleAgent(1), 'codex');
+    assert.strictEqual(await nav.cycleAgent(-1), 'claude');
+    assert.strictEqual(await nav.jumpToAgent({ index: 3 }), 'opencode');
+    assert.strictEqual(await nav.jumpToAgent({ index: 9 }), null, 'an out-of-range jump does nothing');
+    // …and the toggle returns to where you came from, not to the roster order.
+    assert.strictEqual(nav.activeAgent, 'opencode');
+    assert.strictEqual(await nav.gotoLastAgent(), 'claude');
+    assert.strictEqual(await nav.gotoLastAgent(), 'opencode', 'the toggle alternates between two agents');
+    nav.agentState.opencode.present = false;
+    nav.activeAgent = 'claude';
+    assert.notStrictEqual(await nav.gotoLastAgent(), 'opencode', 'a stopped agent is never a toggle target');
+  }
+
+  // ---- scriptable surface ----------------------------------------------------------------
+  {
+    const api = makeProvider();
+    for (const agent of AGENT_IDS) api.agentState[agent].present = false;
+    api.agentState.claude.present = true;
+    api.agentState.claude.status = 'done';
+    api.activeAgent = 'claude';
+
+    assert.strictEqual((await api.sendToAgent({ agent: 'codex', text: 'hi' })).reason, 'not-running',
+      'a script is told why, instead of the input vanishing');
+    assert.strictEqual((await api.sendToAgent({ agent: 'claude', text: '   ' })).reason, 'empty');
+    assert.strictEqual((await api.sendToAgent({ agent: 'claude', text: 'x'.repeat(30001) })).reason, 'too-long');
+
+    api.writerAgent = 'codex';
+    const locked = await api.sendToAgent({ agent: 'claude', text: 'hi' });
+    assert.deepStrictEqual({ ok: locked.ok, reason: locked.reason, writer: locked.writer },
+      { ok: false, reason: 'pair-locked', writer: 'codex' },
+      'the scripted path obeys the Pair Mode lock exactly like the side bar');
+    api.writerAgent = null;
+
+    api.handoff = { phase: 'awaitingAck' };
+    assert.strictEqual((await api.sendToAgent({ agent: 'claude', text: 'hi' })).reason, 'transaction-in-progress');
+    api.handoff = null;
+
+    calls.length = 0;
+    const sent = await api.sendToAgent({ agent: 'claude', text: 'run the tests' });
+    assert.strictEqual(sent.ok, true);
+    await waitForFlush(api, 'claude');
+    assert.match(deliveredInput(), /run the tests\r$/, 'the text is typed and submitted');
+    calls.length = 0;
+    await api.sendToAgent({ agent: 'claude', text: 'no newline', submit: false });
+    await waitForFlush(api, 'claude');
+    assert.strictEqual(deliveredInput(), 'no newline', 'submit:false types without submitting');
+
+    // status is a plain object a caller can branch on.
+    const report = api.agentStatus({ quiet: true });
+    assert.strictEqual(Object.keys(report).length, AGENT_IDS.length, 'every agent is reported');
+    assert.strictEqual(report.claude.present, true);
+    assert.strictEqual(api.agentStatus({ agent: 'claude', quiet: true }).codex, undefined,
+      'asking about one agent returns only that agent');
+
+    captureOutput = 'tail of the pane\n';
+    const captured = await api.captureAgent({ agent: 'claude', lines: 40, quiet: true });
+    assert.strictEqual(captured.ok, true);
+    assert.match(captured.text, /tail of the pane/);
+    // Capture asks the pane, not the cached presence, so it reports what is
+    // really on screen — but it still refuses outside a workspace.
+    const priorFolders = vscode.workspace.workspaceFolders;
+    vscode.workspace.workspaceFolders = undefined;
+    assert.strictEqual((await api.captureAgent({ agent: 'claude', quiet: true })).reason, 'no-workspace');
+    vscode.workspace.workspaceFolders = priorFolders;
+
+    // wait resolves on a status the agent ALREADY holds; the caller asked where
+    // it is, not for the next transition. (Submitting a prompt above moved it
+    // to working, which is exactly the state a real script would wait out.)
+    assert.strictEqual(api.agentState.claude.status, 'working', 'submitting marks the agent working');
+    api.setAgentStatus('claude', 'done');
+    // (Objects the extension builds live in the vm realm, so compare fields.)
+    const waited = await api.waitForAgent({ agent: 'claude', status: 'done', timeoutMs: 1000 });
+    assert.strictEqual(waited.ok, true);
+    assert.strictEqual(waited.agent, 'claude');
+    assert.strictEqual(waited.status, 'done');
+    const timedOut = await api.waitForAgent({ agent: 'claude', status: 'needs-input', timeoutMs: 1000 });
+    assert.strictEqual(timedOut.ok, false);
+    assert.strictEqual(timedOut.reason, 'timeout');
+  }
+
+  // ---- Shift+Enter is a newline, per agent ------------------------------------------------
+  // Measured in live panes, one candidate at a time: Claude, Codex and OpenCode
+  // read CSI-u; Hermes, pi and Antigravity read xterm modifyOtherKeys. There is
+  // no universal encoding, and the wrong one types visible garbage into the
+  // input box — so this table is data, not a guess.
+  assert.strictEqual(AGENTS.claude.modEnter, '\x1b[13;2u');
+  assert.strictEqual(AGENTS.codex.modEnter, '\x1b[13;2u');
+  assert.strictEqual(AGENTS.opencode.modEnter, '\x1b[13;2u');
+  assert.strictEqual(AGENTS.hermes.modEnter, '\x1b[27;2;13~');
+  assert.strictEqual(AGENTS.pi.modEnter, '\x1b[27;2;13~');
+  assert.strictEqual(AGENTS.antigravity.modEnter, '\x1b[27;2;13~');
+  {
+    const markup = provider.html({ asWebviewUri: (u) => u, cspSource: 'x:' });
+    const shipped = JSON.parse(/data-agents="([^"]*)"/.exec(markup)[1].replace(/&quot;/g, '"'));
+    const claude = shipped.find((a) => a.id === 'claude');
+    assert.strictEqual(claude.modEnter, '\x1b[13;2u', 'the sequence reaches the webview');
+    assert.ok(!/\x1b/.test(markup), 'and never as a raw control byte in the markup');
+  }
+  assert.match(webviewSource, /e\.shiftKey \? \(AGENT_META\[activeAgent\]\?\.modEnter \|\| '\\r'\)/,
+    'plain Enter still submits; only Shift+Enter consults the table');
+
+  // A free-mode agent writes the sequence as readable text, since JSON cannot
+  // hold the byte. Only escape sequences are accepted — never literal text that
+  // would simply be typed into the agent.
+  settings.set('customAgents', [
+    { id: 'kb1', command: 'x', modEnter: '\\x1b[13;2u' },
+    { id: 'kb2', command: 'x', modEnter: '\\e[27;2;13~' },
+    { id: 'kb3', command: 'x', modEnter: 'rm -rf /' },
+    { id: 'kb4', command: 'x' },
+  ]);
+  const kb = Object.fromEntries(customAgentSpecs().map((s) => [s.id, s]));
+  assert.strictEqual(kb.kb1.modEnter, '\x1b[13;2u', '\\xNN is decoded');
+  assert.strictEqual(kb.kb2.modEnter, '\x1b[27;2;13~', '\\e is decoded');
+  assert.strictEqual(kb.kb3.modEnter, '', 'a non-escape value is refused rather than typed');
+  assert.strictEqual(kb.kb4.modEnter, '', 'no value means Shift+Enter keeps submitting, as before');
+
+  // ---- per-agent tab identity --------------------------------------------------------------
+  assert.strictEqual(accentChannels('#d97757'), '217, 119, 87');
+  assert.strictEqual(accentChannels('nonsense'), '128, 128, 128', 'a bad colour degrades to grey');
+  assert.strictEqual(derivedAccent('build'), derivedAccent('build'), 'the same id always gets the same hue');
+  assert.notStrictEqual(derivedAccent('build'), derivedAccent('deploy'));
+  assert.match(derivedAccent('build'), /^#[0-9a-f]{6}$/);
+  assert.strictEqual(derivedMark('Build loop', 'build'), 'BU');
+  assert.strictEqual(derivedMark('', 'x9'), 'X9');
+  assert.strictEqual(kb.kb1.accent, derivedAccent('kb1'), 'a custom agent gets a derived accent');
+  assert.strictEqual(kb.kb1.mark, 'KB', 'and a mark from its label');
+  settings.set('customAgents', [{ id: 'kb5', command: 'x', label: 'Ship', accent: '#123456', mark: '⚓' }]);
+  const kb5 = customAgentSpecs()[0];
+  assert.strictEqual(kb5.accent, '#123456', 'both are overridable per entry');
+  assert.strictEqual(kb5.mark, '⚓');
+  settings.set('customAgents', []);
+
+  {
+    const markup = provider.html({ asWebviewUri: (u) => u, cspSource: 'x:' });
+    assert.match(markup, /--agent-accent: 217, 119, 87/, 'the accent travels as channels, for any alpha');
+    assert.match(markup, /class="agent-mark" aria-hidden="true">CC</, 'each tab carries its mark');
+    assert.match(markup, /class="agent-swatch"[^>]*--agent-accent: 16, 163, 127/,
+      'the launch menu leads with the same colour');
+    const css = fs.readFileSync(path.join(root, 'media/main.css'), 'utf8');
+    assert.match(css, /@container \(max-width: 78px\)/,
+      'the mark replaces the label once a tab is too narrow to say anything');
+    assert.match(css, /border-bottom: 2px solid rgba\(var\(--agent-accent/,
+      'the colour rides the underline the tab already had — no new horizontal space');
+  }
+
+  // ---- a failed launch names the real cause ----------------------------------------------
+  // "Cannot start Pi in tmux session tmux_pi_x" left the user to guess; the
+  // overwhelmingly common cause is that the CLI is simply not installed.
+  {
+    const failing = makeProvider();
+    let shown = '';
+    const priorError = vscode.window.showErrorMessage;
+    vscode.window.showErrorMessage = async (message) => { shown = message; return undefined; };
+    // The real method re-probes PATH; here the probe result is the fixture.
+    failing.runPreflight = async () => {};
+    try {
+      failing._preflight = { tmux: 'tmux 3.4', agents: byAgentIds(() => true) };
+      failing._preflight.agents.pi = false;
+      await failing.reportLaunchFailure('pi', 'tmux_pi_x');
+      assert.match(shown, /Pi is not on PATH/, 'a missing CLI is reported as a missing CLI');
+      assert.match(shown, /@earendil-works\/pi-coding-agent/, 'with the command that installs it');
+      failing._preflight.agents.pi = true;
+      await failing.reportLaunchFailure('pi', 'tmux_pi_x');
+      assert.match(shown, /Cannot start Pi in tmux session/,
+        'an installed CLI that still fails keeps the original message');
+    } finally {
+      vscode.window.showErrorMessage = priorError;
+    }
+  }
+
+  // ---- integrations are inspectable, not just removable ----------------------------------
+  {
+    const integrations = makeProvider();
+    const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'agentmux-int-'));
+    const priorXdg2 = process.env.XDG_CONFIG_HOME;
+    const priorPi2 = process.env.PI_CODING_AGENT_DIR;
+    process.env.XDG_CONFIG_HOME = path.join(fakeHome, 'config');
+    process.env.PI_CODING_AGENT_DIR = path.join(fakeHome, 'pi');
+    setStateHookDir(path.join(fakeHome, 'hooks'));
+    settings.set('stateHooks', true);
+    try {
+      const before = integrations.integrationCatalog();
+      const byId = Object.fromEntries(before.map((e) => [e.id, e]));
+      assert.strictEqual(byId['opencode-plugin'].state, 'not installed');
+      assert.strictEqual(byId['pi-extension'].state, 'not installed');
+      assert.strictEqual(byId['codex-hooks'].state, 'passed at launch',
+        'the Codex hooks are launch arguments, not a file, and say so');
+      assert.strictEqual(byId['codex-hooks'].file, null);
+
+      assert.strictEqual(byId['pi-extension'].install(), true);
+      assert.strictEqual(byId['opencode-plugin'].install(), true);
+      const after = Object.fromEntries(integrations.integrationCatalog().map((e) => [e.id, e]));
+      assert.strictEqual(after['pi-extension'].state, 'installed');
+      assert.strictEqual(after['opencode-plugin'].state, 'installed');
+
+      // A file left behind by an older AgentMux must read as stale, not as fine.
+      fs.writeFileSync(after['pi-extension'].file, '// an older version\n');
+      const stale = Object.fromEntries(integrations.integrationCatalog().map((e) => [e.id, e]));
+      assert.strictEqual(stale['pi-extension'].state, 'out of date',
+        'content is compared, so a stale integration is visible instead of silently wrong');
+      assert.strictEqual(stale['pi-extension'].install(), true);
+      assert.strictEqual(
+        integrations.integrationCatalog().find((e) => e.id === 'pi-extension').state, 'installed');
+
+      assert.strictEqual(after['pi-extension'].remove(), true);
+      assert.strictEqual(
+        integrations.integrationCatalog().find((e) => e.id === 'pi-extension').state, 'not installed');
+
+      settings.set('codexHooks', false);
+      assert.strictEqual(
+        integrations.integrationCatalog().find((e) => e.id === 'codex-hooks').state, 'off');
+      settings.set('codexHooks', true);
+    } finally {
+      if (priorXdg2 == null) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = priorXdg2;
+      if (priorPi2 == null) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = priorPi2;
+      setStateHookDir(null);
+      settings.set('stateHooks', false);
+      fs.rmSync(fakeHome, { recursive: true, force: true });
+    }
+  }
 
   console.log('All extension tests passed.');
 }

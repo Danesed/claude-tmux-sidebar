@@ -363,16 +363,36 @@ function workspaceFolder() {
 //     plain argsSetting (hook/plugin wiring); omitted = plain argsSetting.
 //   deleteConversation — how the resume list's delete button removes a past
 //     conversation; omitted = no delete button offered.
+//   modEnter           — the bytes this agent reads as "newline, do not submit"
+//     when you press Shift+Enter. There is NO universal encoding: measured in
+//     live panes, Codex speaks CSI-u (\x1b[13;2u) while Hermes, pi and
+//     Antigravity speak xterm modifyOtherKeys (\x1b[27;2;13~). Sending the wrong
+//     one types visible garbage into the input box, so an agent with no verified
+//     sequence keeps the plain carriage return it has always had.
+//   accent/mark        — the tab's identity: a product colour and a two-glyph
+//     mark. Six tabs in a narrow side bar ellipsize to "Cl…"/"Co…", which is no
+//     identity at all; the colour carries it in the space an underline already
+//     occupies, and the mark replaces the label once the tab is too narrow for
+//     one. Vendor colours where the product publishes one, otherwise a hue
+//     picked to stay distinct from the other five.
 const AGENTS = {
   claude: {
     label: 'Claude',
+    accent: '#d97757',
+    mark: 'CC',
+    modEnter: '\x1b[13;2u',
     command: 'claude',
     prefixSetting: 'sessionPrefix',
     defaultPrefix: 'tmux_claude_',
     argsSetting: 'claudeArgs',
     installCmd: 'npm install -g @anthropic-ai/claude-code',
     paneRe: /claude/i,
-    paneAliases: ['node'],
+    // 'node' was an alias here until 0.13.0. It made every Node process in the
+    // workspace read as Claude, so it is gone: an interpreter is resolved by
+    // the pane title instead (Claude Code puts the conversation summary there).
+    paneAliases: [],
+    paneVersionCommand: true, // some builds report their own version as the command
+    paneTitleRe: /claude/i,
     listSessions: (cwd) => listSessions(getProjectDir(cwd)),
     resumeById: (id, args) => `claude --resume ${shellQuote(id)}${args ? ' ' + args : ''}`,
     resumeLatest: null, // the extension's own picker covers Claude
@@ -383,6 +403,9 @@ const AGENTS = {
   },
   codex: {
     label: 'Codex',
+    accent: '#10a37f',
+    mark: 'CX',
+    modEnter: '\x1b[13;2u',
     command: 'codex',
     prefixSetting: 'codexSessionPrefix',
     defaultPrefix: 'tmux_codex_',
@@ -404,6 +427,9 @@ const AGENTS = {
   // resume overlay is populated by asking the CLI instead of reading transcripts.
   opencode: {
     label: 'OpenCode',
+    accent: '#4d8bf0',
+    mark: 'OC',
+    modEnter: '\x1b[13;2u',
     command: 'opencode',
     prefixSetting: 'opencodeSessionPrefix',
     defaultPrefix: 'tmux_opencode_',
@@ -411,6 +437,7 @@ const AGENTS = {
     installCmd: 'curl -fsSL https://opencode.ai/install | bash',
     paneRe: /(?:^|-)opencode(?:$|-)/i,
     paneAliases: [],
+    paneTitleRe: /opencode/i,
     listSessions: (cwd) => listOpencodeSessions(cwd),
     resumeById: (id, args) => `opencode --session ${shellQuote(id)}${args ? ' ' + args : ''}`,
     resumeLatest: (args) => `opencode --continue${args ? ' ' + args : ''}`,
@@ -426,11 +453,18 @@ const AGENTS = {
   // implied by args.
   hermes: {
     label: 'Hermes',
+    accent: '#d6689a',
+    mark: 'HR',
+    modEnter: '\x1b[27;2;13~',
     command: 'hermes',
     prefixSetting: 'hermesSessionPrefix',
     defaultPrefix: 'tmux_hermes_',
     argsSetting: 'hermesArgs',
     installCmd: 'curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash',
+    // Hermes runs as `python` and, measured in a live pane, leaves the tmux
+    // title at its default (the hostname) — so neither the command nor the
+    // title identifies it, and a Hermes started OUTSIDE AgentMux is still not
+    // adopted. Sessions AgentMux launches are unaffected: they carry a marker.
     paneRe: /(?:^|-)hermes(?:$|-)/i,
     paneAliases: [],
     listSessions: (cwd) => listHermesSessions(cwd),
@@ -442,12 +476,49 @@ const AGENTS = {
     resumeLatest: (args, cwd) => `hermes --continue${cwd ? ` --in ${shellQuote(cwd)}` : ''}${args ? ' ' + args : ''}`,
     deleteConversation: async (id, cwd) => (await runFile('hermes', ['sessions', 'delete', id, '--yes'], cwd, 15000)).ok,
   },
+  // pi (Earendil). Readable per-directory JSONL transcripts, so it gets a real
+  // resume list read from disk. Both resume paths are workspace-anchored by
+  // pi's own lookup order: --continue takes the most recent transcript in THIS
+  // directory's session dir, and --session resolves an id against the current
+  // project before falling back to a global search — and every id we offer
+  // comes from this project's dir, so the local match always wins.
+  pi: {
+    label: 'Pi',
+    accent: '#96bbb5',
+    mark: 'π',
+    modEnter: '\x1b[27;2;13~',
+    command: 'pi',
+    prefixSetting: 'piSessionPrefix',
+    defaultPrefix: 'tmux_pi_',
+    argsSetting: 'piArgs',
+    installCmd: 'npm install -g --ignore-scripts @earendil-works/pi-coding-agent',
+    // Verified in a live pane: pane_current_command really is "pi" (it is a
+    // bundled JS CLI but sets its own process title), so an externally started
+    // pi is adopted without aliasing a runtime name like "node".
+    paneRe: /(?:^|-)pi(?:$|-)/i,
+    paneAliases: [],
+    // Measured in a live pane: pi sets its tmux title to "π - <folder>", so on
+    // setups where it reports as `node` the product mark still identifies it.
+    paneTitleRe: /π/,
+    listSessions: (cwd) => listPiSessions(cwd),
+    resumeById: (id, args) => `pi --session ${shellQuote(id)}${args ? ' ' + args : ''}`,
+    resumeLatest: (args) => `pi --continue${args ? ' ' + args : ''}`,
+    launchArgs: piLaunchArgs,
+    deleteConversation: async (id, cwd) => {
+      const match = (await listPiSessions(cwd)).find((s) => s.id === id);
+      try { if (match?.file) { fs.unlinkSync(match.file); return true; } } catch { /* unreadable */ }
+      return false;
+    },
+  },
   // Google Antigravity. Its conversations live in a local database rather than
   // readable per-folder transcripts, so the resume overlay offers the CLI's own
   // --continue instead of an extension-side list; --conversation still resumes
   // a specific ID when one is known.
   antigravity: {
     label: 'Antigravity',
+    accent: '#8957e5',
+    mark: 'AG',
+    modEnter: '\x1b[27;2;13~',
     command: 'agy',
     prefixSetting: 'antigravitySessionPrefix',
     defaultPrefix: 'tmux_agy_',
@@ -484,8 +555,20 @@ const DETECTION_BASELINE = {
 };
 
 const AGENT_DETECTION = {
-  claude: { needsInput: [], working: ['esc to interrupt'] },
-  codex: { needsInput: ['allow command'], working: ['esc to interrupt'] },
+  // Claude's first-run folder-trust dialog defaults to "No, exit", so a pane
+  // sitting on it is genuinely blocked — and it appears before any hook can
+  // report state. Observed wording, taken from a live pane.
+  claude: {
+    needsInput: ['quick safety check', 'yes, i trust this folder'],
+    working: ['esc to interrupt'],
+  },
+  // "N hooks need review before they can run" is Codex's one-time trust prompt
+  // for the hook set AgentMux passes at launch: it genuinely is waiting for a
+  // keypress, and until it gets one the hooks stay inactive.
+  codex: {
+    needsInput: ['allow command', 'hooks? needs? review', 'press t to trust'],
+    working: ['esc to interrupt'],
+  },
   opencode: { needsInput: ['approve\\b', 'permission'], working: ['esc to interrupt'] },
   // Observed on first run: the workspace trust prompt and its menu footer.
   antigravity: { needsInput: ['do you trust', '↑/↓ navigate'], working: ['esc to interrupt'] },
@@ -495,6 +578,21 @@ const AGENT_DETECTION = {
   // does not depend on the status-bar glyphs (⏱ vs ⏲), which differ by a
   // single codepoint.
   hermes: { needsInput: [], working: ['msg=interrupt', 'ctrl\\+c cancel'] },
+  // Observed in a live pane: a running turn shows "Working... (escape to
+  // interrupt)", and every blocking picker — including the first-run "Trust
+  // project folder?" prompt — shows the select footer. The word "interrupt"
+  // alone is NOT usable: pi's startup banner prints "escape interrupt · …" and
+  // sits in the visible frame until the conversation scrolls it away, so the
+  // working rule requires the "Working..." label next to it.
+  // pi's own pickers are NOT extension UI, so the ui_prompt_start hook does not
+  // see them — these rules are what covers them. Two footers observed live: the
+  // first-run trust prompt ("↑↓ navigate  enter select  escape/ctrl+c cancel")
+  // and the built-in pickers ("Enter to select · Ctrl+S … · Esc to cancel");
+  // both disappear the moment the picker closes.
+  pi: {
+    needsInput: ['trust project folder', 'enter (?:to )?select'],
+    working: ['working\\.\\.\\..{0,24}interrupt'],
+  },
 };
 
 const detectionCache = new Map();
@@ -503,7 +601,9 @@ function detectionRules(agent) {
   const key = `${agent}\u0000${JSON.stringify(overrides[agent] || null)}`;
   const hit = detectionCache.get(agent);
   if (hit && hit.key === key) return hit.rules;
-  const own = AGENT_DETECTION[agent] || {};
+  // Built-in rules live in AGENT_DETECTION; a free-mode agent carries its own
+  // on its registry entry, so both kinds are overridable the same way.
+  const own = AGENT_DETECTION[agent] || AGENTS[agent]?.detection || {};
   const override = overrides[agent] || {};
   const compile = (patterns) => {
     const list = [];
@@ -538,6 +638,209 @@ function detectScreenState(agent, tail) {
   return { status: null, pattern: null };
 }
 
+// ---- free mode: agents declared in settings ---------------------------------
+// claudeTmux.customAgents adds entries to the registry above without a release.
+// Two shapes:
+//   { id, label, command, args }  — AgentMux launches and manages it exactly
+//       like a built-in agent: its own tab, tmux session, presence, status,
+//       input, handoffs, arbiter, cleanup.
+//   { id, label, session }        — FREE mode: the tab mirrors an EXISTING tmux
+//       session by name. AgentMux never creates it, never restarts it and never
+//       lists it for cleanup; it only mirrors it and types into it. That is why
+//       such a session is exempt from the workspace-root check every managed
+//       session must pass: you named it explicitly, so mirroring it is the
+//       point, and no destructive path can reach it anyway.
+const CUSTOM_ID_RE = /^[a-z][a-z0-9_-]{0,23}$/;
+const CUSTOM_AGENT_LIMIT = 12;
+
+// A free-mode agent has no product colour, so one is derived from its id: the
+// same id always gets the same hue, and the saturation/lightness are fixed so
+// it sits alongside the built-in palette instead of shouting over it.
+function derivedAccent(id) {
+  let hash = 0;
+  for (const ch of String(id)) hash = (Math.imul(hash, 31) + ch.charCodeAt(0)) >>> 0;
+  const hue = hash % 360;
+  const [s, l] = [0.42, 0.62];
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const x = c * (1 - Math.abs(((hue / 60) % 2) - 1));
+  const m = l - c / 2;
+  const [r, g, b] = hue < 60 ? [c, x, 0] : hue < 120 ? [x, c, 0] : hue < 180 ? [0, c, x]
+    : hue < 240 ? [0, x, c] : hue < 300 ? [x, 0, c] : [c, 0, x];
+  const hex = (v) => Math.round((v + m) * 255).toString(16).padStart(2, '0');
+  return `#${hex(r)}${hex(g)}${hex(b)}`;
+}
+
+// "#rrggbb" -> "r, g, b", so the stylesheet can build any alpha from one value.
+function accentChannels(hex) {
+  const match = /^#([0-9a-f]{6})$/i.exec(String(hex || ''));
+  if (!match) return '128, 128, 128';
+  const n = parseInt(match[1], 16);
+  return `${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}`;
+}
+
+// A settings string may spell the escape byte as "\\x1b", "\\u001b" or "\\e",
+// since JSON cannot hold the byte itself. Only those forms are decoded, and only
+// into an escape sequence — never into arbitrary text.
+function decodeEscapes(value) {
+  const text = String(value || '');
+  if (!text) return '';
+  const decoded = text
+    .replace(/\\e/g, '\x1b')
+    .replace(/\\x([0-9a-fA-F]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
+  // A sequence that is not an escape sequence would be typed as literal text.
+  return decoded.startsWith('\x1b') && decoded.length <= 32 ? decoded : '';
+}
+
+// Two glyphs at most: it stands in for the label when the tab is too narrow.
+function derivedMark(label, id) {
+  const letters = String(label || id).replace(/[^A-Za-z0-9]/g, '');
+  return (letters.slice(0, 2) || String(id).slice(0, 2)).toUpperCase();
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function safeRegExp(source, fallback) {
+  if (!source || typeof source !== 'string') return fallback;
+  try { return new RegExp(source, 'i'); } catch { return fallback; }
+}
+
+// Resume commands are templates: {id} expands to the shell-quoted conversation
+// id, {args} to the agent's configured launch arguments.
+function fillCommandTemplate(template, id, args) {
+  return String(template)
+    .replace(/\{id\}/g, id ? shellQuote(id) : '')
+    .replace(/\{args\}/g, args || '')
+    .trim();
+}
+
+// A tmux session name AgentMux can actually address. Names reach tmux as argv,
+// never through a shell, so this is not about quoting: it is about not building
+// an unaddressable target. ':' and '.' separate session:window.pane inside a
+// tmux target (tmux forbids them in session names for exactly that reason), and
+// whitespace cannot survive a control-mode command line.
+function validSessionName(value) {
+  const name = String(value || '').trim();
+  if (!name || name.length > 128) return '';
+  return /[:.\s]/.test(name) ? '' : name;
+}
+
+function customAgentSpecs() {
+  const raw = cfg().get('customAgents');
+  if (!Array.isArray(raw)) return [];
+  const specs = [];
+  const seen = new Set();
+  for (const entry of raw.slice(0, CUSTOM_AGENT_LIMIT)) {
+    if (!entry || typeof entry !== 'object') continue;
+    const id = String(entry.id || '').trim();
+    if (!CUSTOM_ID_RE.test(id) || seen.has(id) || AGENTS[id]) continue;
+    const command = String(entry.command || '').trim();
+    const attachSession = validSessionName(entry.session);
+    if (!command && !attachSession) continue; // nothing to launch, nothing to mirror
+    seen.add(id);
+    const args = String(entry.args || '').trim();
+    const prefix = String(entry.sessionPrefix || '').trim();
+    const detection = entry.detection && typeof entry.detection === 'object' ? entry.detection : null;
+    const resume = entry.resume && typeof entry.resume === 'object' ? entry.resume : {};
+    specs.push({
+      id,
+      custom: true,
+      label: String(entry.label || '').trim().slice(0, 24) || id,
+      accent: /^#[0-9a-fA-F]{6}$/.test(String(entry.accent || '')) ? entry.accent : derivedAccent(id),
+      mark: String(entry.mark || '').trim().slice(0, 2)
+        || derivedMark(entry.label, id),
+      // "\x1b[13;2u" style escapes are written as readable text in settings and
+      // decoded here; anything unrecognised leaves Shift+Enter as plain Enter.
+      modEnter: decodeEscapes(entry.modEnter),
+      command: command || null,
+      attachSession: attachSession || null,
+      prefixSetting: null, // custom agents carry their prefix inline
+      defaultPrefix: /^[A-Za-z0-9_.-]{1,32}$/.test(prefix) ? prefix : `tmux_${id}_`,
+      argsSetting: null,
+      installCmd: String(entry.installCmd || '').trim(),
+      paneRe: safeRegExp(
+        entry.pane,
+        new RegExp(`(?:^|-)${escapeRegExp(command ? path.basename(command.split(/\s+/)[0]) : id)}(?:$|-)`, 'i')
+      ),
+      paneAliases: [],
+      detection: detection ? {
+        needsInput: Array.isArray(detection.needsInput) ? detection.needsInput : undefined,
+        working: Array.isArray(detection.working) ? detection.working : undefined,
+      } : null,
+      listSessions: null,
+      resumeById: typeof resume.byId === 'string' && resume.byId.trim()
+        ? (id2, args2) => fillCommandTemplate(resume.byId, id2, args2) : null,
+      resumeLatest: typeof resume.latest === 'string' && resume.latest.trim()
+        ? (args2) => fillCommandTemplate(resume.latest, '', args2) : null,
+      launchArgs: () => args,
+    });
+  }
+  return specs;
+}
+
+// Registered once, at activation, so every roster-driven path sees free-mode
+// agents with no special case. Editing the setting needs a window reload, which
+// activate() offers when it notices the value changed.
+let registeredCustomAgents = '[]';
+
+function registerCustomAgents() {
+  registeredCustomAgents = JSON.stringify(cfg().get('customAgents') || []);
+  const specs = customAgentSpecs();
+  for (const spec of specs) {
+    if (AGENTS[spec.id]) continue; // never shadow a built-in agent
+    AGENTS[spec.id] = spec;
+    AGENT_IDS.push(spec.id);
+  }
+  return specs;
+}
+
+function customAgentsChanged() {
+  return JSON.stringify(cfg().get('customAgents') || []) !== registeredCustomAgents;
+}
+
+// Edit the roster in whichever scope already defines it, so a workspace-level
+// list is not silently shadowed by a user-level one (and vice versa).
+function customAgentsTarget() {
+  const inspected = cfg().inspect ? cfg().inspect('customAgents') : null;
+  if (inspected?.workspaceFolderValue) return vscode.ConfigurationTarget.WorkspaceFolder;
+  if (inspected?.workspaceValue) return vscode.ConfigurationTarget.Workspace;
+  return vscode.ConfigurationTarget.Global;
+}
+
+function customAgentsAt(target) {
+  const inspected = (cfg().inspect ? cfg().inspect('customAgents') : null) || {};
+  const value = target === vscode.ConfigurationTarget.WorkspaceFolder ? inspected.workspaceFolderValue
+    : target === vscode.ConfigurationTarget.Workspace ? inspected.workspaceValue
+      : inspected.globalValue;
+  return Array.isArray(value) ? value : [];
+}
+
+// A stable, valid id derived from the session name, unique against both the
+// built-in roster and the entries already in the list.
+function freeAgentId(session, existing = []) {
+  const base = String(session).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 20);
+  let candidate = /^[a-z]/.test(base) ? base : `s-${base}`;
+  candidate = candidate.slice(0, 24);
+  const taken = new Set([...Object.keys(AGENTS), ...existing.map((entry) => String(entry?.id || ''))]);
+  if (!taken.has(candidate) && CUSTOM_ID_RE.test(candidate)) return candidate;
+  for (let n = 2; n < 100; n++) {
+    const next = `${candidate.slice(0, 21)}-${n}`;
+    if (!taken.has(next) && CUSTOM_ID_RE.test(next)) return next;
+  }
+  return `s-${crypto.randomBytes(4).toString('hex')}`;
+}
+
+// Sessions a free-mode agent only mirrors. Nothing destructive may include them.
+function mirroredSessionNames() {
+  const names = new Set();
+  for (const agent of AGENT_IDS) {
+    if (AGENTS[agent].attachSession) names.add(AGENTS[agent].attachSession);
+  }
+  return names;
+}
+
 // Per-agent map built from the registry, so no call site has to know the roster.
 function byAgent(make) {
   const out = {};
@@ -566,9 +869,12 @@ function normalizedPath(value) {
 const SESSION_CACHE_TTL_MS = 3000;
 
 function baseSessionName(agent, cwd = workspaceFolder()) {
-  if (!cwd || !AGENTS[agent]) return '';
   const spec = AGENTS[agent];
-  const prefix = cfg().get(spec.prefixSetting) || spec.defaultPrefix;
+  if (!spec) return '';
+  // A free-mode agent mirrors one existing session, under its real name.
+  if (spec.attachSession) return spec.attachSession;
+  if (!cwd) return '';
+  const prefix = (spec.prefixSetting ? cfg().get(spec.prefixSetting) : '') || spec.defaultPrefix;
   return prefix + path.basename(cwd).replace(/[:.]/g, '_');
 }
 
@@ -583,9 +889,26 @@ async function sessionName(agent) {
   const cwd = workspaceFolder();
   const base = baseSessionName(agent, cwd);
   if (!base) return '';
+  // A mirrored session's name is the user's, not ours to disambiguate.
+  if (AGENTS[agent]?.attachSession) return base;
   const found = await tmux(['display-message', '-p', '-t', tmuxPaneTarget(base), '#{session_path}']);
-  if (!found.ok || normalizedPath(found.out.trim()) === normalizedPath(cwd)) return base;
-  return `${base}-${pathHash(cwd)}`;
+  // tmux 3.4 answers a missing '=name:' target with exit 0 and an EMPTY line
+  // rather than an error, so "not ok" is not the only way to say "no such
+  // session". Without treating empty as absent, every brand-new session was
+  // named <base>-<hash> — the disambiguation for a name another project already
+  // owns — even when the plain name was free.
+  const hashed = `${base}-${pathHash(cwd)}`;
+  const owner = found.ok ? found.out.trim() : '';
+  if (owner) return normalizedPath(owner) === normalizedPath(cwd) ? base : hashed;
+  // Nothing holds the plain name. Before claiming it, adopt a hashed session
+  // that already belongs to this workspace: on a tmux affected by the bug above
+  // every session was named that way, and starting a second one under the clean
+  // name would orphan the agent the user is actually running. One extra probe,
+  // and only on the path where no agent answers to the plain name anyway.
+  const legacy = await tmux(['display-message', '-p', '-t', tmuxPaneTarget(hashed), '#{session_path}']);
+  const legacyOwner = legacy.ok ? legacy.out.trim() : '';
+  if (legacyOwner && normalizedPath(legacyOwner) === normalizedPath(cwd)) return hashed;
+  return base;
 }
 
 async function sessionBelongsToWorkspace(name) {
@@ -785,16 +1108,33 @@ function findingsPrompt(source, target, id, details = '') {
 // frame-diff heuristic becomes a fallback instead of the only signal.
 let stateHookDir = null; // set in activate() from globalStorageUri
 
+function setStateHookDir(dir) {
+  stateHookDir = dir || null;
+}
+
+// One script serves every hook of both CLIs. $1 is the state to stamp, or the
+// literal "register", which records the conversation id WITHOUT touching the
+// state — a session that has just started is not "finished", and stamping done
+// there would raise a completion badge on an agent that has done nothing.
 const STATE_HOOK_SCRIPT = `#!/bin/sh
 # AgentMux: stamp agent state into tmux pane options. Generated file - do not edit.
 [ -n "$TMUX_PANE" ] || exit 0
 state="$1"
 tool=""
-if [ "$state" = "working" ] && [ ! -t 0 ]; then
-  tool=$(head -c 2000 2>/dev/null | sed -n 's/.*"tool_name"[[:space:]]*:[[:space:]]*"\\([^"]\\{1,40\\}\\)".*/\\1/p' | head -n 1)
+session=""
+# Claude and Codex both deliver the hook payload as JSON on stdin. Read it ONCE
+# (bounded) and pull both fields from the copy: a second read would find the
+# pipe already drained. A hook with no payload simply leaves them empty.
+if [ ! -t 0 ]; then
+  payload=$(head -c 4000 2>/dev/null)
+  tool=$(printf '%s' "$payload" | sed -n 's/.*"tool_name"[[:space:]]*:[[:space:]]*"\\([^"]\\{1,40\\}\\)".*/\\1/p' | head -n 1)
+  session=$(printf '%s' "$payload" | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\\([^"]\\{1,64\\}\\)".*/\\1/p' | head -n 1)
 fi
-tmux set-option -p -t "$TMUX_PANE" @agentmux_state "$state" 2>/dev/null
-tmux set-option -p -t "$TMUX_PANE" @agentmux_tool "$tool" 2>/dev/null
+[ -n "$session" ] && tmux set-option -p -t "$TMUX_PANE" @agentmux_session_id "$session" 2>/dev/null
+if [ "$state" != "register" ]; then
+  tmux set-option -p -t "$TMUX_PANE" @agentmux_state "$state" 2>/dev/null
+  tmux set-option -p -t "$TMUX_PANE" @agentmux_tool "$tool" 2>/dev/null
+fi
 exit 0
 `;
 
@@ -816,10 +1156,59 @@ async function run(args) {
   } catch { /* no tmux here: AgentMux falls back to screen detection */ }
 }
 
-async function stamp(state, tool) {
-  if (!PANE || !OWNED) return;
-  await run(['set-option', '-p', '-t', PANE, '@agentmux_state', state]);
-  await run(['set-option', '-p', '-t', PANE, '@agentmux_tool', tool || '']);
+// Writes are serialized: each one is its own tmux process, and an out-of-order
+// pair would leave the tab showing the older state.
+let writes = Promise.resolve();
+let reportedState = '';
+let reportedTool = '';
+
+function write(state, tool) {
+  writes = writes.then(async () => {
+    await run(['set-option', '-p', '-t', PANE, '@agentmux_state', state]);
+    await run(['set-option', '-p', '-t', PANE, '@agentmux_tool', tool || '']);
+  }, () => {});
+  return writes;
+}
+
+// opencode runs subagents as CHILD SESSIONS that emit their own idle events, so
+// reporting the first idle would mark the whole pane done while the parent is
+// still working. Every session's status is tracked and only the AGGREGATE is
+// reported: anything waiting wins, then anything working, otherwise done.
+const statusBySession = new Map();
+const acceptWorking = new Map();
+const deletedSessions = new Set();
+let lastTool = '';
+
+function aggregate() {
+  const all = [...statusBySession.values()];
+  if (all.includes('needs-input')) return 'needs-input';
+  if (all.includes('working')) return 'working';
+  return 'done';
+}
+
+async function report(tool) {
+  if (tool !== undefined) lastTool = tool;
+  const state = aggregate();
+  const nextTool = state === 'working' ? lastTool : '';
+  if (state === reportedState && nextTool === reportedTool) return;
+  reportedState = state;
+  reportedTool = nextTool;
+  await write(state, nextTool);
+}
+
+async function setStatus(id, status, tool) {
+  if (!PANE || !OWNED || !id || deletedSessions.has(id)) return;
+  const previous = statusBySession.get(id);
+  // A 'done' for a session that was never seen working is noise, not an edge.
+  if (status === 'done' && previous === undefined) return;
+  // opencode can emit a trailing stale 'busy' AFTER the 'idle' that closed a
+  // turn. Ignore it; the next user message re-arms this session below.
+  if (status === 'working' && acceptWorking.get(id) === false) return;
+  if (previous !== status) {
+    statusBySession.set(id, status);
+    acceptWorking.set(id, status !== 'done');
+  }
+  await report(tool);
 }
 
 async function stampSession(id) {
@@ -835,14 +1224,35 @@ function pickSessionId(p) {
 
 async function onEvent(type, properties) {
   if (!type) return;
-  if (type === 'session.created') return stampSession(pickSessionId(properties));
-  if (type === 'permission.asked') return stamp('needs-input', '');
-  if (type === 'session.idle' || type === 'session.error') return stamp('done', '');
-  if (type === 'tool.execute.before') {
-    const props = properties || {};
-    return stamp('working', String(props.tool || props.name || '').slice(0, 40));
+  const props = properties || {};
+  const id = pickSessionId(props);
+  if (type === 'session.created') return stampSession(id);
+  if (type === 'session.deleted') {
+    const gone = pickSessionId(props) || (props.info && props.info.id);
+    if (!gone) return;
+    deletedSessions.add(gone);
+    acceptWorking.delete(gone);
+    if (statusBySession.delete(gone)) await report();
+    return;
   }
-  if (type === 'message.updated' || type === 'message.part.updated') return stamp('working', '');
+  if (type === 'permission.asked' || type === 'question.asked') return setStatus(id, 'needs-input', '');
+  if (type === 'permission.replied' || type === 'question.replied') return setStatus(id, 'working');
+  if (type === 'session.idle' || type === 'session.error') return setStatus(id, 'done', '');
+  if (type === 'session.status') {
+    const kind = (props.status && props.status.type) || props.status || '';
+    if (kind === 'busy') return setStatus(id, 'working');
+    if (kind === 'idle') return setStatus(id, 'done', '');
+    return;
+  }
+  if (type === 'tool.execute.before') {
+    return setStatus(id, 'working', String(props.tool || props.name || '').slice(0, 40));
+  }
+  if (type === 'message.updated' || type === 'message.part.updated') {
+    // A new user message re-arms a session that had gone quiet.
+    const role = (props.info && props.info.role) || props.role || '';
+    if (role === 'user' && id) acceptWorking.set(id, true);
+    return setStatus(id, 'working');
+  }
 }
 
 export const AgentMuxState = async () => ({
@@ -853,9 +1263,14 @@ export const AgentMuxState = async () => ({
     await onEvent(payload.type, payload.properties || payload);
   },
   'session.created': async (i) => onEvent('session.created', (i && i.properties) || i),
+  'session.deleted': async (i) => onEvent('session.deleted', (i && i.properties) || i),
   'session.idle': async (i) => onEvent('session.idle', (i && i.properties) || i),
   'session.error': async (i) => onEvent('session.error', (i && i.properties) || i),
+  'session.status': async (i) => onEvent('session.status', (i && i.properties) || i),
   'permission.asked': async (i) => onEvent('permission.asked', (i && i.properties) || i),
+  'permission.replied': async (i) => onEvent('permission.replied', (i && i.properties) || i),
+  'question.asked': async (i) => onEvent('question.asked', (i && i.properties) || i),
+  'question.replied': async (i) => onEvent('question.replied', (i && i.properties) || i),
   'message.updated': async (i) => onEvent('message.updated', (i && i.properties) || i),
   'tool.execute.before': async (i) => onEvent('tool.execute.before', (i && i.properties) || i),
 });
@@ -884,6 +1299,101 @@ function ensureOpencodePlugin() {
 function removeOpencodePlugin() {
   try {
     fs.unlinkSync(opencodePluginPath());
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function expandHome(value) {
+  const text = String(value || '');
+  if (text === '~') return process.env.HOME || '';
+  if (text.startsWith('~/')) return path.join(process.env.HOME || '', text.slice(2));
+  return text;
+}
+
+// pi's config root, honouring the CLI's own PI_CODING_AGENT_DIR override
+// (verified in its config.js: getAgentDir()).
+function piAgentDir() {
+  const env = (process.env.PI_CODING_AGENT_DIR || '').trim();
+  return env ? expandHome(env) : path.join(process.env.HOME || '', '.pi', 'agent');
+}
+
+// pi has no hook flag either, but it auto-discovers extensions from
+// ~/.pi/agent/extensions/*.ts and its event set is the richest of any agent
+// here: agent_settled is documented as the event "status integrations" should
+// use, and ui_prompt_start/end mark exactly the spans where pi is blocked on
+// the user. Same containment as the OpenCode plugin: the factory returns
+// immediately unless AGENTMUX=1, so a pi you start yourself never touches tmux.
+// Loaded through jiti, so this file may be plain JS in a .ts extension.
+const PI_EXTENSION = `// AgentMux: report pi lifecycle state into tmux pane options.
+// Generated file - do not edit. Remove it with the AgentMux
+// "Remove agent integrations" command, or just delete this file.
+import { execFile } from "node:child_process";
+
+const PANE = process.env.TMUX_PANE || "";
+const OWNED = process.env.AGENTMUX === "1";
+
+function run(args) {
+  return new Promise((resolve) => {
+    try { execFile("tmux", args, () => resolve()); }
+    catch { resolve(); } // no tmux here: AgentMux falls back to screen detection
+  });
+}
+
+async function stamp(state, tool) {
+  await run(["set-option", "-p", "-t", PANE, "@agentmux_state", state]);
+  await run(["set-option", "-p", "-t", PANE, "@agentmux_tool", tool || ""]);
+}
+
+export default function (pi) {
+  if (!PANE || !OWNED) return;
+  // What pi goes back to once a blocking prompt closes, so a /model picker
+  // opened mid-run does not leave the tab reading "waiting for input".
+  let resting = "done";
+  pi.on("session_start", async (_event, ctx) => {
+    const id = ctx && ctx.sessionManager && ctx.sessionManager.getSessionId
+      ? ctx.sessionManager.getSessionId() : "";
+    if (id) await run(["set-option", "-p", "-t", PANE, "@agentmux_session_id", String(id)]);
+    resting = "done";
+    await stamp("done", "");
+  });
+  pi.on("agent_start", async () => { resting = "working"; await stamp("working", ""); });
+  pi.on("tool_execution_start", async (event) => {
+    resting = "working";
+    await stamp("working", String((event && event.toolName) || "").slice(0, 40));
+  });
+  pi.on("tool_execution_end", async () => {
+    if (resting === "working") await stamp("working", "");
+  });
+  // agent_settled, not agent_end: after a run ends pi may still auto-retry,
+  // auto-compact or drain queued messages, and only "settled" means it stopped.
+  pi.on("agent_settled", async () => { resting = "done"; await stamp("done", ""); });
+  pi.on("ui_prompt_start", async () => { await stamp("needs-input", ""); });
+  pi.on("ui_prompt_end", async () => { await stamp(resting, ""); });
+}
+`;
+
+function piExtensionPath() {
+  return path.join(piAgentDir(), 'extensions', 'agentmux-state.ts');
+}
+
+function ensurePiExtension() {
+  if (cfg().get('stateHooks') === false) return false;
+  try {
+    const file = piExtensionPath();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const current = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+    if (current !== PI_EXTENSION) fs.writeFileSync(file, PI_EXTENSION);
+    return true;
+  } catch {
+    return false; // read-only config dir: state stays heuristic
+  }
+}
+
+function removePiExtension() {
+  try {
+    fs.unlinkSync(piExtensionPath());
     return true;
   } catch {
     return false;
@@ -940,6 +1450,47 @@ const CODEX_CLAUDE_RULES = [
   'Re-read the relevant .claude Markdown files when they change.',
 ].join(' ');
 
+// A TOML basic string, for values that travel inside a `-c key=<toml>` override.
+function tomlString(value) {
+  return `"${String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
+// Codex 0.147+ ships a Claude-shaped lifecycle hook system. Verified against
+// the CLI itself: the events are PreToolUse, PermissionRequest, PostToolUse,
+// PreCompact, PostCompact, SessionStart, SessionEnd, UserPromptSubmit,
+// SubagentStart, SubagentStop and Stop, and `codex exec` prints "hook: <Event>"
+// as each one runs. This replaces the notify program as Codex's state source:
+// notify could only ever say `done`, so `working` and `needs-input` were left
+// to the screen heuristics. PermissionRequest in particular is real approval
+// detection instead of a guess at a prompt's wording.
+//
+// They are passed per launch with -c, never written into the user's
+// config.toml — the same containment as the notify program before them.
+//
+// Codex asks ONCE to trust a hook command set, recording a sha256 in
+// config.toml (`[hooks.state]`); until then the pane shows "N hooks need review
+// before they can run" and they stay inactive. The command strings below are
+// stable, so that question is asked once per machine — but changing this list
+// changes the hashes, so a future edit here costs the user one more `t`.
+// notify is kept alongside: if the trust prompt is declined, `done` still works.
+const CODEX_HOOKS = [
+  // register: record the conversation id without claiming the session finished.
+  { event: 'SessionStart', state: 'register', matcher: 'startup|resume|clear' },
+  { event: 'UserPromptSubmit', state: 'working', matcher: null },
+  { event: 'PreToolUse', state: 'working', matcher: '*' },
+  { event: 'PostToolUse', state: 'working', matcher: '*' },
+  { event: 'PermissionRequest', state: 'needs-input', matcher: '*' },
+  { event: 'Stop', state: 'done', matcher: null },
+];
+
+function codexHookArgs(script) {
+  return CODEX_HOOKS.map(({ event, state, matcher }) => {
+    const hook = `{type="command",command=${tomlString(`${shellQuote(script)} ${state}`)}}`;
+    const group = matcher ? `{matcher=${tomlString(matcher)},hooks=[${hook}]}` : `{hooks=[${hook}]}`;
+    return `-c ${shellQuote(`hooks.${event}=[${group}]`)}`;
+  });
+}
+
 function codexLaunchArgs() {
   const configured = (cfg().get('codexArgs') || '').trim();
   const parts = configured ? [configured] : [];
@@ -954,7 +1505,14 @@ function codexLaunchArgs() {
   }
   if (cfg().get('stateHooks') !== false && !/notify\s*=/.test(configured)) {
     const paths = ensureStateHookAssets();
-    if (paths) parts.push(`-c ${shellQuote(`notify=${JSON.stringify([paths.script, 'done'])}`)}`);
+    if (paths) {
+      parts.push(`-c ${shellQuote(`notify=${JSON.stringify([paths.script, 'done'])}`)}`);
+      // An explicit hooks override in codexArgs wins outright: never fight the
+      // user's own hook configuration.
+      if (cfg().get('codexHooks') !== false && !/(?:^|\s)-c\s+\S*hooks\./.test(configured)) {
+        parts.push(...codexHookArgs(paths.script));
+      }
+    }
   }
   return parts.join(' ');
 }
@@ -977,6 +1535,12 @@ function opencodeLaunchArgs() {
   return (cfg().get('opencodeArgs') || '').trim();
 }
 
+// Same shape for pi, whose integration is an extension file.
+function piLaunchArgs() {
+  if (cfg().get('stateHooks') !== false) ensurePiExtension();
+  return (cfg().get('piArgs') || '').trim();
+}
+
 function launchArgs(agent) {
   const spec = AGENTS[agent];
   if (!spec) return '';
@@ -986,14 +1550,59 @@ function launchArgs(agent) {
   return (cfg().get(spec.argsSetting) || '').trim();
 }
 
+// tmux reports a pane's FOREGROUND PROCESS, which for several agents is not the
+// agent: a Node CLI shows up as `node`, Hermes as `python`, and some Claude Code
+// builds report their own version string as the command. Treating an
+// interpreter name as an agent would claim every node/python process running in
+// the workspace — `npm run dev` would appear as an agent tab AgentMux types
+// into — so interpreters count as UNIDENTIFIED and only the pane title, which a
+// TUI sets deliberately, is allowed to resolve them.
+const GENERIC_INTERPRETERS = new Set(['node', 'python', 'python3', 'bun', 'deno', 'ruby']);
+
+// A bare dotted version ("2.1.118") is never a real command name.
+function looksLikeVersionString(value) {
+  return /^\d+(?:\.\d+){1,3}$/.test(value);
+}
+
 // Does a pane already running something look like this agent, even though we
 // did not launch it (so it carries no @claude_tmux_agent marker)?
-function paneLooksLikeAgent(agent, command) {
+function paneLooksLikeAgent(agent, command, title = '') {
   const spec = AGENTS[agent];
   if (!spec) return false;
   const base = path.basename(command || '');
-  return spec.paneRe.test(base) || (spec.paneAliases || []).includes(base);
+  if (!base) return false;
+  if (spec.paneRe.test(base) || (spec.paneAliases || []).includes(base)) return true;
+  if (spec.paneVersionCommand && looksLikeVersionString(base)) return true;
+  if (!GENERIC_INTERPRETERS.has(base.toLowerCase())) return false;
+  return !!(spec.paneTitleRe && title && spec.paneTitleRe.test(title));
 }
+
+// Everything that must match for "this is still the exact process I validated":
+// the session's creation stamp, the launch generation AgentMux stamped on it,
+// the pane's shell pid and the tmux server's. A handoff briefing must never be
+// pasted into a pane that merely reuses the name — session_created has
+// one-second resolution and an adopted agent carries no generation at all, so
+// neither is sufficient on its own.
+function paneIdentity(info) {
+  return [info?.created || '', info?.generation || '', info?.panePid || '', info?.serverPid || ''].join(':');
+}
+
+// Does a live pane still match what a handoff pinned? Transactions pinned
+// before 0.13.0 — one rehydrated from an older ledger — recorded only the
+// created/generation pair, so they are compared against what they actually
+// have rather than being reported stale on sight.
+function identityMatches(info, pinned) {
+  if (!info || !pinned) return false;
+  if (pinned.targetIdentity) return paneIdentity(info) === pinned.targetIdentity;
+  return info.created === pinned.targetCreated && info.generation === pinned.targetGeneration;
+}
+
+// A title-derived identity is sticky. The title that revealed it drifts —
+// Claude rewrites it with the conversation summary as work goes on — and losing
+// the classification would make an adopted agent vanish from the side bar
+// mid-session. Keyed by the session's tmux identity, and dropped the moment the
+// pane falls back to a shell (the agent exited).
+const paneIdentityCache = new Map();
 
 function isShellCommand(command) {
   return /^(?:ba|da|fi|k|tc|z)?sh$|^(?:fish|nu|pwsh|powershell)$/.test(path.basename(command || ''));
@@ -1002,14 +1611,30 @@ function isShellCommand(command) {
 async function agentSessionInfo(agent, name) {
   const result = await tmux([
     'display-message', '-p', '-t', tmuxPaneTarget(name),
-    '#{session_path}\t#{@claude_tmux_agent}\t#{@claude_tmux_running}\t#{pane_current_command}\t#{session_created}\t#{@claude_tmux_generation}\t#{@agentmux_state}\t#{@agentmux_tool}\t#{@agentmux_session_id}',
+    '#{session_path}\t#{@claude_tmux_agent}\t#{@claude_tmux_running}\t#{pane_current_command}\t#{session_created}\t#{@claude_tmux_generation}\t#{@agentmux_state}\t#{@agentmux_tool}\t#{@agentmux_session_id}\t#{pane_pid}\t#{pid}\t#{pane_title}',
   ]);
   if (!result.ok) return { exists: false, ready: false };
-  const [sessionPath, marker, running, command = '', created = '', generation = '', hookState = '', hookTool = '', hookSessionId = '']
-    = result.out.replace(/\r?\n$/, '').split('\t');
-  if (normalizedPath(sessionPath) !== normalizedPath(workspaceFolder())) return { exists: false, ready: false };
+  const fields = result.out.replace(/\r?\n$/, '').split('\t');
+  const [sessionPath, marker, running, command = '', created = '', generation = '',
+    hookState = '', hookTool = '', hookSessionId = '', panePid = '', serverPid = ''] = fields;
+  // The title is last so a tab inside it cannot shift any other field.
+  const title = fields.slice(11).join('\t');
   const shell = isShellCommand(command);
-  const base = { shell, command, created, generation, hookState, hookTool, hookSessionId };
+  // panePid is the pane's shell process and serverPid the tmux server's, so the
+  // pair distinguishes "this is the same pane I validated" from "a pane that
+  // reuses its name after a recreate or a tmux server restart". session_created
+  // alone cannot: it has one-second resolution.
+  const base = { shell, command, created, generation, hookState, hookTool, hookSessionId, panePid, serverPid, title };
+  // Free mode: the user named this session explicitly, so mirroring it is the
+  // whole point and it is not bound to the workspace root the way a managed
+  // session is. Whatever runs in it — agent or plain shell — is ready to
+  // mirror. Nothing destructive can reach it: creation, restart, kill-pick and
+  // cleanup all exclude mirrored sessions.
+  // An empty session_path means the target does not exist: tmux 3.4 answers a
+  // missing '=name:' target with exit 0 and an empty line, not an error.
+  if (!sessionPath) return { exists: false, ready: false };
+  if (AGENTS[agent]?.attachSession) return { exists: true, ready: true, ...base };
+  if (normalizedPath(sessionPath) !== normalizedPath(workspaceFolder())) return { exists: false, ready: false };
   if (marker === agent) {
     if (running === 'starting' && !shell) {
       await tmux(['set-option', '-p', '-t', tmuxPaneTarget(name), '@claude_tmux_running', '1']);
@@ -1019,7 +1644,14 @@ async function agentSessionInfo(agent, name) {
   }
   // A pane already claimed by another agent must never read as this one.
   const claimedByOther = marker && AGENTS[marker] && marker !== agent;
-  const direct = !claimedByOther && paneLooksLikeAgent(agent, command);
+  const identityKey = [serverPid, name, created, panePid].join(":");
+  if (shell) paneIdentityCache.delete(identityKey); // the agent exited
+  let direct = false;
+  if (!claimedByOther) {
+    direct = paneLooksLikeAgent(agent, command, title);
+    if (direct) paneIdentityCache.set(identityKey, agent);
+    else if (!shell && paneIdentityCache.get(identityKey) === agent) direct = true;
+  }
   return { exists: true, ready: direct, ...base };
 }
 
@@ -1187,6 +1819,139 @@ async function listHermesSessions(cwd) {
   }
   sessions.sort((a, b) => (b.lastTs || '').localeCompare(a.lastTs || ''));
   return sessions;
+}
+
+// pi keeps readable per-directory JSONL transcripts, so its resume list is read
+// straight off disk like Claude's. Layout and encoding verified in the CLI's
+// own core/session-manager.js:
+//   <agent dir>/sessions/--<cwd>--/<timestamp>_<uuid>.jsonl
+// where <cwd> is the absolute path with its leading separator stripped and
+// every '/', '\' and ':' replaced by '-'.
+function piSessionDir(cwd) {
+  const encoded = `--${path.resolve(cwd).replace(/^[/\\]/, '').replace(/[/\\:]/g, '-')}--`;
+  return path.join(piAgentDir(), 'sessions', encoded);
+}
+
+// First line is the {type:"session"} header (id, timestamp, cwd); a later
+// {type:"session_info"} carries the latest /name, and the first user message is
+// the fallback title.
+function piSessionFromLines(lines) {
+  let name = null;
+  let firstUserMsg = null;
+  for (const line of lines) {
+    if (!line) continue;
+    let obj;
+    try { obj = JSON.parse(line); } catch { continue; } // chunk-truncated line
+    if (obj.type === 'session_info') {
+      name = String(obj.name || '').trim() || null;
+      continue;
+    }
+    if (firstUserMsg || obj.type !== 'message') continue;
+    const message = obj.message;
+    if (!message || message.role !== 'user') continue;
+    const content = message.content;
+    const text = Array.isArray(content)
+      ? content.filter((b) => b && b.type === 'text').map((b) => b.text || '').join(' ')
+      : (typeof content === 'string' ? content : '');
+    if (text.trim().length > 5) firstUserMsg = text.trim().slice(0, 80);
+  }
+  return { name, firstUserMsg };
+}
+
+async function listPiSessions(cwd) {
+  if (!cwd) return [];
+  const dir = piSessionDir(cwd);
+  if (!fs.existsSync(dir)) return [];
+  const wanted = normalizedPath(cwd);
+  const files = [];
+  try {
+    for (const f of fs.readdirSync(dir)) {
+      if (!f.endsWith('.jsonl')) continue;
+      const full = path.join(dir, f);
+      try { files.push([fs.statSync(full).mtimeMs, full]); } catch { /* raced */ }
+    }
+  } catch { return []; }
+  files.sort((a, b) => b[0] - a[0]);
+  const sessions = [];
+  for (const [mtime, full] of files.slice(0, 40)) {
+    try {
+      const stat = fs.statSync(full);
+      let lines;
+      if (stat.size <= SESSION_LIST_HEAD_BYTES + SESSION_LIST_TAIL_BYTES) {
+        lines = fs.readFileSync(full, 'utf8').split('\n');
+      } else {
+        const head = readFileChunk(full, 0, SESSION_LIST_HEAD_BYTES);
+        const tail = readFileChunk(full, stat.size - SESSION_LIST_TAIL_BYTES, SESSION_LIST_TAIL_BYTES);
+        lines = head.slice(0, head.lastIndexOf('\n')).split('\n')
+          .concat(tail.slice(tail.indexOf('\n') + 1).split('\n'));
+      }
+      const header = JSON.parse(lines[0]);
+      if (header?.type !== 'session' || !header.id) continue;
+      // Belt and braces on top of the already per-directory listing: a resumed
+      // pi session adopts the cwd recorded in its own header (verified in the
+      // CLI's main.js), so a transcript recorded elsewhere must never be
+      // offered — resuming it would move the agent out of this project.
+      if (header.cwd && normalizedPath(header.cwd) !== wanted) continue;
+      const { name, firstUserMsg } = piSessionFromLines(lines.slice(1));
+      sessions.push({
+        id: String(header.id),
+        name: name || firstUserMsg || String(header.id),
+        lastTs: new Date(mtime).toISOString(),
+        // Host-side only (pushSessions forwards id/name/lastTs); the delete
+        // path needs the transcript it came from.
+        file: full,
+      });
+    } catch { /* skip unreadable or malformed transcript */ }
+  }
+  return sessions;
+}
+
+// ---- per-project Hermes profiles --------------------------------------------
+// Every workspace runs Hermes in its own profile (~/.hermes/profiles/<slug>):
+// separate config, memory, skills, cron, plugins and session DB, so two open
+// projects never leak knowledge into each other. Profile routing is HERMES_HOME
+// pointing at the profile dir (verified in hermes_cli/config.py — HERMES_PROFILE
+// alone is only a kanban author label); HERMES_PROFILE is set too, so kanban
+// items authored inside the pane are attributed to the project.
+const HERMES_RESERVED_SLUGS = new Set(['hermes', 'test', 'tmp', 'root', 'sudo']);
+function hermesProfileSlug(cwd) {
+  const base = String(cwd ? path.basename(cwd) : '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64);
+  let slug = base || 'workspace';
+  if (!/^[a-z0-9]/.test(slug)) slug = `p-${slug}`;
+  if (HERMES_RESERVED_SLUGS.has(slug)) slug = `${slug}-ws`;
+  return slug;
+}
+
+function hermesProfileHome(slug) {
+  const root = process.env.HERMES_HOME || path.join(process.env.HOME || '', '.hermes');
+  return path.join(root, 'profiles', slug);
+}
+
+// Create the profile on first launch for a slug (cloning config, .env, SOUL.md
+// and skills from the active profile); reuse it afterwards. Never touches the
+// sticky default — no `hermes profile use`. Failure degrades to running the
+// session on the default profile rather than blocking the launch.
+async function ensureHermesProfile(slug) {
+  if (!slug) return false;
+  const home = hermesProfileHome(slug);
+  if (fs.existsSync(path.join(home, 'config.yaml'))) return true;
+  const created = await runFile('hermes', ['profile', 'create', slug, '--clone'], workspaceFolder(), 30000);
+  return created.ok || fs.existsSync(path.join(home, 'config.yaml'));
+}
+
+// Env prefix for the launch command line: empty for every agent except hermes,
+// which gets HERMES_HOME=<profile dir> HERMES_PROFILE=<slug>.
+async function launchEnvPrefix(agent) {
+  if (agent !== 'hermes') return '';
+  const cwd = workspaceFolder();
+  if (!cwd) return '';
+  const slug = hermesProfileSlug(cwd);
+  if (!(await ensureHermesProfile(slug))) return '';
+  return `HERMES_HOME=${shellQuote(hermesProfileHome(slug))} HERMES_PROFILE=${slug} `;
 }
 
 // Codex rollouts live at ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl; the
@@ -1549,6 +2314,7 @@ class ClaudeTmuxView {
     this._statusItem = null;
     this.arbiter = null;
     this.lastCompletedHandoff = null;
+    this.focusHistory = [];   // most recently focused agents first, for the toggle
     this._presenceRunning = false;
     this._presenceHiddenSkips = 0;
     this._resizeRunning = false;
@@ -1576,6 +2342,7 @@ class ClaudeTmuxView {
       lastName: '',
       backgroundPollAt: 0,
       attention: null,
+      paneTitle: '',           // what the TUI wrote there (Claude: the conversation summary)
       promptLine: '',          // reconstructed prompt for Alt+Up recall (null = bailed)
     };
   }
@@ -1657,6 +2424,9 @@ class ClaudeTmuxView {
         telemetry: state.telemetry || null,
         delta: state.lastTurnDelta || null,
         lastTool: state.lastTool || '',
+        // Claude Code writes its conversation summary into the pane title;
+        // free for us to show, since presence already reads it every poll.
+        title: state.paneTitle || '',
       };
     }
     this.view.webview.postMessage({
@@ -1946,6 +2716,10 @@ class ClaudeTmuxView {
         const info = await agentSessionInfo(agent, name);
         this.rememberSession(agent, cwd, name, info.ready);
         const present = info.ready;
+        // The pane title came free with the presence read. Hosts that never set
+        // one leave it at the machine name, which is noise, not a summary.
+        const paneTitle = present && info.title && info.title !== os.hostname() ? info.title.slice(0, 120) : '';
+        if (paneTitle !== state.paneTitle) { state.paneTitle = paneTitle; changed = true; }
         if (present && info.hookState && cfg().get('stateHooks') !== false) {
           this.applyHookState(agent, info.hookState, info.hookTool);
         }
@@ -2175,6 +2949,7 @@ class ClaudeTmuxView {
 
   switchAgent(agent) {
     if (!AGENTS[agent] || !this.agentState[agent].present || agent === this.activeAgent) return;
+    this.focusHistory = [this.activeAgent, ...this.focusHistory.filter((a) => a !== this.activeAgent)].slice(0, 8);
     this.activeAgent = agent;
     const state = this.agentState[agent];
     state.historyMode = false;
@@ -2209,7 +2984,7 @@ class ClaudeTmuxView {
   // Create (or replace) the folder's tmux session resuming one conversation.
   async startResumed(id, agent = 'claude') {
     const spec = AGENTS[agent];
-    if (!id || !spec?.resumeById) return;
+    if (!id || !spec?.resumeById || spec.attachSession) return;
     if (agent === 'codex') await this.warnCodexRuleConflict();
     await this.replaceSession(agent, spec.resumeById(id, launchArgs(agent), workspaceFolder()), 'Resume');
   }
@@ -2348,9 +3123,12 @@ class ClaudeTmuxView {
     const rules = detectionRules(agent);
     const lines = [
       `${spec.label} (${agent}) — ${new Date().toLocaleTimeString()}`,
-      `  tmux session   : ${name}${info.exists ? '' : '  (not found for this workspace)'}`,
+      `  tmux session   : ${name}${info.exists ? '' : '  (not found for this workspace)'}`
+        + (spec.attachSession ? '  [free mode: mirrored, not managed]' : ''),
       `  pane command   : ${info.command || '(none)'}`,
+      `  pane title     : ${info.title || '(none)'}`,
       `  ready          : ${info.ready}`,
+      `  pane identity  : ${paneIdentity(info)}  (created:generation:pane pid:tmux server pid)`,
       `  status shown   : ${state.status} (for ${fmtDurationShort(Date.now() - state.statusSince)})`,
       '',
       `  hook state     : ${info.hookState || '(none reported)'}${hooksOn ? '' : '  [stateHooks disabled]'}`,
@@ -2392,9 +3170,14 @@ class ClaudeTmuxView {
     if (!this._preflight || force) {
       const shell = process.env.SHELL || '/bin/sh';
       // One probe line per agent, keyed by index so agent ids stay out of the
-      // shell string entirely.
+      // shell string entirely. A free-mode agent that only mirrors an existing
+      // session has no CLI to look for, and a custom command that is not a
+      // plain program name is not built into a shell line at all — both simply
+      // count as available.
+      const probeable = (agent) => /^[A-Za-z0-9._/+-]+$/.test(AGENTS[agent].command || '');
       const probe = AGENT_IDS
-        .map((agent, i) => `echo "${i}:$(command -v ${AGENTS[agent].command})"`)
+        .map((agent, i) => (probeable(agent) ? `echo "${i}:$(command -v ${AGENTS[agent].command})"` : ''))
+        .filter(Boolean)
         .join('; ');
       const [tmuxVersion, tools] = await Promise.all([
         runFile('tmux', ['-V']),
@@ -2405,7 +3188,7 @@ class ClaudeTmuxView {
         return (prefix) => lines.some((l) => l.startsWith(prefix) && l.slice(prefix.length).trim());
       };
       let found = seen(tools.out);
-      const agents = byAgent((agent) => found(`${AGENT_IDS.indexOf(agent)}:`));
+      const agents = byAgent((agent) => (!probeable(agent) || found(`${AGENT_IDS.indexOf(agent)}:`)));
       // Installers commonly export PATH from ~/.bashrc, which a NON-interactive
       // login shell skips outright — while the interactive shell tmux starts
       // runs it in full. Without this re-probe an agent that launches perfectly
@@ -2582,6 +3365,20 @@ class ClaudeTmuxView {
 
   async startSession(agent = this.activeAgent) {
     if (!AGENTS[agent]) return;
+    // Free mode never starts anything: the session is the user's, and it either
+    // exists (mirror it) or it does not (say so).
+    const mirrored = AGENTS[agent].attachSession;
+    if (mirrored) {
+      const info = await agentSessionInfo(agent, mirrored);
+      if (!info.exists) {
+        vscode.window.showWarningMessage(
+          `tmux session "${mirrored}" is not running. ${AGENTS[agent].label} mirrors a session you start yourself.`
+        );
+        return;
+      }
+      this.agentState[agent].present = true;
+      return this.activateSession(agent);
+    }
     if (agent === 'codex') await this.warnCodexRuleConflict();
     const args = launchArgs(agent);
     const command = `${AGENTS[agent].command}${args ? ' ' + args : ''}`;
@@ -2598,7 +3395,7 @@ class ClaudeTmuxView {
       }
       const launched = await this.withInputSuspended(agent, () => this.runAgentCommand(agent, s, command));
       if (!launched) {
-        vscode.window.showErrorMessage(`Cannot start ${AGENTS[agent].label} in tmux session "${s}".`);
+        await this.reportLaunchFailure(agent, s);
         return;
       }
       return this.activateSession(agent);
@@ -2628,10 +3425,34 @@ class ClaudeTmuxView {
     await tmux(['set-window-option', '-t', tmuxPaneTarget(s), 'window-size', 'manual']);
     if (!await this.runAgentCommand(agent, s, command)) {
       await tmux(['kill-session', '-t', tmuxSessionTarget(s)]);
-      vscode.window.showErrorMessage(`Cannot start ${AGENTS[agent].label} in tmux session "${s}".`);
+      await this.reportLaunchFailure(agent, s);
       return;
     }
     this.activateSession(agent);
+  }
+
+  // A launch fails for one overwhelmingly common reason: the CLI is not on PATH.
+  // Naming only the tmux session left the user to guess, so the preflight probe
+  // is consulted and the install command offered.
+  async reportLaunchFailure(agent, name) {
+    const spec = AGENTS[agent];
+    await this.runPreflight(true);
+    if (this._preflight?.agents?.[agent] !== false) {
+      vscode.window.showErrorMessage(`Cannot start ${spec.label} in tmux session "${name}".`);
+      return;
+    }
+    const install = spec.installCmd || '';
+    const choice = await vscode.window.showErrorMessage(
+      `${spec.label} is not on PATH, so it could not start in "${name}".`
+      + (install ? ` Install it with:  ${install}` : ''),
+      ...(install ? ['Copy install command'] : [])
+    );
+    if (choice === 'Copy install command') {
+      try {
+        await vscode.env.clipboard.writeText(install);
+        vscode.window.showInformationMessage('Install command copied to the clipboard.');
+      } catch { /* no clipboard in this host */ }
+    }
   }
 
   async runAgentCommand(agent, name, command) {
@@ -2657,8 +3478,11 @@ class ClaudeTmuxView {
     // AGENTMUX=1 marks this pane as ours. Integrations that live in a tool's
     // own config (the OpenCode plugin) check it before touching anything, so an
     // agent you start yourself is never affected by AgentMux's presence.
+    // Hermes launches additionally carry the per-project profile env (created
+    // on first use), so each project gets its own isolated Hermes profile.
+    const envPrefix = await launchEnvPrefix(agent);
     const sent = await tmux([
-      'send-keys', '-t', tmuxPaneTarget(name), `AGENTMUX=1 ${command}; ${cleanup}`, 'Enter',
+      'send-keys', '-t', tmuxPaneTarget(name), `${envPrefix}AGENTMUX=1 ${command}; ${cleanup}`, 'Enter',
     ]);
     if (!sent.ok) return false;
     return this.waitForAgentReady(agent, name, 8000);
@@ -2918,6 +3742,12 @@ class ClaudeTmuxView {
   // public actions used by commands
   async restart() {
     const agent = this.activeAgent;
+    if (AGENTS[agent]?.attachSession) {
+      vscode.window.showInformationMessage(
+        `${AGENTS[agent].label} mirrors the existing tmux session "${AGENTS[agent].attachSession}". AgentMux never restarts a session it did not create.`
+      );
+      return;
+    }
     if (agent === 'codex') await this.warnCodexRuleConflict();
     const s = await sessionName(agent);
     if (!await sessionBelongsToWorkspace(s)) return this.startSession();
@@ -2929,12 +3759,23 @@ class ClaudeTmuxView {
   async kill() {
     const agent = this.activeAgent;
     const s = await sessionName(agent);
-    if (!await sessionBelongsToWorkspace(s)) {
-      vscode.window.showInformationMessage(`No ${AGENTS[agent].label} tmux session for this workspace.`);
+    // A mirrored session belongs to the user, so it is not gated on the
+    // workspace root — but the confirmation says plainly that AgentMux did not
+    // create it, because killing it is not "cleaning up after ourselves".
+    const mirrored = !!AGENTS[agent]?.attachSession;
+    const alive = mirrored
+      ? (await tmux(['has-session', '-t', tmuxSessionTarget(s)])).ok
+      : await sessionBelongsToWorkspace(s);
+    if (!alive) {
+      vscode.window.showInformationMessage(mirrored
+        ? `tmux session "${s}" is not running.`
+        : `No ${AGENTS[agent].label} tmux session for this workspace.`);
       return;
     }
     const pick = await vscode.window.showWarningMessage(
-      `Kill tmux session "${s}"? ${AGENTS[agent].label} and anything running in it will stop.`,
+      mirrored
+        ? `Kill tmux session "${s}"? AgentMux did not create it — it is only mirrored here, and anything running in it will stop.`
+        : `Kill tmux session "${s}"? ${AGENTS[agent].label} and anything running in it will stop.`,
       { modal: true }, 'Kill'
     );
     if (pick !== 'Kill') return;
@@ -2975,10 +3816,14 @@ class ClaudeTmuxView {
     // Current prefixes plus the pre-0.10.2 defaults, so this project's sessions
     // from an older AgentMux are still recognizable as ours.
     const prefixes = [
-      ...AGENT_IDS.map((agent) => cfg().get(AGENTS[agent].prefixSetting) || AGENTS[agent].defaultPrefix),
+      ...AGENT_IDS.map((agent) => (AGENTS[agent].prefixSetting ? cfg().get(AGENTS[agent].prefixSetting) : '')
+        || AGENTS[agent].defaultPrefix),
       ...AGENT_IDS.map((agent) => AGENTS[agent].defaultPrefix),
       'tmux_', 'codex_',
     ].filter(Boolean);
+    // Free-mode sessions are the user's own; AgentMux never created them, so
+    // they are never leftovers of ours and can never appear in this list.
+    const mirrored = mirroredSessionNames();
     const here = normalizedPath(cwd);
     // Names currently in use, so a live agent is never mistaken for a leftover.
     const live = new Set();
@@ -2991,6 +3836,7 @@ class ClaudeTmuxView {
       const [name, sessionPath = '', created = '', attached = '', windows = ''] = line.split('\t');
       // The only gate that matters: is this session rooted in THIS project?
       if (!sessionPath || normalizedPath(sessionPath) !== here) continue;
+      if (mirrored.has(name)) continue; // mirrored in free mode, not ours to kill
       if (!prefixes.some((prefix) => name.startsWith(prefix))) continue; // not created by us
       const age = created ? fmtDurationShort(Date.now() - Number(created) * 1000) : '?';
       const isLive = live.has(name);
@@ -3043,15 +3889,401 @@ class ClaudeTmuxView {
     this.tick(true);
   }
 
+  // ---- navigation -----------------------------------------------------------------
+  // With six or more tabs, "next agent" is rarely what you want — "take me to
+  // whichever agent needs me" is. These commands are the keyboard half of the
+  // information the status bar already carries.
+
+  presentAgents() {
+    return AGENT_IDS.filter((agent) => this.agentState[agent]?.present);
+  }
+
+  async focusAgentTab(agent) {
+    if (!AGENTS[agent]) return false;
+    await vscode.commands.executeCommand('claudeTmux.view.focus');
+    if (agent !== this.activeAgent) this.switchAgent(agent);
+    return true;
+  }
+
+  // The agent most worth going to: one that is blocked on you first, then the
+  // most recent completion. Ties break on how long the status has been held.
+  pickAttentionAgent() {
+    const rank = (agent) => (this.agentState[agent].status === 'needs-input' ? 1 : 0);
+    return this.presentAgents()
+      .filter((agent) => ['needs-input', 'done'].includes(this.agentState[agent].status))
+      .sort((a, b) => rank(b) - rank(a) || this.agentState[b].statusSince - this.agentState[a].statusSince)[0]
+      || null;
+  }
+
+  async gotoAttention() {
+    const agent = this.pickAttentionAgent();
+    if (!agent) {
+      vscode.window.showInformationMessage('No agent is waiting for you or has just finished.');
+      return null;
+    }
+    await this.focusAgentTab(agent);
+    return agent;
+  }
+
+  // Toggle back to the agent you were on before this one.
+  async gotoLastAgent() {
+    const previous = (this.focusHistory || [])
+      .find((agent) => agent !== this.activeAgent && this.agentState[agent]?.present);
+    if (!previous) {
+      vscode.window.showInformationMessage('No other agent has been focused in this workspace yet.');
+      return null;
+    }
+    await this.focusAgentTab(previous);
+    return previous;
+  }
+
+  async cycleAgent(step) {
+    const present = this.presentAgents();
+    if (present.length < 2) return null;
+    const at = present.indexOf(this.activeAgent);
+    const next = present[((at < 0 ? 0 : at) + step + present.length) % present.length];
+    await this.focusAgentTab(next);
+    return next;
+  }
+
+  // 1-indexed over the agents currently running, matching what the tabs show.
+  async jumpToAgent(args = {}) {
+    const index = Number(typeof args === 'number' ? args : args?.index);
+    const present = this.presentAgents();
+    if (!Number.isFinite(index) || index < 1 || index > present.length) return null;
+    await this.focusAgentTab(present[index - 1]);
+    return present[index - 1];
+  }
+
+  // ---- scriptable surface --------------------------------------------------------
+  // Commands that take arguments and RETURN values, so AgentMux can be driven
+  // from a keybinding, a task or another extension instead of only by hand.
+  // They are ordinary commands, held to the same rules as the side bar: the
+  // workspace check, the Pair Mode lock and the handoff/arbiter freeze all
+  // apply, and the reason for a refusal is returned rather than swallowed.
+
+  agentFromArgs(args, fallback = this.activeAgent) {
+    const id = typeof args === 'string' ? args : args?.agent;
+    return AGENTS[id] ? id : fallback;
+  }
+
+  // Live status without depending on the side bar being open: the presence loop
+  // only runs while the view exists, so with no view the pane is read directly.
+  async currentStatus(agent) {
+    const state = this.agentState[agent];
+    if (this.view) return { present: !!state?.present, status: state?.status || 'idle' };
+    const cwd = normalizedPath(workspaceFolder());
+    if (!cwd) return { present: false, status: 'idle' };
+    const name = this.cachedReadySession(agent, cwd) || await sessionName(agent);
+    const info = await agentSessionInfo(agent, name);
+    if (!info.ready) return { present: false, status: 'idle' };
+    const hooked = cfg().get('stateHooks') !== false ? info.hookState : '';
+    return { present: true, status: hooked || state?.status || 'idle' };
+  }
+
+  async sendToAgent(args = {}) {
+    const agent = this.agentFromArgs(args);
+    let text = typeof args === 'string' ? undefined : args?.text;
+    if (typeof text !== 'string') {
+      text = await vscode.window.showInputBox({
+        prompt: `Send to ${AGENTS[agent].label}`,
+        placeHolder: 'Text to type into the agent, then submit',
+      });
+      if (text === undefined) return { ok: false, agent, reason: 'cancelled' };
+    }
+    if (!text.trim()) return { ok: false, agent, reason: 'empty' };
+    if (text.length > 30000) return { ok: false, agent, reason: 'too-long' };
+    const live = await this.currentStatus(agent);
+    if (!live.present) return { ok: false, agent, reason: 'not-running' };
+    if (this.handoff || this.arbiter) return { ok: false, agent, reason: 'transaction-in-progress' };
+    if (this.writerAgent && agent !== this.writerAgent) {
+      return { ok: false, agent, reason: 'pair-locked', writer: this.writerAgent };
+    }
+    const submit = args?.submit !== false;
+    const delivered = await this.queueInput(agent, submit ? `${text}\r` : text, true);
+    return { ok: delivered !== false, agent, submitted: submit };
+  }
+
+  async captureAgent(args = {}) {
+    const agent = this.agentFromArgs(args);
+    const cwd = normalizedPath(workspaceFolder());
+    if (!cwd) return { ok: false, agent, reason: 'no-workspace' };
+    const name = this.cachedReadySession(agent, cwd) || await sessionName(agent);
+    const info = await agentSessionInfo(agent, name);
+    if (!info.ready) return { ok: false, agent, reason: 'not-running' };
+    const lines = Math.max(1, Math.min(10000, Number(args?.lines) || this.rows || 24));
+    const captured = await tmux(['capture-pane', '-p', '-J', '-S', `-${lines}`, '-t', tmuxPaneTarget(name)]);
+    if (!captured.ok) return { ok: false, agent, reason: 'capture-failed' };
+    const text = stripAnsi(captured.out).replace(/\s+$/, '');
+    // Called from the palette there is no caller to hand the text to, so show it.
+    if (args?.quiet !== true) {
+      this.output().appendLine(`--- ${AGENTS[agent].label} (${name}), last ${lines} line(s) ---`);
+      this.output().appendLine(text);
+      this.output().appendLine('');
+      this.output().show(true);
+    }
+    return { ok: true, agent, session: name, text };
+  }
+
+  agentStatus(args = {}) {
+    const wanted = typeof args === 'string' ? args : args?.agent;
+    const ids = AGENTS[wanted] ? [wanted] : AGENT_IDS;
+    const report = {};
+    for (const agent of ids) {
+      const state = this.agentState[agent] || {};
+      report[agent] = {
+        present: !!state.present,
+        status: state.status || 'idle',
+        forMs: state.statusSince ? Date.now() - state.statusSince : 0,
+        tool: state.lastTool || '',
+        title: state.paneTitle || '',
+        writer: this.writerAgent === agent,
+        mirrored: !!AGENTS[agent].attachSession,
+      };
+    }
+    if (args?.quiet !== true && !this.view) {
+      this.output().appendLine(JSON.stringify(report, null, 2));
+      this.output().show(true);
+    }
+    return report;
+  }
+
+  // Resolves once the agent reaches one of the wanted statuses, so a script can
+  // do "send, wait for done, capture" without polling the pane itself.
+  async waitForAgent(args = {}) {
+    const agent = this.agentFromArgs(args);
+    const wanted = new Set([].concat(args?.status || ['done', 'needs-input']).filter(Boolean));
+    const timeoutMs = Math.max(1000, Math.min(3600000, Number(args?.timeoutMs) || 300000));
+    const deadline = Date.now() + timeoutMs;
+    // A status already held when the wait starts counts: the caller asked where
+    // the agent IS, not for the next transition.
+    while (Date.now() < deadline) {
+      const live = await this.currentStatus(agent);
+      if (live.present && wanted.has(live.status)) return { ok: true, agent, status: live.status };
+      await delay(250);
+    }
+    const last = await this.currentStatus(agent);
+    return { ok: false, agent, reason: 'timeout', status: last.status };
+  }
+
+  // ---- free mode ---------------------------------------------------------------
+  // Point a tab at a tmux session you already have. This is the whole reason
+  // free mode exists: a new agent (or any long-running tmux) becomes usable in
+  // the side bar by editing settings, never by shipping a new AgentMux.
+  async addTmuxSession() {
+    const listed = await tmux(['list-sessions', '-F',
+      '#{session_name}\t#{session_path}\t#{session_windows}\t#{?session_attached,attached,detached}']);
+    if (!listed.ok) {
+      vscode.window.showInformationMessage('No tmux server is running — start a session first.');
+      return;
+    }
+    // Sessions AgentMux already drives (managed or mirrored) are not offered.
+    const taken = new Set();
+    for (const agent of AGENT_IDS) {
+      const name = await sessionName(agent);
+      if (name) taken.add(name);
+    }
+    const items = [];
+    for (const line of listed.out.split('\n')) {
+      if (!line.trim()) continue;
+      const [name, sessionPath = '', windows = '', attached = ''] = line.split('\t');
+      if (!name || taken.has(name)) continue;
+      if (name.startsWith('_agentmux_ctl_')) continue; // our own control client
+      if (!validSessionName(name)) continue;
+      items.push({
+        label: name,
+        description: sessionPath,
+        detail: `${windows || 1} window(s) · ${attached}`,
+        session: name,
+      });
+    }
+    if (!items.length) {
+      vscode.window.showInformationMessage('Every running tmux session is already shown in AgentMux.');
+      return;
+    }
+    const picked = await vscode.window.showQuickPick(items, {
+      placeHolder: 'Mirror which existing tmux session in the side bar?',
+      matchOnDescription: true,
+      matchOnDetail: true,
+    });
+    if (!picked) return;
+    const label = await vscode.window.showInputBox({
+      prompt: 'Tab label for this session',
+      value: picked.session.slice(0, 24),
+      validateInput: (value) => (value.trim() ? null : 'Enter a label.'),
+    });
+    if (label === undefined) return;
+    const target = customAgentsTarget();
+    const list = [...customAgentsAt(target)];
+    list.push({ id: freeAgentId(picked.session, list), label: label.trim().slice(0, 24), session: picked.session });
+    await cfg().update('customAgents', list, target);
+    this.offerReload(`"${picked.session}" is now a free-mode agent.`);
+  }
+
+  async removeCustomAgent() {
+    const target = customAgentsTarget();
+    const list = customAgentsAt(target);
+    if (!list.length) {
+      vscode.window.showInformationMessage('No custom agents are configured.');
+      return;
+    }
+    const items = list.map((entry, index) => ({
+      label: String(entry?.label || entry?.id || '(unnamed)'),
+      description: entry?.session ? `mirrors tmux "${entry.session}"` : `runs ${entry?.command || '?'}`,
+      index,
+    }));
+    const picked = await vscode.window.showQuickPick(items, {
+      canPickMany: true,
+      placeHolder: 'Remove which custom agents? Their tmux sessions keep running.',
+      matchOnDescription: true,
+    });
+    if (!picked || !picked.length) return;
+    const drop = new Set(picked.map((item) => item.index));
+    await cfg().update('customAgents', list.filter((_, index) => !drop.has(index)), target);
+    this.offerReload(`Removed ${picked.length} custom agent(s).`);
+  }
+
+  // The registry is built once at activation, so a roster change needs a
+  // window reload to take effect. Say so instead of half-applying it.
+  async offerReload(message) {
+    const go = await vscode.window.showInformationMessage(
+      `${message} Reload the window to apply the change.`, 'Reload Window'
+    );
+    if (go === 'Reload Window') vscode.commands.executeCommand('workbench.action.reloadWindow');
+  }
+
+  // ---- integrations ----------------------------------------------------------------
+  // Everything AgentMux can write outside its own storage, in one inspectable
+  // list: where each file lives, whether it is installed and up to date, and
+  // what it is for. Writing them silently at launch with removal as the only
+  // visible control asked the user to trust something they could not see.
+  integrationCatalog() {
+    const hookPaths = stateHookPaths();
+    const entries = [
+      {
+        id: 'hook-script',
+        label: 'Shared state hook script',
+        detail: 'Stamps agent state into tmux pane options. Used by Claude and Codex.',
+        file: hookPaths?.script || null,
+        expected: STATE_HOOK_SCRIPT,
+        install: () => !!ensureStateHookAssets(),
+      },
+      {
+        id: 'claude-settings',
+        label: 'Claude Code hook settings',
+        detail: 'Passed per launch with --settings; your own ~/.claude/settings.json is never touched.',
+        file: hookPaths?.settings || null,
+        expected: null, // generated from the script path, compared by existence
+        install: () => !!ensureStateHookAssets(),
+      },
+      {
+        id: 'opencode-plugin',
+        label: 'OpenCode plugin',
+        detail: 'Reports OpenCode lifecycle state. Inert unless AGENTMUX=1 is set on the pane.',
+        file: opencodePluginPath(),
+        expected: OPENCODE_PLUGIN,
+        install: () => ensureOpencodePlugin(),
+        remove: () => removeOpencodePlugin(),
+      },
+      {
+        id: 'pi-extension',
+        label: 'pi extension',
+        detail: 'Reports pi lifecycle state. Inert unless AGENTMUX=1 is set on the pane.',
+        file: piExtensionPath(),
+        expected: PI_EXTENSION,
+        install: () => ensurePiExtension(),
+        remove: () => removePiExtension(),
+      },
+    ];
+    for (const entry of entries) {
+      entry.exists = !!(entry.file && fs.existsSync(entry.file));
+      let current = null;
+      if (entry.exists) {
+        try { current = fs.readFileSync(entry.file, 'utf8'); } catch { current = null; }
+      }
+      entry.current = !entry.exists ? false
+        : (entry.expected == null ? true : current === entry.expected);
+      entry.state = !entry.exists ? 'not installed' : entry.current ? 'installed' : 'out of date';
+    }
+    // Codex's hooks are not a file at all — they are -c overrides on the launch
+    // command line — so they are listed for honesty, not for management.
+    entries.push({
+      id: 'codex-hooks',
+      label: 'Codex lifecycle hooks',
+      detail: cfg().get('codexHooks') === false
+        ? 'Disabled by claudeTmux.codexHooks.'
+        : 'Passed per launch with -c, never written to your config.toml. Codex asks once to trust them.',
+      file: null,
+      exists: cfg().get('codexHooks') !== false && cfg().get('stateHooks') !== false,
+      current: true,
+      state: cfg().get('codexHooks') !== false && cfg().get('stateHooks') !== false
+        ? 'passed at launch' : 'off',
+    });
+    return entries;
+  }
+
+  async manageIntegrations() {
+    const entries = this.integrationCatalog();
+    const hooksOff = cfg().get('stateHooks') === false;
+    const items = entries.map((entry) => ({
+      label: `${entry.state === 'installed' || entry.state === 'passed at launch' ? '$(check)' : entry.state === 'out of date' ? '$(warning)' : '$(circle-outline)'} ${entry.label}`,
+      description: entry.state,
+      detail: `${entry.detail}${entry.file ? `\n${entry.file}` : ''}`,
+      entry,
+    }));
+    const picked = await vscode.window.showQuickPick(items, {
+      placeHolder: hooksOff
+        ? 'Agent integrations — claudeTmux.stateHooks is off, so nothing is installed'
+        : 'Agent integrations — pick one to install, refresh or remove',
+      matchOnDescription: true,
+      matchOnDetail: true,
+    });
+    if (!picked) return;
+    const entry = picked.entry;
+    if (!entry.file) {
+      vscode.window.showInformationMessage(`${entry.label}: ${entry.detail}`);
+      return;
+    }
+    const actions = [];
+    if (entry.install) actions.push(entry.exists ? 'Reinstall' : 'Install');
+    if (entry.remove && entry.exists) actions.push('Remove');
+    actions.push('Reveal');
+    const action = await vscode.window.showQuickPick(actions, { placeHolder: entry.file });
+    if (!action) return;
+    if (action === 'Reveal') {
+      try {
+        const doc = await vscode.workspace.openTextDocument(entry.file);
+        await vscode.window.showTextDocument(doc, { preview: true });
+      } catch {
+        vscode.window.showWarningMessage(`Cannot open ${entry.file}.`);
+      }
+      return;
+    }
+    if (action === 'Remove') {
+      const ok = entry.remove();
+      vscode.window.showInformationMessage(ok ? `Removed ${entry.label}.` : `${entry.label} was not present.`);
+      return;
+    }
+    if (hooksOff) {
+      vscode.window.showWarningMessage('claudeTmux.stateHooks is off, so integrations are not written. Turn it on first.');
+      return;
+    }
+    const ok = entry.install();
+    vscode.window.showInformationMessage(ok
+      ? `${entry.label} installed at ${entry.file}.`
+      : `Could not write ${entry.label} — is its config directory writable?`);
+  }
+
   // Everything AgentMux writes outside its own storage, removable in one step.
   async removeIntegrations() {
     const go = await vscode.window.showWarningMessage(
-      'Remove AgentMux integration files? This deletes the OpenCode plugin and the generated hook assets. Agent state falls back to screen detection.',
+      'Remove AgentMux integration files? This deletes the OpenCode plugin, the pi extension and the generated hook assets. Agent state falls back to screen detection.',
       { modal: true }, 'Remove'
     );
     if (go !== 'Remove') return;
     const removed = [];
     if (removeOpencodePlugin()) removed.push(opencodePluginPath());
+    if (removePiExtension()) removed.push(piExtensionPath());
     const paths = stateHookPaths();
     for (const file of [paths?.script, paths?.settings]) {
       if (!file) continue;
@@ -3087,6 +4319,9 @@ class ClaudeTmuxView {
   async killPick() {
     const items = [];
     for (const agent of Object.keys(AGENTS)) {
+      // Free-mode sessions are not this workspace's to manage in bulk; the
+      // single-session Kill command still offers them, with its own warning.
+      if (AGENTS[agent].attachSession) continue;
       const name = await sessionName(agent);
       if (!await sessionBelongsToWorkspace(name)) continue;
       const info = await tmux([
@@ -3141,6 +4376,13 @@ class ClaudeTmuxView {
     }
     const spec = AGENTS[agent];
     if (!spec) return;
+    // Resuming replaces the tmux session, which free mode must never do.
+    if (spec.attachSession) {
+      vscode.window.showInformationMessage(
+        `${spec.label} mirrors the existing tmux session "${spec.attachSession}". Resume it from inside that session.`
+      );
+      return;
+    }
     if (!spec.listSessions) {
       if (!spec.resumeLatest) {
         vscode.window.showInformationMessage(`${spec.label} does not support resuming a previous session.`);
@@ -3620,12 +4862,14 @@ class ClaudeTmuxView {
     transaction.targetName = targetName;
     transaction.targetCreated = targetInfo.created;
     transaction.targetGeneration = targetInfo.generation;
+    transaction.targetIdentity = paneIdentity(targetInfo);
     transaction.sentAt = Date.now();
     this.eventLog.append({
       type: 'handoff', id, phase: 'delivered', source, target, mode,
       parentId: transaction.parentId,
       text: text.slice(0, 30000),
       targetName, targetCreated: targetInfo.created, targetGeneration: targetInfo.generation,
+      targetIdentity: transaction.targetIdentity,
     });
     this.activeAgent = target;
     this.context.workspaceState.update('claudeTmux.activeAgent', target);
@@ -3656,8 +4900,9 @@ class ClaudeTmuxView {
       }
       if (acknowledged) {
         const info = await agentSessionInfo(transaction.target, transaction.targetName);
-        if (info.ready && info.created === transaction.targetCreated
-          && info.generation === transaction.targetGeneration) return this.completeHandoff(transaction, false);
+        if (info.ready && identityMatches(info, transaction)) {
+          return this.completeHandoff(transaction, false);
+        }
         if (this.handoff === transaction) {
           this.handoff = null;
           this.eventLog.append({ type: 'handoff', id: transaction.id, phase: 'stale' });
@@ -3693,7 +4938,7 @@ class ClaudeTmuxView {
       });
       return;
     }
-    if (info.created !== transaction.targetCreated || info.generation !== transaction.targetGeneration) {
+    if (!identityMatches(info, transaction)) {
       this.handoff = null;
       this.postAgents();
       if (this.view) this.view.webview.postMessage({
@@ -3766,7 +5011,9 @@ class ClaudeTmuxView {
       const last = [...open.values()].pop();
       if (!last || !last.targetName || Date.now() - last.ts > 24 * 3600 * 1000) return;
       const info = await agentSessionInfo(last.target, last.targetName);
-      if (!info.ready || info.created !== last.targetCreated || info.generation !== last.targetGeneration) {
+      // A rehydrated handoff is only revived when the ledger's pinned identity
+      // still matches; a tmux server restart or a recreated pane makes it stale.
+      if (!info.ready || !identityMatches(info, last)) {
         this.eventLog.append({ type: 'handoff', id: last.id, phase: 'stale' });
         return;
       }
@@ -3776,6 +5023,7 @@ class ClaudeTmuxView {
         mode: last.mode, previewMode: last.mode,
         texts: { continue: '', reviewOnly: '', reviewFix: '', [last.mode]: last.text || '' },
         targetName: last.targetName, targetCreated: last.targetCreated, targetGeneration: last.targetGeneration,
+        targetIdentity: last.targetIdentity || paneIdentity(info),
         parentId: last.parentId,
         ackToken: crypto.randomBytes(12).toString('hex'), // unusable on purpose: manual path only
         createdAt: last.ts, rehydrated: true,
@@ -3850,8 +5098,12 @@ class ClaudeTmuxView {
   // winner becomes the Pair-Mode writer.
   // Every RUNNING agent takes part; agents that are not started simply sit the
   // round out, so a third agent never blocks a two-way arbiter.
+  // A free-mode mirror is excluded: the round demands a marked answer from every
+  // participant and fails as a whole if one cannot deliver, and what is running
+  // in a session you started yourself may not be an agent at all. Handoffs stay
+  // available to it — those pick a target explicitly.
   arbiterParticipants() {
-    return AGENT_IDS.filter((agent) => this.agentState[agent].present);
+    return AGENT_IDS.filter((agent) => this.agentState[agent].present && !AGENTS[agent].attachSession);
   }
 
   prepareArbiter() {
@@ -4040,24 +5292,39 @@ class ClaudeTmuxView {
     // script parses to build its per-agent state.
     const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
       .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    // canStart is false for a free-mode agent: its session is the user's, so
+    // there is nothing for AgentMux to launch or resume — the tab simply
+    // appears once that session is running.
     const roster = AGENT_IDS.map((agent) => ({
       id: agent,
       label: AGENTS[agent].label,
+      mark: AGENTS[agent].mark || derivedMark(AGENTS[agent].label, agent),
+      accent: AGENTS[agent].accent || derivedAccent(agent),
+      // JSON-encoded into the data attribute: the escape byte travels as the
+      // six characters of its \u escape, so no control character reaches the markup.
+      modEnter: AGENTS[agent].modEnter || '',
+      canStart: !AGENTS[agent].attachSession,
       canList: !!AGENTS[agent].listSessions,
-      canResumeLatest: !!AGENTS[agent].resumeLatest,
+      canResumeLatest: !!AGENTS[agent].resumeLatest && !AGENTS[agent].attachSession,
       installCmd: AGENTS[agent].installCmd || '',
     }));
+    // The accent travels as channels so the stylesheet can build any alpha from
+    // it; container queries then swap the label for the mark once a tab is too
+    // narrow to say anything useful.
     const tabsHtml = roster.map((a) => `
-      <button id="tab-${esc(a.id)}" class="agent-tab hidden" role="tab" data-agent="${esc(a.id)}" aria-selected="false" aria-controls="screen">
-        <span class="agent-label">${esc(a.label)}</span><span class="writer-mark" aria-hidden="true">◆</span><span class="agent-state" aria-hidden="true"></span>
+      <button id="tab-${esc(a.id)}" class="agent-tab hidden" role="tab" data-agent="${esc(a.id)}" aria-selected="false" aria-controls="screen" style="--agent-accent: ${esc(accentChannels(a.accent))}">
+        <span class="agent-mark" aria-hidden="true">${esc(a.mark)}</span><span class="agent-label">${esc(a.label)}</span><span class="writer-mark" aria-hidden="true">◆</span><span class="agent-state" aria-hidden="true"></span>
       </button>`).join('');
-    const launchMenuHtml = roster.map((a) => `
-        <button role="menuitem" data-action="start" data-agent="${esc(a.id)}">Start ${esc(a.label)}</button>`
+    // The same accent leads every entry that names an agent, so the launcher
+    // and the tabs teach the same colour.
+    const swatch = (a) => `<i class="agent-swatch" aria-hidden="true" style="--agent-accent: ${esc(accentChannels(a.accent))}"></i>`;
+    const launchMenuHtml = roster.filter((a) => a.canStart).map((a) => `
+        <button role="menuitem" data-action="start" data-agent="${esc(a.id)}">${swatch(a)}Start ${esc(a.label)}</button>`
       + (a.canList || a.canResumeLatest
-        ? `\n        <button role="menuitem" data-action="attach" data-agent="${esc(a.id)}">Resume ${esc(a.label)}…</button>`
+        ? `\n        <button role="menuitem" data-action="attach" data-agent="${esc(a.id)}">${swatch(a)}Resume ${esc(a.label)}…</button>`
         : '')).join('');
-    const launcherHtml = roster.map((a) =>
-      `\n            <button data-launch-agent="${esc(a.id)}">Start ${esc(a.label)}</button>`).join('');
+    const launcherHtml = roster.filter((a) => a.canStart).map((a) =>
+      `\n            <button data-launch-agent="${esc(a.id)}">${swatch(a)}Start ${esc(a.label)}</button>`).join('');
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -4181,7 +5448,11 @@ class ClaudeTmuxView {
 let activeProvider = null;
 
 function activate(context) {
-  try { stateHookDir = context.globalStorageUri?.fsPath || null; } catch { stateHookDir = null; }
+  try { setStateHookDir(context.globalStorageUri?.fsPath); } catch { setStateHookDir(null); }
+  // Free-mode agents join the registry BEFORE anything reads the roster, so
+  // every per-agent structure (state, queues, tabs, subscriptions) is built for
+  // the full roster exactly once.
+  registerCustomAgents();
   const provider = new ClaudeTmuxView(context);
   activeProvider = provider;
 
@@ -4198,20 +5469,39 @@ function activate(context) {
       await vscode.commands.executeCommand('claudeTmux.view.focus');
       if (AGENTS[agent]) provider.switchAgent(agent);
     }),
-    vscode.commands.registerCommand('claudeTmux.statusBarCycle', () => {
-      const present = Object.keys(AGENTS).filter((agent) => provider.agentState[agent]?.present);
+    // The status bar already says which agent wants you; clicking it should
+    // take you there rather than to whatever is merely next in the roster.
+    vscode.commands.registerCommand('claudeTmux.statusBarCycle', async () => {
+      if (provider.pickAttentionAgent()) return provider.gotoAttention();
+      const present = provider.presentAgents();
       if (!present.length) return;
       const next = present[(present.indexOf(provider.activeAgent) + 1) % present.length];
       if (next === provider.activeAgent) vscode.commands.executeCommand('claudeTmux.view.focus');
       else provider.switchAgent(next);
     }),
+    vscode.commands.registerCommand('claudeTmux.gotoAttention', () => provider.gotoAttention()),
+    vscode.commands.registerCommand('claudeTmux.lastAgent', () => provider.gotoLastAgent()),
+    vscode.commands.registerCommand('claudeTmux.nextAgent', () => provider.cycleAgent(1)),
+    vscode.commands.registerCommand('claudeTmux.prevAgent', () => provider.cycleAgent(-1)),
+    vscode.commands.registerCommand('claudeTmux.jumpAgent', (args) => provider.jumpToAgent(args)),
+    vscode.commands.registerCommand('claudeTmux.send', (args) => provider.sendToAgent(args)),
+    vscode.commands.registerCommand('claudeTmux.capture', (args) => provider.captureAgent(args)),
+    vscode.commands.registerCommand('claudeTmux.status', (args) => provider.agentStatus(args)),
+    vscode.commands.registerCommand('claudeTmux.waitFor', (args) => provider.waitForAgent(args)),
     vscode.commands.registerCommand('claudeTmux.clearPromptHistory', () => provider.clearPromptHistory()),
     vscode.commands.registerCommand('claudeTmux.explainState', () => provider.explainState()),
     vscode.commands.registerCommand('claudeTmux.cleanupSessions', () => provider.cleanupSessions()),
     vscode.commands.registerCommand('claudeTmux.removeIntegrations', () => provider.removeIntegrations()),
+    vscode.commands.registerCommand('claudeTmux.manageIntegrations', () => provider.manageIntegrations()),
+    vscode.commands.registerCommand('claudeTmux.addTmuxSession', () => provider.addTmuxSession()),
+    vscode.commands.registerCommand('claudeTmux.removeCustomAgent', () => provider.removeCustomAgent()),
     vscode.commands.registerCommand('claudeTmux.arbiter', () => provider.prepareArbiter()),
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('claudeTmux.refreshMs')) provider.startLoop();
+      // The roster is fixed at activation; a hand-edited list needs a reload.
+      if (e.affectsConfiguration('claudeTmux.customAgents') && customAgentsChanged()) {
+        provider.offerReload('The AgentMux custom agent list changed.');
+      }
       if (e.affectsConfiguration('claudeTmux.transport')) {
         if (!['auto', 'control'].includes(transportMode())) controlClient.destroy(false);
         provider.ensureEventSources();

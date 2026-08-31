@@ -42,7 +42,8 @@
     links: app?.dataset.links !== '0',
   };
   // The agent roster comes from the host registry, so this file never hardcodes
-  // which agents exist. Each entry: { id, label, canList, canResumeLatest }.
+  // which agents exist. Each entry:
+  // { id, label, canStart, canList, canResumeLatest, installCmd }.
   let AGENT_LIST = [];
   try { AGENT_LIST = JSON.parse(app?.dataset.agents || '[]'); } catch { AGENT_LIST = []; }
   if (!AGENT_LIST.length) AGENT_LIST = [{ id: 'claude', label: 'Claude', canList: true, canResumeLatest: false }];
@@ -546,7 +547,14 @@
       if (k === '?' || k === '8') return '\x7f';
     }
     switch (k) {
-      case 'Enter': return '\r';
+      // Shift+Enter means "newline, do not submit" — but there is no universal
+      // encoding for it, and sending the wrong one types visible garbage into
+      // the agent's input box. Each agent's sequence was measured in a live
+      // pane and travels on the roster; an agent without one keeps the plain
+      // carriage return, so its behaviour is unchanged rather than broken.
+      // (These bytes go in raw via send-keys -H, so tmux's own extended-keys
+      // setting is not involved.)
+      case 'Enter': return e.shiftKey ? (AGENT_META[activeAgent]?.modEnter || '\r') : '\r';
       case 'Backspace': return '\x7f';
       case 'Tab': return e.shiftKey ? '\x1b[Z' : '\t';
       case 'Escape': return '\x1b';
@@ -815,7 +823,10 @@
       tab.classList.toggle('attention-needs-input', attention === 'needs-input');
       const attentionLabel = attention === 'done' ? ', new completion' : attention === 'needs-input' ? ', awaiting input' : '';
       const label = `${cap(agent)}: ${STATE_LABELS[status] || status}${attentionLabel}${writerAgent === agent ? ', Pair Mode writer' : ''}`;
-      tab.title = label;
+      // Agents that write a conversation summary into the tmux pane title get
+      // it as a second tooltip line — the cheapest "what is this tab doing".
+      const paneTitle = agentPresence[agent].title || '';
+      tab.title = paneTitle ? `${label}\n${paneTitle}` : label;
       tab.setAttribute('aria-label', label);
       for (const button of launchMenu.querySelectorAll(`button[data-agent="${agent}"]`)) {
         button.classList.toggle('hidden', present);
@@ -823,7 +834,11 @@
     }
     const presentAgents = AGENT_IDS.filter((agent) => agentPresence[agent].present);
     const hasWorkspace = message.hasWorkspace !== false;
-    tabAdd.classList.toggle('hidden', !hasWorkspace || presentAgents.length === AGENT_IDS.length);
+    // Free-mode agents have nothing to launch, so they never keep the launch
+    // menu alive: it hides once every startable agent is already running.
+    const startable = AGENT_IDS.filter((agent) => AGENT_META[agent]?.canStart !== false);
+    tabAdd.classList.toggle('hidden',
+      !hasWorkspace || startable.every((agent) => agentPresence[agent].present));
     for (const button of launcherActions.querySelectorAll('button')) button.disabled = !hasWorkspace;
     for (const button of launchMenu.querySelectorAll('button')) button.disabled = !hasWorkspace;
     btnPair.disabled = !agentPresence[activeAgent].present || !!handoffPhase;

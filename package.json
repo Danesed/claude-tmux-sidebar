@@ -1,8 +1,8 @@
 {
   "name": "claude-tmux-sidebar",
-  "displayName": "AgentMux — Claude, Codex, OpenCode, Hermes & Antigravity in tmux",
-  "description": "Five agents, one terminal flow: switch fast and hand off work intelligently between Claude Code, Codex, OpenCode, Hermes and Google Antigravity in tmux.",
-  "version": "0.12.0",
+  "displayName": "AgentMux — Claude, Codex, OpenCode, Hermes, Pi & Antigravity in tmux",
+  "description": "Six agents, one terminal flow — plus free mode, which mirrors any tmux session you already have: switch fast and hand off work intelligently between Claude Code, Codex, OpenCode, Hermes, Pi and Google Antigravity in tmux.",
+  "version": "0.13.0",
   "publisher": "Danesed",
   "license": "MIT",
   "icon": "icon.png",
@@ -24,6 +24,7 @@
     "opencode",
     "nous-research",
     "hermes",
+    "pi",
     "tmux",
     "terminal",
     "sidebar",
@@ -132,6 +133,69 @@
         "command": "claudeTmux.removeIntegrations",
         "title": "Remove agent integrations (hooks and plugins)",
         "category": "AgentMux"
+      },
+      {
+        "command": "claudeTmux.addTmuxSession",
+        "title": "Mirror an existing tmux session (free mode)…",
+        "category": "AgentMux",
+        "icon": "$(add)"
+      },
+      {
+        "command": "claudeTmux.removeCustomAgent",
+        "title": "Remove a custom agent…",
+        "category": "AgentMux"
+      },
+      {
+        "command": "claudeTmux.manageIntegrations",
+        "title": "Agent integrations: show, install or remove…",
+        "category": "AgentMux",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "claudeTmux.gotoAttention",
+        "title": "Go to the agent that needs you",
+        "category": "AgentMux",
+        "icon": "$(bell)"
+      },
+      {
+        "command": "claudeTmux.lastAgent",
+        "title": "Go back to the previous agent",
+        "category": "AgentMux"
+      },
+      {
+        "command": "claudeTmux.nextAgent",
+        "title": "Go to the next running agent",
+        "category": "AgentMux"
+      },
+      {
+        "command": "claudeTmux.prevAgent",
+        "title": "Go to the previous running agent",
+        "category": "AgentMux"
+      },
+      {
+        "command": "claudeTmux.jumpAgent",
+        "title": "Go to the Nth running agent",
+        "category": "AgentMux"
+      },
+      {
+        "command": "claudeTmux.send",
+        "title": "Send text to an agent…",
+        "category": "AgentMux"
+      },
+      {
+        "command": "claudeTmux.capture",
+        "title": "Capture an agent's output",
+        "category": "AgentMux"
+      },
+      {
+        "command": "claudeTmux.status",
+        "title": "Show agent status",
+        "category": "AgentMux"
+      },
+      {
+        "command": "claudeTmux.waitFor",
+        "title": "Wait for an agent to finish",
+        "category": "AgentMux"
       }
     ],
     "menus": {
@@ -186,6 +250,44 @@
         },
         {
           "command": "claudeTmux.removeIntegrations"
+        },
+        {
+          "command": "claudeTmux.addTmuxSession"
+        },
+        {
+          "command": "claudeTmux.removeCustomAgent"
+        },
+        {
+          "command": "claudeTmux.manageIntegrations"
+        },
+        {
+          "command": "claudeTmux.gotoAttention"
+        },
+        {
+          "command": "claudeTmux.lastAgent"
+        },
+        {
+          "command": "claudeTmux.nextAgent"
+        },
+        {
+          "command": "claudeTmux.prevAgent"
+        },
+        {
+          "command": "claudeTmux.jumpAgent",
+          "when": "false"
+        },
+        {
+          "command": "claudeTmux.send"
+        },
+        {
+          "command": "claudeTmux.capture"
+        },
+        {
+          "command": "claudeTmux.status"
+        },
+        {
+          "command": "claudeTmux.waitFor",
+          "when": "false"
         }
       ]
     },
@@ -194,6 +296,11 @@
         "command": "claudeTmux.view.focus",
         "key": "ctrl+shift+a",
         "mac": "cmd+shift+a"
+      },
+      {
+        "command": "claudeTmux.gotoAttention",
+        "key": "ctrl+shift+alt+a",
+        "mac": "cmd+shift+alt+a"
       }
     ],
     "configuration": {
@@ -220,6 +327,11 @@
           "default": true,
           "description": "Start and resume Codex with Full Access (`--dangerously-bypass-approvals-and-sandbox`). This disables approval prompts and sandbox protection; turn it off when working in an untrusted repository."
         },
+        "claudeTmux.codexHooks": {
+          "type": "boolean",
+          "default": true,
+          "description": "Pass Codex's native lifecycle hooks (SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, PermissionRequest, Stop) at launch, so Codex reports working / needs input / done as ground truth instead of leaving them to screen heuristics. The hooks are passed per launch with -c and never written into your config.toml. Codex asks once to trust the hook commands (\"N hooks need review\" — press t); until you do, they stay inactive and the notify program still reports done. Requires claudeTmux.stateHooks. Needs Codex 0.147 or newer."
+        },
         "claudeTmux.codexReadClaudeRules": {
           "type": "boolean",
           "default": true,
@@ -244,6 +356,16 @@
           "type": "string",
           "default": "tmux_hermes_",
           "description": "Hermes tmux session prefix. Session = <prefix><folder name> (e.g. tmux_hermes_my-project)."
+        },
+        "claudeTmux.piArgs": {
+          "type": "string",
+          "default": "",
+          "description": "Arguments passed to `pi` (Earendil) when starting or resuming a session. Empty by default, and deliberately so: pi ships no sandbox and no per-tool approval prompts, so there is no permission flag to bypass — the agent already acts freely. The one prompt pi does show is a first-run project-trust question, which decides whether to load the REPOSITORY's own .pi settings, extensions and skills; add `-a` to answer it automatically for every run, or answer it once in the pane and pi remembers the folder."
+        },
+        "claudeTmux.piSessionPrefix": {
+          "type": "string",
+          "default": "tmux_pi_",
+          "description": "Pi tmux session prefix. Session = <prefix><folder name> (e.g. tmux_pi_my-project)."
         },
         "claudeTmux.antigravityArgs": {
           "type": "string",
@@ -386,7 +508,7 @@
         "claudeTmux.detectionRules": {
           "type": "object",
           "default": {},
-          "description": "Per-agent screen detection rules used when an agent reports no lifecycle state. Keys are agent ids (claude, codex, opencode, hermes, antigravity); each may set \"needsInput\" and \"working\" to an array of case-insensitive regular expressions. A provided array REPLACES the built-in list for that agent, so [] disables a noisy rule. Run \"AgentMux: Explain the active agent's state\" to see which rule matched.",
+          "description": "Per-agent screen detection rules used when an agent reports no lifecycle state. Keys are agent ids (claude, codex, opencode, hermes, pi, antigravity, or the id of any claudeTmux.customAgents entry); each may set \"needsInput\" and \"working\" to an array of case-insensitive regular expressions. A provided array REPLACES the built-in list for that agent, so [] disables a noisy rule. Run \"AgentMux: Explain the active agent's state\" to see which rule matched.",
           "additionalProperties": {
             "type": "object",
             "properties": {
@@ -400,6 +522,98 @@
                 "type": "array",
                 "items": {
                   "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "claudeTmux.customAgents": {
+          "type": "array",
+          "default": [],
+          "markdownDescription": "Free mode — extra agent tabs declared here instead of shipped in a release. Two shapes:\n\n- **Launch** `{ \"id\": \"aider\", \"label\": \"Aider\", \"command\": \"aider\", \"args\": \"--yes\" }` — AgentMux manages it exactly like a built-in agent: its own tmux session, presence, status, input, handoffs, arbiter and cleanup.\n- **Mirror** `{ \"id\": \"build\", \"label\": \"Build\", \"session\": \"my-build-loop\" }` — the tab mirrors a tmux session **you** started. AgentMux never creates, restarts or cleans up such a session; it only shows it and types into it, and it is the one kind of tab not tied to the workspace root.\n\nAdd a mirror entry from the palette with **AgentMux: Mirror an existing tmux session (free mode)…**. Changes take effect after a window reload. Max 12 entries.",
+          "items": {
+            "type": "object",
+            "required": [
+              "id"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_-]{0,23}$",
+                "description": "Unique agent id: lower-case, starts with a letter, up to 24 characters. Must not be a built-in id (claude, codex, opencode, hermes, pi, antigravity)."
+              },
+              "label": {
+                "type": "string",
+                "description": "Tab label. Defaults to the id."
+              },
+              "command": {
+                "type": "string",
+                "description": "Command AgentMux runs in a tmux session it creates and manages. Omit when using \"session\"."
+              },
+              "args": {
+                "type": "string",
+                "description": "Arguments appended to \"command\" on every start and resume."
+              },
+              "session": {
+                "type": "string",
+                "description": "Free mode: the exact name of an EXISTING tmux session to mirror. AgentMux never creates, restarts or cleans it up. Cannot contain spaces, ':' or '.' (tmux target syntax)."
+              },
+              "sessionPrefix": {
+                "type": "string",
+                "description": "tmux session prefix for a launch-mode agent. Session = <prefix><folder name>. Defaults to tmux_<id>_."
+              },
+              "pane": {
+                "type": "string",
+                "description": "Case-insensitive regular expression matched against the pane's running command, so an instance you started outside AgentMux is adopted. Defaults to the command name."
+              },
+              "installCmd": {
+                "type": "string",
+                "description": "Install hint shown by the preflight banner when the command is not on PATH."
+              },
+              "accent": {
+                "type": "string",
+                "pattern": "^#[0-9a-fA-F]{6}$",
+                "description": "Tab colour, as #rrggbb. Defaults to a hue derived from the id, so the same id always looks the same."
+              },
+              "mark": {
+                "type": "string",
+                "maxLength": 2,
+                "description": "One or two glyphs shown instead of the label once the tab is too narrow for one. Defaults to the first two letters of the label."
+              },
+              "modEnter": {
+                "type": "string",
+                "description": "Bytes this agent reads as \"newline, do not submit\" for Shift+Enter, written as an escape sequence: \"\\x1b[13;2u\" (CSI-u, what Claude, Codex and OpenCode use) or \"\\x1b[27;2;13~\" (xterm modifyOtherKeys, what Hermes, pi and Antigravity use). Leave it out and Shift+Enter submits, as it always has — a wrong sequence types visible garbage into the input box, so it is never guessed."
+              },
+              "detection": {
+                "type": "object",
+                "description": "Screen detection rules for this agent, same shape as claudeTmux.detectionRules.",
+                "properties": {
+                  "needsInput": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "working": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              },
+              "resume": {
+                "type": "object",
+                "description": "Optional resume commands. Templates: {args} expands to \"args\", {id} to the shell-quoted conversation id.",
+                "properties": {
+                  "latest": {
+                    "type": "string",
+                    "description": "Command behind \"Resume previous session\", e.g. \"aider --restore {args}\"."
+                  },
+                  "byId": {
+                    "type": "string",
+                    "description": "Command that resumes one conversation id, e.g. \"aider --session {id} {args}\"."
+                  }
                 }
               }
             }
