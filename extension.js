@@ -541,6 +541,98 @@ const AGENT_IDS = Object.keys(AGENTS);
 // declarative and per-agent means a wrong verdict is a settings edit
 // (claudeTmux.detectionRules) rather than a release, and each agent's TUI can
 // be described separately instead of through one regex shared by all of them.
+//
+// Every rule names the REGION it is matched against instead of being thrown at
+// one flat blob, because where a phrase sits decides what it means: "do you
+// want to" typed into the prompt box is the user asking a question, the same
+// words in the agent's dialog are the agent asking one. The regions:
+//   title    the pane title, i.e. whatever the TUI wrote with OSC 0/2
+//   tail     the last 12 non-blank lines of the frame, ANSI stripped
+//   body     `tail` with the prompt box cut out of it — the default for
+//            needs-input rules, and the one that stops the user's own typing
+//            from impersonating an agent's question
+//   foot     the last 5 non-blank lines: the mode/status line a TUI keeps
+//            pinned to the bottom, where interrupt affordances live
+//   head     the first 20 non-blank lines: first-run banners and trust prompts
+//   prompt   the prompt box body itself, between the last two rule lines
+//   dialog   everything below the last rule line the TUI drew
+//   screen   the whole captured frame
+//
+// A rule is a pattern, an array of patterns that must all match, or an object
+// { region, priority, match, any, not } for anything more specific:
+//   match     pattern or patterns, ALL of which must match
+//   any       patterns, at least ONE of which must match
+//   not       patterns, NONE of which may match — the guard that lets a broad
+//             rule stay broad without swallowing the screens it should not
+// Defaults by list: needs-input -> region body, priority 900; working -> tail,
+// 500; hold -> tail, 1000; anything under `title` -> title, 1100.
+//
+// Rules are evaluated highest priority first, declaration order breaking ties,
+// and the first match wins. Priority is what lets a broad low-confidence rule
+// coexist with a narrow high-confidence one instead of racing it: an agent
+// stating "working" in its own title (1100) outranks a viewer covering the
+// pane (1000), which outranks a dialog shape (900), which outranks the mode
+// line looking busy (500).
+//
+// A rule casts one of three verdicts: 'needs-input', 'working', or 'hold'. A
+// hold rule matches a screen that says nothing about the agent at all — a
+// transcript viewer, a settings picker — and freezes the status instead of
+// changing it. Without it, opening the transcript mid-turn changes the frame,
+// matches nothing, and the decay timer quietly walks a working agent down to
+// done and then idle while it is still working.
+//
+// A rule's pattern may also be an ARRAY of patterns, all of which must match
+// the region. That is what makes a hold rule safe to write: "showing detailed
+// transcript" alone is a phrase an agent could print in its own output, but it
+// plus the viewer's own footer is the viewer.
+// A line that is nothing but the horizontal rule a TUI draws around its prompt
+// box and its dialogs. Claude and pi draw "──…", Codex's picker "▔▔…".
+const RULE_LINE_CHARS = /^[\u2500\u2501\u2504\u2505\u2508\u2509\u250c-\u254b\u2550\u2554-\u256c\u2580\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588\u2594\u2594_=-]+$/;
+function isRuleLine(line) {
+  const packed = String(line).replace(/\s+/g, '');
+  return packed.length >= 8 && RULE_LINE_CHARS.test(packed);
+}
+
+// Every region a rule may name, in the order Explain prints them.
+const DETECTION_REGIONS = ['title', 'foot', 'prompt', 'dialog', 'body', 'tail', 'head', 'screen'];
+
+// Slice one captured frame into the regions rules are matched against. Built
+// once per evaluated frame, eagerly: a frame is a few dozen lines, and a lazy
+// getter would only trade that for a memo table.
+function detectionContext(frame, title) {
+  const text = stripAnsi(String(frame || ''));
+  const lines = text ? text.split('\n') : [];
+  const kept = lines.filter((line) => line.trim());
+  const tail = kept.slice(-12);
+  // Where the TUI drew its rule lines, within the kept lines, so the prompt box
+  // can be located relative to the same list the tail is cut from.
+  const bars = [];
+  for (let i = 0; i < kept.length; i++) if (isRuleLine(kept[i])) bars.push(i);
+  const lastBar = bars.length ? bars[bars.length - 1] : -1;
+  const prevBar = bars.length >= 2 ? bars[bars.length - 2] : -1;
+  // The prompt box body: what sits between the last two rules. Cutting exactly
+  // this out of the tail is what makes `body` safe — a phrase the user typed is
+  // gone from it, while a dialog (which replaces the box rather than sitting
+  // inside it) is untouched.
+  const promptFrom = prevBar >= 0 ? prevBar + 1 : -1;
+  const promptTo = prevBar >= 0 ? lastBar : -1;
+  const inPrompt = (i) => promptFrom >= 0 && i >= promptFrom && i < promptTo;
+  const body = [];
+  for (let i = Math.max(0, kept.length - 12); i < kept.length; i++) {
+    if (!inPrompt(i)) body.push(kept[i]);
+  }
+  return {
+    title: title || '',
+    screen: text,
+    tail: tail.join('\n'),
+    body: body.join('\n'),
+    foot: kept.slice(-5).join('\n'),
+    head: kept.slice(0, 20).join('\n'),
+    prompt: promptFrom >= 0 ? kept.slice(promptFrom, promptTo).join('\n') : '',
+    dialog: lastBar >= 0 ? kept.slice(lastBar + 1).join('\n') : '',
+  };
+}
+
 const DETECTION_BASELINE = {
   needsInput: [
     'do you want to',
@@ -555,29 +647,91 @@ const DETECTION_BASELINE = {
 };
 
 const AGENT_DETECTION = {
+  // `hold` entries are evaluated before the state rules for that region.
   // Claude's first-run folder-trust dialog defaults to "No, exit", so a pane
   // sitting on it is genuinely blocked — and it appears before any hook can
   // report state. Observed wording, taken from a live pane.
   claude: {
+    // Ctrl+O opens the transcript over the live UI, /model the model picker.
+    // Both replace the bottom of the frame with chrome that describes itself
+    // and not the agent, so they freeze the status rather than resetting it.
+    // Both footers measured live on Claude Code v2.1.252:
+    //   Showing detailed transcript · ctrl+o to toggle · ↑↓ scroll · v to open
+    //   in code · ? for shortcuts
+    //   Enter to set as default · s to use this session only · Esc to cancel
+    hold: [
+      ['showing detailed transcript', 'ctrl\\+o to toggle|\\u2191\\u2193 scroll|\\? for shortcuts'],
+      ['select model', 'enter to set as default', 'esc to cancel'],
+    ],
     needsInput: ['quick safety check', 'yes, i trust this folder'],
-    working: ['esc to interrupt'],
+    // All measured on v2.1.252.
+    working: [
+      // The interrupt affordance lives in the mode line pinned to the bottom
+      // ("⏸ manual mode on · 1 shell · esc to interrupt · ← for agents"), so it
+      // is matched there and not anywhere in the tail, where the same words can
+      // sit in scrolled-back output.
+      { region: 'foot', match: 'esc to interrupt' },
+      // A backgrounded shell keeps running after the turn ends: the mode line
+      // reads "⏸ manual mode on · 1 shell · ← for agents · ↓ to manage" with no
+      // interrupt affordance at all, and used to decay straight to idle while
+      // the work was still going.
+      { region: 'foot', match: '(?:^|\\n)\\s*[\u23f8\u23f5].*\u00b7\\s+[1-9]\\d*\\s+shells?\\s+\u00b7' },
+      // The live turn line above the prompt box: "· Spinning… (8s · ↓ 494
+      // tokens)". The ellipsis and the elapsed-time parenthesis are what
+      // separate it from the finished line, "✻ Cooked for 3s · done 1:48 PM".
+      {
+        region: 'body',
+        match: '(?:^|\\n)\\s*[\\u002a\\u00b7\\u2722\\u2736\\u273b\\u273d]\\s+\\S[^\\n]*\u2026(?:\\s+\\(\\d+[smh]|\\s*$)',
+        not: ['\u00b7 done \\d'],
+      },
+    ],
   },
   // "N hooks need review before they can run" is Codex's one-time trust prompt
   // for the hook set AgentMux passes at launch: it genuinely is waiting for a
   // keypress, and until it gets one the hooks stay inactive.
   codex: {
-    needsInput: ['allow command', 'hooks? needs? review', 'press t to trust'],
+    // Codex's transcript viewer footer, which owns the whole bottom of the
+    // frame while it is open.
+    hold: [{ region: 'foot', match: ['\\u2191/\\u2193 to scroll', 'q to quit'] }],
+    needsInput: [
+      'allow command', 'hooks? needs? review', 'press t to trust',
+      // Measured live: Codex opens on "> You are in <dir>" followed by "Do you
+      // trust the contents of this directory?" at the TOP of the frame, which
+      // no tail rule could ever have reached.
+      { region: 'head', match: ['you are in ', 'do you trust the contents of this directory'] },
+    ],
+    // herdr's manifest, measured against Codex, reads its working fallback
+    // out of the bottom 3 lines; `foot` is the bottom 5 and covers it.
+    working: [{ region: 'foot', match: 'esc to interrupt' }],
+  },
+  // Deliberately left on the default `tail`. Claude's interrupt affordance
+  // was measured in its pinned mode line, which is why THAT rule was
+  // tightened to `foot`; OpenCode's was not measured here, and herdr — which
+  // did measure it — searches OpenCode's whole recent screen rather than a
+  // footer. Narrowing a region on an assumption loses a working state
+  // outright, so an unmeasured rule stays as wide as it already was.
+  opencode: {
+    needsInput: ['approve\\b', 'permission'],
     working: ['esc to interrupt'],
   },
-  opencode: { needsInput: ['approve\\b', 'permission'], working: ['esc to interrupt'] },
   // Observed on first run: the workspace trust prompt and its menu footer.
-  antigravity: { needsInput: ['do you trust', '↑/↓ navigate'], working: ['esc to interrupt'] },
+  // Same reasoning as OpenCode: unmeasured here, and herdr matches
+  // Antigravity's spinner against the whole recent screen.
+  antigravity: {
+    needsInput: ['do you trust', '\u2191/\u2193 navigate'],
+    working: ['esc to interrupt'],
+  },
   // Observed in a live --cli pane: while a turn runs, the input line becomes
   // "⚕ ❯ msg=interrupt · /queue · /bg · /steer · Ctrl+C cancel"; back at the
   // prompt it is a bare "❯". Matching the interrupt affordance is stable and
   // does not depend on the status-bar glyphs (⏱ vs ⏲), which differ by a
   // single codepoint.
-  hermes: { needsInput: [], working: ['msg=interrupt', 'ctrl\\+c cancel'] },
+  hermes: {
+    needsInput: [],
+    // Measured idle: the status line and the input line are the last two
+    // before the closing rule, so a running turn's affordance is in `foot`.
+    working: [{ region: 'foot', match: 'msg=interrupt' }, { region: 'foot', match: 'ctrl\\+c cancel' }],
+  },
   // Observed in a live pane: a running turn shows "Working... (escape to
   // interrupt)", and every blocking picker — including the first-run "Trust
   // project folder?" prompt — shows the select footer. The word "interrupt"
@@ -595,47 +749,194 @@ const AGENT_DETECTION = {
   },
 };
 
+// The pane title as a state channel. A TUI that animates its own title states
+// its status more reliably than any screen scrape, costs nothing to read (the
+// title already rides along with every presence poll, hidden view or not) and
+// keeps working for panes AgentMux never launched, where no hook could have
+// been installed.
+//
+// MEASURED here on 2026-09-01, against the versions actually installed: only
+// Claude and pi write a title at all — codex, hermes and opencode leave it at
+// the hostname or at a constant ("OpenCode"). Claude Code v2.1.252 writes
+// "✳ <summary>" and that prefix NEVER changes: sampled every 200ms across a
+// full 12-second turn it stayed "✳" from submit to finish, and only the
+// summary text was rewritten. So there is deliberately NO idle rule below — on
+// this version "✳" means nothing about the state, and reading it as idle would
+// drag a working agent to `done` on every poll. Working and blocked markers are
+// unambiguous on versions that do emit them, so they ship and simply never
+// match on a version that does not.
+const TITLE_DETECTION = {
+  claude: {
+    // Braille frames are the spinner up to 2.1.227; the half circles are the
+    // 2.1.228 one. Both sit at the head of the title, before the summary.
+    working: ['^[\u2800-\u28ff\u25d0-\u25d3] '],
+  },
+  codex: {
+    working: ['(?:^| )[\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f](?: |$)'],
+    needsInput: ['action required'],
+  },
+  hermes: {
+    working: ['^\u23f3'],
+    needsInput: ['^\u26a0'],
+  },
+};
+
 const detectionCache = new Map();
+
+// What a rule is worth when it does not say. See the header note for why these
+// numbers are ordered the way they are.
+const DETECTION_PRIORITY = { title: 1100, hold: 1000, 'needs-input': 900, working: 500 };
+
+// Compile one list of entries into rules and append them. An entry is one
+// pattern, an array of patterns that must ALL match (which is how a rule gets
+// specific enough to be safe without one unreadable regex), or an object with
+// region / priority / match / any / not. A bad user regex drops that one rule
+// rather than taking the whole agent down.
+function pushRules(entries, defaultRegion, state, out) {
+  const defaultPriority = defaultRegion === 'title'
+    ? DETECTION_PRIORITY.title
+    : DETECTION_PRIORITY[state];
+  for (const entry of entries || []) {
+    const scoped = entry && !Array.isArray(entry) && typeof entry === 'object';
+    const region = scoped && typeof entry.region === 'string' ? entry.region : defaultRegion;
+    const priority = scoped && Number.isFinite(entry.priority) ? entry.priority : defaultPriority;
+    const asList = (value) => {
+      if (value === undefined || value === null) return [];
+      return Array.isArray(value) ? value : [value];
+    };
+    const all = asList(scoped ? entry.match : entry);
+    const any = asList(scoped ? entry.any : null);
+    const not = asList(scoped ? entry.not : null);
+    if (!all.length && !any.length) continue; // a rule of pure guards matches nothing
+    const bad = [...all, ...any, ...not].some((p) => typeof p !== 'string' || !p);
+    if (bad) continue;
+    try {
+      out.push({
+        region,
+        state,
+        priority,
+        all: all.map((p) => new RegExp(p, 'i')),
+        any: any.map((p) => new RegExp(p, 'i')),
+        not: not.map((p) => new RegExp(p, 'i')),
+        source: [
+          all.join(' + '),
+          any.length ? `any(${any.join(' | ')})` : '',
+          not.length ? `not(${not.join(' | ')})` : '',
+        ].filter(Boolean).join(' '),
+      });
+    } catch { /* skip a bad user regex */ }
+  }
+}
+
+// The compiled rule list for one agent, in evaluation order. Title rules come
+// first: a title that says "working" is the agent reporting on itself, which
+// beats anything inferred from the shape of its screen.
 function detectionRules(agent) {
   const overrides = cfg().get('detectionRules') || {};
   const key = `${agent}\u0000${JSON.stringify(overrides[agent] || null)}`;
   const hit = detectionCache.get(agent);
   if (hit && hit.key === key) return hit.rules;
-  // Built-in rules live in AGENT_DETECTION; a free-mode agent carries its own
-  // on its registry entry, so both kinds are overridable the same way.
+  // Built-in rules live in AGENT_DETECTION / TITLE_DETECTION; a free-mode agent
+  // carries its own on its registry entry, so both kinds override the same way.
   const own = AGENT_DETECTION[agent] || AGENTS[agent]?.detection || {};
+  const ownTitle = TITLE_DETECTION[agent] || own.title || {};
   const override = overrides[agent] || {};
-  const compile = (patterns) => {
-    const list = [];
-    for (const pattern of patterns || []) {
-      try { list.push(new RegExp(pattern, 'i')); } catch { /* skip a bad user regex */ }
-    }
-    return list;
-  };
+  const overrideTitle = (override.title && typeof override.title === 'object') ? override.title : {};
   // An override replaces that list outright, so a noisy built-in can be removed
   // (set it to []), not merely added to.
-  const rules = {
-    needsInput: compile(Array.isArray(override.needsInput)
-      ? override.needsInput
-      : [...DETECTION_BASELINE.needsInput, ...(own.needsInput || [])]),
-    working: compile(Array.isArray(override.working)
-      ? override.working
-      : [...DETECTION_BASELINE.working, ...(own.working || [])]),
-  };
+  const pick = (chosen, fallback) => (Array.isArray(chosen) ? chosen : fallback);
+  const rules = [];
+  pushRules(pick(overrideTitle.hold, ownTitle.hold), 'title', 'hold', rules);
+  pushRules(pick(overrideTitle.needsInput, ownTitle.needsInput), 'title', 'needs-input', rules);
+  pushRules(pick(overrideTitle.working, ownTitle.working), 'title', 'working', rules);
+  // Hold before the state rules: a viewer covering the screen must win over
+  // whatever the covered screen would otherwise have looked like.
+  pushRules(pick(override.hold, own.hold), 'tail', 'hold', rules);
+  // needs-input defaults to `body`, the tail minus the prompt box, so a
+  // question the USER typed cannot be read as a question the AGENT asked.
+  pushRules(pick(override.needsInput, [...DETECTION_BASELINE.needsInput, ...(own.needsInput || [])]),
+    'body', 'needs-input', rules);
+  pushRules(pick(override.working, [...DETECTION_BASELINE.working, ...(own.working || [])]),
+    'tail', 'working', rules);
+  // Highest priority first, declaration order preserved within a tie (sort is
+  // stable), so the evaluation order below is exactly what Explain prints.
+  rules.sort((a, b) => b.priority - a.priority);
   detectionCache.set(agent, { key, rules });
   return rules;
 }
 
-// Returns { status, pattern } so the Explain command can name the rule that won.
-function detectScreenState(agent, tail) {
-  const rules = detectionRules(agent);
-  for (const re of rules.needsInput) {
-    if (re.test(tail)) return { status: 'needs-input', pattern: re.source };
+// Evaluate an agent's rules against `ctx`, one string per region. Returns
+// { status, region, pattern } so the Explain command can name the rule that won
+// AND the region it looked at; a region `ctx` has nothing for is skipped, so a
+// title rule costs nothing on a host whose panes carry no title.
+function detectState(agent, ctx) {
+  for (const rule of detectionRules(agent)) {
+    const text = ctx[rule.region];
+    if (!text) continue;
+    if (!rule.all.every((re) => re.test(text))) continue;
+    if (rule.any.length && !rule.any.some((re) => re.test(text))) continue;
+    if (rule.not.some((re) => re.test(text))) continue;
+    return {
+      status: rule.state, region: rule.region, pattern: rule.source, priority: rule.priority,
+    };
   }
-  for (const re of rules.working) {
-    if (re.test(tail)) return { status: 'working', pattern: re.source };
+  return { status: null, region: null, pattern: null, priority: 0 };
+}
+
+// Why did every rule do what it did? The winner alone does not debug a wrong
+// dot — the rule that missed by one pattern is usually the interesting one, and
+// so is the guard that vetoed the rule you expected to win.
+function explainDetection(agent, ctx) {
+  const show = (list) => list.map((re) => `/${re.source}/`).join(' ');
+  const rows = [];
+  let winner = null;
+  for (const rule of detectionRules(agent)) {
+    const text = ctx[rule.region];
+    let outcome;
+    let why = '';
+    if (text === undefined) { outcome = 'skip'; why = 'no region by that name'; }
+    else if (!text) { outcome = 'skip'; why = 'that region is empty in this frame'; }
+    else {
+      const missed = rule.all.filter((re) => !re.test(text));
+      const anyHit = !rule.any.length || rule.any.some((re) => re.test(text));
+      const vetoed = rule.not.filter((re) => re.test(text));
+      if (missed.length) {
+        outcome = 'no';
+        // Only worth naming when the rule has more than one thing to miss.
+        if (rule.all.length + rule.any.length > 1) why = `missing ${show(missed)}`;
+      } else if (!anyHit) { outcome = 'no'; why = 'none of its any() patterns matched'; }
+      else if (vetoed.length) { outcome = 'veto'; why = `${show(vetoed)} matched`; }
+      else if (winner) { outcome = 'match'; why = 'but outranked by the rule above'; }
+      else { outcome = 'MATCH'; winner = rule; }
+    }
+    rows.push({ rule, outcome, why });
   }
-  return { status: null, pattern: null };
+  return { winner, rows };
+}
+
+// The shared body of both Explain commands: the regions a frame was cut into
+// and what every rule made of them. Returns lines, so the live command can
+// print it under the session facts and the file command can print it alone.
+function explainLines(agent, ctx) {
+  const { winner, rows } = explainDetection(agent, ctx);
+  const lines = [
+    `  verdict        : ${winner
+      ? `${winner.state}  <-  [${winner.region}] p${winner.priority} /${winner.source}/`
+      : '(no rule matched — the status falls back to frame-diff activity and decay)'}`,
+    '',
+    '  regions cut from this frame:',
+  ];
+  for (const region of DETECTION_REGIONS) {
+    const text = ctx[region] || '';
+    const shown = text ? text.split('\n').map((line) => `      | ${line}`).join('\n') : '      | (empty)';
+    lines.push(`    ${region}:`, shown);
+  }
+  lines.push('', `  rules evaluated, highest priority first (${rows.length}):`);
+  for (const { rule, outcome, why } of rows) {
+    lines.push(`    ${String(rule.priority).padStart(4)}  ${rule.state.padEnd(11)} [${rule.region.padEnd(6)}] `
+      + `${outcome.padEnd(6)} /${rule.source}/${why ? `   — ${why}` : ''}`);
+  }
+  return lines;
 }
 
 // ---- free mode: agents declared in settings ---------------------------------
@@ -2343,6 +2644,7 @@ class ClaudeTmuxView {
       backgroundPollAt: 0,
       attention: null,
       paneTitle: '',           // what the TUI wrote there (Claude: the conversation summary)
+      detectionHold: false,    // a viewer/picker is covering the pane: freeze the status
       promptLine: '',          // reconstructed prompt for Alt+Up recall (null = bailed)
     };
   }
@@ -2658,13 +2960,45 @@ class ClaudeTmuxView {
     }
   }
 
+  // The pane title is read for every agent on every presence poll, whether the
+  // view is visible or not and whether that pane's frame is being captured or
+  // not, so a TUI that states its status there is seen in places the frame
+  // diff never reaches. Hook reports still outrank it: this only runs when no
+  // hook spoke for the pane.
+  applyTitleState(agent) {
+    const state = this.agentState[agent];
+    if (!state.paneTitle) return;
+    const detected = detectState(agent, detectionContext('', state.paneTitle));
+    if (!detected.status) return;
+    state.lastDetection = detected;
+    if (detected.status === 'hold') { state.detectionHold = true; return; }
+    state.detectionHold = false;
+    if (detected.status === 'needs-input') {
+      this.setAgentStatus(agent, 'needs-input');
+      return;
+    }
+    if (detected.status === 'working') {
+      state.lastActivity = Date.now();
+      this.setAgentStatus(agent, 'working');
+    }
+  }
+
   updateActivity(agent, frame, changed) {
     const state = this.agentState[agent];
     const now = Date.now();
     if (changed) {
-      const tail = stripAnsi(frame).split('\n').slice(-12).join('\n');
-      const detected = detectScreenState(agent, tail);
+      const detected = detectState(agent, detectionContext(frame, state.paneTitle));
       state.lastDetection = detected; // surfaced by the Explain command
+      // A viewer or picker is covering the pane: this frame describes the
+      // chrome, not the agent. Freeze — and keep freezing once the user stops
+      // scrolling, or the decay below would walk a working agent down to idle
+      // behind an open transcript.
+      if (detected.status === 'hold') {
+        state.detectionHold = true;
+        state.lastChange = now;
+        return;
+      }
+      state.detectionHold = false;
       if (detected.status === 'needs-input') {
         this.setAgentStatus(agent, 'needs-input');
         return;
@@ -2680,6 +3014,7 @@ class ClaudeTmuxView {
       }
       return;
     }
+    if (state.detectionHold) return; // frozen until the covering UI goes away
     if (state.status === 'working' && now - state.lastActivity > 4000) {
       this.setAgentStatus(agent, 'done');
     } else if (state.status === 'done' && now - state.statusSince > 3500) {
@@ -2722,6 +3057,8 @@ class ClaudeTmuxView {
         if (paneTitle !== state.paneTitle) { state.paneTitle = paneTitle; changed = true; }
         if (present && info.hookState && cfg().get('stateHooks') !== false) {
           this.applyHookState(agent, info.hookState, info.hookTool);
+        } else if (present) {
+          this.applyTitleState(agent);
         }
         if (present && cfg().get('telemetry') !== false) {
           const stats = await this.tails[agent].poll(cwd);
@@ -2906,6 +3243,8 @@ class ClaudeTmuxView {
       case 'resize':  return this.setSize(m.cols, m.rows);
       case 'start':   return this.startSession(m.agent);
       case 'attach':  return this.attachExisting(m.agent);
+      case 'addTmuxSession':   return this.addTmuxSession();
+      case 'removeCustomAgent': return this.removeCustomAgent();
       case 'resume':  return this.startResumed(m.id, m.agent);
       case 'refresh': this.agentState[this.activeAgent].sessionsSent = false; return this.tick(true);
       case 'resync':  this.resetLiveFrame(this.activeAgent); return this.tick(true);
@@ -3136,12 +3475,12 @@ class ClaudeTmuxView {
       `  hook session id: ${info.hookSessionId || '(none)'}`,
       `  authority      : ${hooksOn && info.hookState ? 'hook (authoritative)' : 'screen rules + decay (fallback)'}`,
       '',
-      `  last screen hit: ${state.lastDetection?.status
-        ? `${state.lastDetection.status}  <-  /${state.lastDetection.pattern}/`
+      `  last rule hit  : ${state.lastDetection?.status
+        ? `${state.lastDetection.status}  <-  [${state.lastDetection.region}] /${state.lastDetection.pattern}/`
         : '(no rule matched the last changed frame)'}`,
-      `  rules loaded   : ${rules.needsInput.length} needs-input, ${rules.working.length} working`,
-      `    needs-input  : ${rules.needsInput.map((r) => `/${r.source}/`).join('  ') || '(none)'}`,
-      `    working      : ${rules.working.map((r) => `/${r.source}/`).join('  ') || '(none)'}`,
+      `  frozen         : ${state.detectionHold ? 'yes — a hold rule matched (viewer/picker covering the pane)' : 'no'}`,
+      '',
+      ...explainLines(agent, detectionContext(state.lastFrame || '', state.paneTitle)),
       `  override these : claudeTmux.detectionRules -> "${agent}"`,
       '',
       `  last frame chg : ${state.lastChange ? fmtDurationShort(Date.now() - state.lastChange) + ' ago' : '(never)'}`,
@@ -3152,6 +3491,64 @@ class ClaudeTmuxView {
     this.output().appendLine(lines.join('\n'));
     this.output().appendLine('');
     this.output().show(true);
+  }
+
+  // Explain a screen captured to a FILE instead of the live pane. A rule that
+  // misfires is usually gone by the time anyone looks, so the useful loop is:
+  //   tmux capture-pane -p -t =<session>: > screen.txt
+  // and then run this against it. It reads no tmux state at all, so it works
+  // for a screen captured on another machine, pasted into a bug report, or
+  // committed as a fixture — which is exactly what test/screens holds.
+  async explainScreen(args) {
+    let agent = typeof args?.agent === 'string' ? args.agent : null;
+    let file = typeof args?.file === 'string' ? args.file : null;
+    const title = typeof args?.title === 'string' ? args.title : '';
+    if (!agent) {
+      const picked = await vscode.window.showQuickPick(
+        AGENT_IDS.map((id) => ({ label: AGENTS[id].label, description: id, id })),
+        { title: 'Explain a captured screen', placeHolder: 'Whose rules should be run against it?' }
+      );
+      if (!picked) return null;
+      agent = picked.id;
+    }
+    if (!AGENTS[agent]) {
+      vscode.window.showErrorMessage(`AgentMux: no agent "${agent}".`);
+      return null;
+    }
+    if (!file) {
+      const chosen = await vscode.window.showOpenDialog({
+        title: 'Screen captured with: tmux capture-pane -p -t =<session>: > screen.txt',
+        canSelectMany: false,
+        openLabel: 'Explain',
+      });
+      if (!chosen?.length) return null;
+      file = chosen[0].fsPath;
+    }
+    let frame;
+    try {
+      frame = fs.readFileSync(file, 'utf8');
+    } catch (err) {
+      vscode.window.showErrorMessage(`AgentMux: cannot read ${file} — ${err.message}`);
+      return null;
+    }
+    const ctx = detectionContext(frame, title);
+    const { winner } = explainDetection(agent, ctx);
+    this.output().appendLine([
+      `${AGENTS[agent].label} (${agent}) — ${file}`,
+      `  pane title     : ${title || '(none supplied — pass { title } to include one)'}`,
+      '',
+      ...explainLines(agent, ctx),
+    ].join('\n'));
+    this.output().appendLine('');
+    this.output().show(true);
+    return {
+      agent,
+      file,
+      status: winner ? winner.state : null,
+      region: winner ? winner.region : null,
+      priority: winner ? winner.priority : 0,
+      pattern: winner ? winner.source : null,
+    };
   }
 
   output() {
@@ -5307,6 +5704,7 @@ class ClaudeTmuxView {
       canList: !!AGENTS[agent].listSessions,
       canResumeLatest: !!AGENTS[agent].resumeLatest && !AGENTS[agent].attachSession,
       installCmd: AGENTS[agent].installCmd || '',
+      custom: !!AGENTS[agent].custom,
     }));
     // The accent travels as channels so the stylesheet can build any alpha from
     // it; container queries then swap the label for the mark once a tab is too
@@ -5323,6 +5721,17 @@ class ClaudeTmuxView {
       + (a.canList || a.canResumeLatest
         ? `\n        <button role="menuitem" data-action="attach" data-agent="${esc(a.id)}">${swatch(a)}Resume ${esc(a.label)}…</button>`
         : '')).join('');
+    // Free mode belongs in this menu, not only in the command palette: "add a
+    // tab for a tmux session I already have" is the same intent as "start an
+    // agent", and until now the only way to reach it was knowing the command's
+    // name. The Remove entry appears only once there is something to remove.
+    const freeMenuHtml = `
+        <div class="launch-sep" role="separator"></div>
+        <button role="menuitem" data-action="addTmuxSession"><i class="agent-swatch swatch-none" aria-hidden="true"></i>Mirror a tmux session…</button>`
+      + (roster.some((a) => a.custom)
+        ? `
+        <button role="menuitem" data-action="removeCustomAgent"><i class="agent-swatch swatch-none" aria-hidden="true"></i>Remove a custom agent…</button>`
+        : '');
     const launcherHtml = roster.filter((a) => a.canStart).map((a) =>
       `\n            <button data-launch-agent="${esc(a.id)}">${swatch(a)}Start ${esc(a.label)}</button>`).join('');
     return `<!DOCTYPE html>
@@ -5340,8 +5749,8 @@ class ClaudeTmuxView {
 <body>
   <div id="app" data-cursor="${cursorStyle}" data-links="${flag('fileLinks')}" data-palette="${palette}" data-agents="${esc(JSON.stringify(roster))}">
     <div id="agent-tabs" role="tablist" aria-label="Tmux agent">${tabsHtml}
-      <button id="tab-add" class="tab-add" type="button" aria-label="Start or resume an agent" title="Start or resume an agent" aria-expanded="false" aria-controls="agent-launch-menu">＋</button>
-      <div id="agent-launch-menu" class="launch-menu hidden" role="menu">${launchMenuHtml}
+      <button id="tab-add" class="tab-add" type="button" aria-label="Start an agent, or mirror a tmux session" title="Start an agent, or mirror a tmux session" aria-expanded="false" aria-controls="agent-launch-menu">＋</button>
+      <div id="agent-launch-menu" class="launch-menu hidden" role="menu">${launchMenuHtml}${freeMenuHtml}
       </div>
     </div>
     <div id="screen-wrap">
@@ -5490,6 +5899,7 @@ function activate(context) {
     vscode.commands.registerCommand('claudeTmux.waitFor', (args) => provider.waitForAgent(args)),
     vscode.commands.registerCommand('claudeTmux.clearPromptHistory', () => provider.clearPromptHistory()),
     vscode.commands.registerCommand('claudeTmux.explainState', () => provider.explainState()),
+    vscode.commands.registerCommand('claudeTmux.explainScreen', (args) => provider.explainScreen(args)),
     vscode.commands.registerCommand('claudeTmux.cleanupSessions', () => provider.cleanupSessions()),
     vscode.commands.registerCommand('claudeTmux.removeIntegrations', () => provider.removeIntegrations()),
     vscode.commands.registerCommand('claudeTmux.manageIntegrations', () => provider.manageIntegrations()),

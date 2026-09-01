@@ -88,7 +88,7 @@ From this repository:
 ```bash
 npm run check
 npm run package
-code --install-extension claude-tmux-sidebar-0.13.0.vsix --force
+code --install-extension claude-tmux-sidebar-0.14.0.vsix --force
 ```
 
 Alternatively use VS Code: **Extensions → … → Install from VSIX…**, select the
@@ -263,6 +263,74 @@ arguments (never written to your `config.toml`) and Codex asks once to trust the
 command set — *"N hooks need review before they can run"*, press `t`. Until you
 do, they stay inactive and Codex's `notify` program still reports `done`.
 
+## How AgentMux reads an agent's state
+
+An agent that reports its own lifecycle is always believed first — that is what
+the integrations above are for. When there is no report, AgentMux reads the
+pane, and the question is never just *does this phrase appear* but **where**.
+
+The pane is cut into regions, and every rule names the one it is matched
+against:
+
+| Region | What it is |
+| --- | --- |
+| `title` | The pane title, i.e. whatever the TUI wrote with OSC 0/2. |
+| `foot` | The last 5 non-blank lines: the mode/status line a TUI keeps pinned to the bottom. |
+| `prompt` | The prompt box body, between the last two rule lines the TUI drew. |
+| `dialog` | Everything below the last rule line. |
+| `body` | The last 12 lines **minus the prompt box**. The default for needs-input rules. |
+| `tail` | The last 12 non-blank lines. The default for working and hold rules. |
+| `head` | The first 20 non-blank lines: first-run banners and trust prompts. |
+| `screen` | The whole captured frame. |
+
+`body` is the one that matters most in daily use. Type *"do you want to delete
+the old migrations?"* at Claude and the phrase is in the tail — but it is in the
+prompt box, which `body` cuts out, so the tab does not claim the agent is asking
+you something when it is waiting for you.
+
+A rule casts one of three verdicts. `needs-input` and `working` set the status;
+**`hold` freezes it**. Opening Claude's transcript with Ctrl+O covers the pane
+with chrome that describes itself and not the agent — before, the frame stopped
+changing and the decay timer walked a working agent down to idle behind it.
+
+Rules are evaluated by priority, highest first (title 1100, hold 1000,
+needs-input 900, working 500), first match wins. An entry is one pattern, an
+array of patterns that must **all** match, or an object:
+
+```jsonc
+"claudeTmux.detectionRules": {
+  "claude": {
+    "working": [
+      { "region": "foot", "match": "esc to interrupt" },
+      { "region": "body", "match": "spinning", "not": ["· done \\d"] }
+    ],
+    "hold": [["select model", "esc to cancel"]],
+    "title": { "working": ["^⠿"] }
+  }
+}
+```
+
+A provided list **replaces** the built-in one, so `[]` disables a noisy rule.
+
+### When the dot is wrong
+
+**AgentMux: Explain the active agent's state** prints which signal won — the
+hook, a rule, or decay — the regions the current frame was cut into, and what
+every rule made of them: matched, missed by which pattern, vetoed by which
+guard, or matched but outranked.
+
+A misfiring rule is usually gone by the time you look, so the same report runs
+offline:
+
+```bash
+tmux capture-pane -p -t '=tmux_claude_myproject:' > screen.txt
+```
+
+then **AgentMux: Explain a captured screen** against that file. It touches no
+tmux state, so it works on a screen captured on another machine or pasted into a
+bug report. The screens under `test/screens/` are real captures used exactly
+this way by the test suite.
+
 ## Free mode: any tmux, any agent, no release
 
 The six built-in agents are the ones AgentMux knows how to install, resume and
@@ -302,10 +370,22 @@ never offers it in bulk kill, and never lists it as a leftover to clean up.
 Killing it is possible from the single **Kill** command, which states plainly
 that AgentMux did not create it.
 
-The easy path is the palette: **AgentMux: Mirror an existing tmux session (free
-mode)…** lists your running tmux sessions and writes the entry for you;
-**AgentMux: Remove a custom agent…** removes it and leaves the session running.
-The roster is built once at activation, so both offer a window reload.
+The easy path is the **＋** button at the end of the tab strip. Its menu lists
+the agents you can start or resume, then below a rule:
+
+- **Mirror a tmux session…** — pick from your running tmux sessions and AgentMux
+  writes the settings entry for you.
+- **Remove a custom agent…** — shown only once you have one; removes the entry
+  and leaves the tmux session running.
+
+Both are in the command palette too, as **AgentMux: Mirror an existing tmux
+session (free mode)…** and **AgentMux: Remove a custom agent…**. The roster is
+built once at activation, so both offer a window reload.
+
+If the mirror list comes back empty, there is genuinely nothing to add: sessions
+AgentMux already drives are filtered out, so a machine whose only tmux session
+is an agent tab has nothing left to offer. Start the session you want to mirror
+first, then run it again.
 
 ## Settings
 
@@ -332,7 +412,7 @@ settings.
 | `claudeTmux.antigravityArgs` | `--dangerously-skip-permissions` | Arguments passed to `agy`. |
 | `claudeTmux.customAgents` | `[]` | Free mode: extra agents declared in settings — a new CLI to manage, or an existing tmux session to mirror. |
 | `claudeTmux.ansiPalette` | `theme` | `theme` remaps ANSI onto the VS Code terminal theme; `terminal` uses the classic xterm palette. |
-| `claudeTmux.detectionRules` | `{}` | Per-agent screen rules (`needsInput` / `working` regex lists) used when an agent reports no lifecycle state. |
+| `claudeTmux.detectionRules` | `{}` | Per-agent detection rules (`needsInput` / `working` / `hold`, and the same under `title`) used when an agent reports no lifecycle state. See [How AgentMux reads an agent's state](#how-agentmux-reads-an-agents-state). |
 | `claudeTmux.scrollbackLines` | `1000` | Captured history lines, from 0 to 5000. |
 | `claudeTmux.fontFamily` | `""` | Empty inherits `terminal.integrated.fontFamily`. |
 | `claudeTmux.fontSize` | `0` | Zero inherits `terminal.integrated.fontSize`. |

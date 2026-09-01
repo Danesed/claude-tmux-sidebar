@@ -2,7 +2,7 @@
   "name": "claude-tmux-sidebar",
   "displayName": "AgentMux — Claude, Codex, OpenCode, Hermes, Pi & Antigravity in tmux",
   "description": "Six agents, one terminal flow — plus free mode, which mirrors any tmux session you already have: switch fast and hand off work intelligently between Claude Code, Codex, OpenCode, Hermes, Pi and Google Antigravity in tmux.",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "publisher": "Danesed",
   "license": "MIT",
   "icon": "icon.png",
@@ -122,6 +122,12 @@
         "title": "Explain the active agent's state",
         "category": "AgentMux",
         "icon": "$(question)"
+      },
+      {
+        "command": "claudeTmux.explainScreen",
+        "title": "Explain a captured screen",
+        "category": "AgentMux",
+        "icon": "$(file-code)"
       },
       {
         "command": "claudeTmux.cleanupSessions",
@@ -244,6 +250,9 @@
         },
         {
           "command": "claudeTmux.explainState"
+        },
+        {
+          "command": "claudeTmux.explainScreen"
         },
         {
           "command": "claudeTmux.cleanupSessions"
@@ -508,20 +517,36 @@
         "claudeTmux.detectionRules": {
           "type": "object",
           "default": {},
-          "description": "Per-agent screen detection rules used when an agent reports no lifecycle state. Keys are agent ids (claude, codex, opencode, hermes, pi, antigravity, or the id of any claudeTmux.customAgents entry); each may set \"needsInput\" and \"working\" to an array of case-insensitive regular expressions. A provided array REPLACES the built-in list for that agent, so [] disables a noisy rule. Run \"AgentMux: Explain the active agent's state\" to see which rule matched.",
+          "markdownDescription": "Per-agent detection rules used when an agent reports no lifecycle state. Keys are agent ids (claude, codex, opencode, hermes, pi, antigravity, or the id of any `claudeTmux.customAgents` entry). Each agent may set `needsInput`, `working` and `hold`; the same keys nested under `title` are matched against the pane title instead and are evaluated first.\n\nAn entry is a case-insensitive regular expression, an array of expressions that must **all** match, or `{ \"region\": \"foot\", \"match\": \"...\" }` to match somewhere other than the list default. Regions: `body` (the last 12 lines minus the prompt box — the default for needsInput, and what stops your own typing from reading as the agent asking), `tail` (the last 12 lines, default for working and hold), `foot` (the last 5 lines, i.e. the mode/status line), `head` (the first 20 lines), `prompt` (the prompt box), `dialog` (below the last rule the TUI drew), `screen`, `title`.\n\nA `hold` rule freezes the status instead of setting one — that is how a transcript viewer or a settings picker stops the decay timer from walking a working agent down to idle. A provided array REPLACES the built-in list, so `[]` disables a noisy rule. Run **AgentMux: Explain the active agent's state** to see every loaded rule and which one matched.",
           "additionalProperties": {
             "type": "object",
             "properties": {
               "needsInput": {
-                "type": "array",
-                "items": {
-                  "type": "string"
-                }
+                "type": "array"
               },
               "working": {
+                "type": "array"
+              },
+              "hold": {
                 "type": "array",
-                "items": {
-                  "type": "string"
+                "description": "Rules that freeze the status instead of setting one: a transcript viewer, a settings picker, anything covering the pane with chrome that describes itself rather than the agent."
+              },
+              "title": {
+                "type": "object",
+                "description": "Rules matched against the pane title (what the TUI wrote with OSC 0/2) instead of the screen.",
+                "properties": {
+                  "needsInput": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "working": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
                 }
               }
             }

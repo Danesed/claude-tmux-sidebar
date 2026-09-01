@@ -166,7 +166,7 @@ const vscode = {
 };
 
 const source = fs.readFileSync(path.join(root, 'extension.js'), 'utf8')
-  + '\nmodule.exports.__test = { ClaudeTmuxView, sessionName, accentChannels, derivedAccent, derivedMark, decodeEscapes, AGENT_DETECTION, paneIdentity, identityMatches, STATE_HOOK_SCRIPT, setStateHookDir, codexHookArgs, tomlString, listPiSessions, piSessionDir, piExtensionPath, ensurePiExtension, removePiExtension, PI_EXTENSION, customAgentSpecs, registerCustomAgents, freeAgentId, mirroredSessionNames, baseSessionName, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions, AGENTS, AGENT_IDS, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, hermesProfileSlug, hermesProfileHome, ensureHermesProfile, launchEnvPrefix, detectionRules, detectScreenState, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath };';
+  + '\nmodule.exports.__test = { ClaudeTmuxView, sessionName, accentChannels, derivedAccent, derivedMark, decodeEscapes, AGENT_DETECTION, paneIdentity, identityMatches, STATE_HOOK_SCRIPT, setStateHookDir, codexHookArgs, tomlString, listPiSessions, piSessionDir, piExtensionPath, ensurePiExtension, removePiExtension, PI_EXTENSION, customAgentSpecs, registerCustomAgents, freeAgentId, mirroredSessionNames, baseSessionName, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions, AGENTS, AGENT_IDS, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, hermesProfileSlug, hermesProfileHome, ensureHermesProfile, launchEnvPrefix, detectionRules, detectState, detectionContext, isRuleLine, explainDetection, DETECTION_REGIONS, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath };';
 const moduleUnderTest = { exports: {} };
 const sandbox = {
   module: moduleUnderTest,
@@ -187,7 +187,7 @@ const sandbox = {
   clearInterval,
 };
 vm.runInNewContext(source, sandbox, { filename: 'extension.js' });
-const { ClaudeTmuxView, sessionName, accentChannels, derivedAccent, derivedMark, decodeEscapes, AGENT_DETECTION, paneIdentity, identityMatches, STATE_HOOK_SCRIPT, setStateHookDir, codexHookArgs, tomlString, listPiSessions, piSessionDir, piExtensionPath, ensurePiExtension, removePiExtension, PI_EXTENSION, customAgentSpecs, registerCustomAgents, freeAgentId, mirroredSessionNames, baseSessionName, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions, AGENTS, AGENT_IDS, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, hermesProfileSlug, hermesProfileHome, ensureHermesProfile, launchEnvPrefix, detectionRules, detectScreenState, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath } = moduleUnderTest.exports.__test;
+const { ClaudeTmuxView, sessionName, accentChannels, derivedAccent, derivedMark, decodeEscapes, AGENT_DETECTION, paneIdentity, identityMatches, STATE_HOOK_SCRIPT, setStateHookDir, codexHookArgs, tomlString, listPiSessions, piSessionDir, piExtensionPath, ensurePiExtension, removePiExtension, PI_EXTENSION, customAgentSpecs, registerCustomAgents, freeAgentId, mirroredSessionNames, baseSessionName, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions, AGENTS, AGENT_IDS, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, hermesProfileSlug, hermesProfileHome, ensureHermesProfile, launchEnvPrefix, detectionRules, detectState, detectionContext, isRuleLine, explainDetection, DETECTION_REGIONS, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath } = moduleUnderTest.exports.__test;
 
 function makeProvider() {
   const provider = new ClaudeTmuxView({
@@ -302,9 +302,9 @@ async function run() {
   settings.set('codexArgs', '--no-alt-screen');
 
   // Codex's one-time "trust these hook commands" prompt genuinely waits for a key.
-  assert.strictEqual(detectScreenState('codex', '⚠ 2 hooks need review before they can run.').status,
+  assert.strictEqual(detectState('codex', detectionContext('⚠ 2 hooks need review before they can run.')).status,
     'needs-input', 'the hook trust prompt is waiting for the user');
-  assert.strictEqual(detectScreenState('codex', 'Press t to trust all; enter to review hooks; esc to close').status,
+  assert.strictEqual(detectState('codex', detectionContext('Press t to trust all; enter to review hooks; esc to close')).status,
     'needs-input');
 
   // The shared hook script reads its JSON payload once and serves both CLIs.
@@ -1036,24 +1036,242 @@ async function run() {
   // ---- per-agent screen detection rules ------------------------------------------------
   // The old code applied one shared regex to every agent; rules are now per-agent
   // and user-overridable, and report which pattern won.
-  assert.strictEqual(detectScreenState('codex', 'Approval required\n[y/n]').status, 'needs-input');
-  assert.ok(detectScreenState('codex', 'Approval required').pattern, 'the matched rule is named for Explain');
-  assert.strictEqual(detectScreenState('claude', 'thinking… (esc to interrupt)').status, 'working',
+  assert.strictEqual(detectState('codex', detectionContext('Approval required\n[y/n]')).status, 'needs-input');
+  assert.ok(detectState('codex', detectionContext('Approval required')).pattern, 'the matched rule is named for Explain');
+  assert.strictEqual(detectState('claude', detectionContext('thinking… (esc to interrupt)')).status, 'working',
     'a per-agent working rule is applied');
-  assert.strictEqual(detectScreenState('claude', 'just some output').status, null);
-  assert.strictEqual(detectScreenState('antigravity', 'Do you trust the contents of this project?').status,
+  assert.strictEqual(detectState('claude', detectionContext('just some output')).status, null);
+  assert.strictEqual(detectState('antigravity', detectionContext('Do you trust the contents of this project?')).status,
     'needs-input', 'Antigravity has its own observed prompt rules');
 
   settings.set('detectionRules', { claude: { needsInput: ['^ready to deploy'], working: [] } });
-  assert.strictEqual(detectScreenState('claude', 'ready to deploy?').status, 'needs-input', 'an override adds rules');
-  assert.strictEqual(detectScreenState('claude', 'Do you want to proceed?').status, null,
+  assert.strictEqual(detectState('claude', detectionContext('ready to deploy?')).status, 'needs-input', 'an override adds rules');
+  assert.strictEqual(detectState('claude', detectionContext('Do you want to proceed?')).status, null,
     'an override REPLACES the built-in list, so a noisy rule can be removed');
-  assert.strictEqual(detectScreenState('codex', 'Do you want to proceed?').status, 'needs-input',
+  assert.strictEqual(detectState('codex', detectionContext('Do you want to proceed?')).status, 'needs-input',
     'overriding one agent must not touch the others');
   settings.set('detectionRules', { claude: { needsInput: ['([unclosed'] } });
-  assert.doesNotThrow(() => detectScreenState('claude', 'anything'), 'a malformed user regex is skipped, not thrown');
+  assert.doesNotThrow(() => detectState('claude', detectionContext('anything')), 'a malformed user regex is skipped, not thrown');
   settings.set('detectionRules', {});
-  assert.ok(detectionRules('claude').needsInput.length > 0, 'built-ins return once the override is cleared');
+  assert.ok(detectionRules('claude').length > 0, 'built-ins return once the override is cleared');
+  assert.ok(detectionRules('claude').every((r) => r.region && r.state && r.priority && (r.all.length || r.any.length)),
+    'every compiled rule names a region, a state and a priority');
+
+  // ---- the pane title as a state channel -----------------------------------------------
+  // A TUI that animates its own title reports its status better than any screen
+  // scrape can infer it, and the title is read on every presence poll even when
+  // that pane's frame is not being captured.
+  assert.strictEqual(detectState('claude', detectionContext('', '\u28fe Refactoring the parser')).status, 'working',
+    'a braille spinner at the head of the title means Claude is mid-turn');
+  assert.strictEqual(detectState('claude', detectionContext('', '\u25d1 Refactoring the parser')).status, 'working',
+    'the 2.1.228 half-circle spinner counts too');
+  assert.strictEqual(detectState('claude', detectionContext('', '\u2733 Refactoring the parser')).status, null,
+    'the static idle marker deliberately casts NO verdict: on the measured version it shows mid-turn too');
+  assert.strictEqual(detectState('codex', detectionContext('', 'Action Required')).status, 'needs-input');
+  assert.strictEqual(detectState('hermes', detectionContext('', '\u23f3 building')).status, 'working');
+  assert.strictEqual(detectState('hermes', detectionContext('', '\u26a0 approve?')).status, 'needs-input');
+  assert.strictEqual(detectState('opencode', detectionContext('', 'OpenCode')).status, null,
+    'a constant title carries no state and must not be read as one');
+  assert.strictEqual(detectState('pi', detectionContext('', '\u03c0 - myproject')).status, null,
+    'pi names itself in the title but reports no state there');
+  // Title beats screen: an agent stating "working" outranks a screen shape.
+  assert.strictEqual(
+    detectState('claude', detectionContext('Do you want to proceed?', '\u28fe Refactoring')).status,
+    'working', 'a title rule is evaluated before any tail rule');
+  assert.strictEqual(detectState('claude', detectionContext('Do you want to proceed?')).status, 'needs-input',
+    'with no title, the tail rules decide exactly as before');
+  assert.strictEqual(detectState('claude', detectionContext('')).status, null, 'an absent region is skipped, not matched');
+  // ---- regions: WHERE a phrase sits decides what it means ------------------------------
+  // Driven by whole screens captured off a live Claude Code v2.1.252 in
+  // test/screens/, so these assert against the real TUI and not a paraphrase.
+  const screen = (name) => fs.readFileSync(path.join(root, 'test', 'screens', name), 'utf8');
+  assert.ok(isRuleLine('\u2500'.repeat(40)), 'a box rule is recognised');
+  assert.ok(!isRuleLine('  \u276f some text'), 'a line with content is not a rule');
+  assert.ok(!isRuleLine('\u2500\u2500\u2500'), 'and neither is a stub too short to be a box edge');
+
+  assert.strictEqual(detectState('claude', detectionContext(screen('claude-idle.txt'))).status, null,
+    'an idle pane sitting at its prompt claims nothing');
+  assert.strictEqual(detectState('claude', detectionContext(screen('claude-working.txt'))).status, 'working',
+    'mid-turn, the interrupt affordance in the mode line says working');
+  assert.strictEqual(detectState('claude', detectionContext(screen('claude-working.txt'))).region, 'foot',
+    'and it is read from the mode line, not from anywhere in the tail');
+  assert.strictEqual(detectState('claude', detectionContext(screen('claude-plan-approval.txt'))).status,
+    'needs-input', 'a real approval dialog is caught');
+  assert.strictEqual(detectState('claude', detectionContext(screen('claude-transcript-viewer.txt'))).status,
+    'hold', 'and the transcript viewer freezes rather than resetting');
+
+  // The false positive `body` exists to kill: the user typing a question into
+  // the prompt box used to read as the agent asking one.
+  const typed = screen('claude-idle.txt').split('\n');
+  for (let i = typed.length - 1; i >= 0; i--) {
+    if (typed[i].startsWith('\u276f')) { typed[i] = '\u276f do you want to delete the old migrations?'; break; }
+  }
+  const typedCtx = detectionContext(typed.join('\n'));
+  assert.ok(/do you want to/i.test(typedCtx.tail), 'the phrase IS in the tail');
+  assert.ok(!/do you want to/i.test(typedCtx.body), 'but the prompt box is cut out of the body');
+  assert.strictEqual(typedCtx.prompt.trim(), '\u276f do you want to delete the old migrations?',
+    'and the prompt region is exactly what the user typed');
+  assert.strictEqual(detectState('claude', typedCtx).status, null,
+    'so typing a question at the agent no longer reads as the agent asking one');
+
+  // A rule can name its own region; an unknown one is skipped, not thrown.
+  settings.set('detectionRules', { claude: { working: [{ region: 'prompt', match: 'deploy' }] } });
+  assert.strictEqual(detectState('claude', detectionContext(screen('claude-idle.txt'))).status, null);
+  settings.set('detectionRules', { claude: { working: [{ region: 'nosuchregion', match: 'a' }] } });
+  assert.doesNotThrow(() => detectState('claude', detectionContext('aaaa')),
+    'a rule pointing at a region that does not exist is simply never matched');
+  settings.set('detectionRules', {});
+
+  // ---- priority and combinators --------------------------------------------------------
+  const bar = '\u2500'.repeat(40);
+  const claudeRules = detectionRules('claude');
+  assert.ok(claudeRules.every((r, i) => i === 0 || claudeRules[i - 1].priority >= r.priority),
+    'rules are compiled highest priority first');
+  assert.ok(claudeRules.find((r) => r.region === 'title').priority
+    > claudeRules.find((r) => r.state === 'hold').priority,
+    'an agent stating its own status in the title outranks a viewer covering the pane');
+  assert.ok(claudeRules.find((r) => r.state === 'hold').priority
+    > claudeRules.find((r) => r.state === 'needs-input').priority,
+    'and a covering viewer outranks a dialog shape');
+
+  // A background shell keeps running after the turn ends, with no interrupt
+  // affordance anywhere; measured on v2.1.252, this used to decay to idle.
+  const backgroundShell = detectState('claude', detectionContext(screen('claude-background-shell.txt')));
+  assert.strictEqual(backgroundShell.status, 'working',
+    'a shell still running in the background is still work in progress');
+  assert.strictEqual(backgroundShell.region, 'foot');
+
+  // The live turn line, and the two screens that look like it but are not.
+  const liveTurn = `\u25cf Updated plan\n\n\u00b7 Spinning\u2026 (8s \u00b7 \u2193 494 tokens)\n\n${bar}\n\u276f \n${bar}\n  \u23f8 plan mode on`;
+  assert.strictEqual(detectState('claude', detectionContext(liveTurn)).status, 'working',
+    'the live turn line above the prompt box means a turn is running');
+  const finished = `\u273b Cooked for 3s \u00b7 done 1:48 PM\n\n${bar}\n\u276f \n${bar}\n  \u23f8 plan mode on \u00b7 ? for shortcuts`;
+  assert.strictEqual(detectState('claude', detectionContext(finished)).status, null,
+    'the finished line starts the same way and must NOT read as working — that is what the not-guard is for');
+  const faked = `${bar}\n\u276f \u00b7 waiting for something\u2026 (5s\n${bar}\n  \u23f8 plan mode on`;
+  assert.strictEqual(detectState('claude', detectionContext(faked)).status, null,
+    'and the same shape typed into the prompt box is out of the body region entirely');
+
+  // any / not are available to user rules too.
+  settings.set('detectionRules', {
+    claude: { working: [{ region: 'tail', any: ['alpha', 'beta'], not: ['gamma'] }] },
+  });
+  assert.strictEqual(detectState('claude', detectionContext('alpha')).status, 'working', 'any matches on one');
+  assert.strictEqual(detectState('claude', detectionContext('beta')).status, 'working', 'or the other');
+  assert.strictEqual(detectState('claude', detectionContext('delta')).status, null, 'and on neither, nothing');
+  assert.strictEqual(detectState('claude', detectionContext('alpha gamma')).status, null,
+    'a not-guard vetoes a rule that would otherwise have matched');
+  settings.set('detectionRules', { claude: { working: [{ region: 'tail', not: ['x'] }] } });
+  assert.strictEqual(detectState('claude', detectionContext('anything')).status, null,
+    'a rule of pure guards matches nothing rather than everything');
+  // An explicit priority reorders the list.
+  settings.set('detectionRules', {
+    claude: {
+      needsInput: [{ region: 'tail', match: 'ambiguous', priority: 100 }],
+      working: [{ region: 'tail', match: 'ambiguous', priority: 200 }],
+    },
+  });
+  assert.strictEqual(detectState('claude', detectionContext('ambiguous')).status, 'working',
+    'a working rule given the higher priority wins over needs-input, which normally outranks it');
+  settings.set('detectionRules', {});
+
+  // ---- explaining a screen that is no longer on the screen -----------------------------
+  // A rule that misfires is gone by the time anyone looks at it, so detection
+  // has to be answerable from a captured file, offline, with no tmux involved.
+  const approval = detectionContext(screen('claude-plan-approval.txt'), '');
+  const explained = explainDetection('claude', approval);
+  assert.strictEqual(explained.winner.state, 'needs-input', 'the winner is reported');
+  assert.strictEqual(explained.rows.length, detectionRules('claude').length,
+    'and EVERY rule is accounted for, not only the one that won');
+  assert.ok(explained.rows.every((row) => row.outcome),
+    'each row says what that rule did');
+  assert.strictEqual(explained.rows.filter((row) => row.outcome === 'MATCH').length, 1,
+    'exactly one rule is the winner');
+  settings.set('detectionRules', { claude: { working: [{ region: 'tail', match: 'busy', not: ['dry run'] }] } });
+  const vetoed = explainDetection('claude', detectionContext('busy — dry run'));
+  assert.ok(vetoed.rows.some((row) => row.outcome === 'veto'),
+    'a rule stopped by its not-guard says so, instead of silently not matching');
+  assert.strictEqual(vetoed.winner, null, 'and casts no verdict');
+  settings.set('detectionRules', {});
+  assert.ok(DETECTION_REGIONS.every((region) => region in approval),
+    'every region Explain prints is a region the context actually builds');
+
+  // The command itself, driven the way a script would drive it.
+  for (const [file, expected] of [
+    ['claude-idle.txt', null],
+    ['claude-working.txt', 'working'],
+    ['claude-background-shell.txt', 'working'],
+    ['claude-plan-approval.txt', 'needs-input'],
+    ['claude-transcript-viewer.txt', 'hold'],
+  ]) {
+    const result = await provider.explainScreen({
+      agent: 'claude', file: path.join(root, 'test', 'screens', file),
+    });
+    assert.strictEqual(result.status, expected, `explainScreen(${file}) reads ${expected}`);
+  }
+  assert.strictEqual(await provider.explainScreen({ agent: 'nosuch', file: 'x' }), null,
+    'an unknown agent is reported, not thrown');
+  assert.strictEqual(
+    await provider.explainScreen({ agent: 'claude', file: path.join(root, 'test', 'screens', 'nope.txt') }),
+    null, 'and so is an unreadable file');
+
+  // ---- hold rules: a screen that says nothing must not be read as a state -------------
+  // Measured live on Claude Code v2.1.252.
+  const TRANSCRIPT = '  Showing detailed transcript \u00b7 ctrl+o to toggle \u00b7 \u2191\u2193 scroll'
+    + ' \u00b7 v to open in code \u00b7 ? for shortcuts    verbose';
+  const MODEL_PICKER = '   Select model\n   1. Default (recommended)\n \u276f 2. Opus (1M context)\n'
+    + '   Enter to set as default \u00b7 s to use this session only \u00b7 Esc to cancel';
+  assert.strictEqual(detectState('claude', detectionContext(TRANSCRIPT)).status, 'hold',
+    'the transcript viewer freezes the status instead of casting one');
+  assert.strictEqual(detectState('claude', detectionContext(MODEL_PICKER)).status, 'hold',
+    'so does the model picker');
+  assert.strictEqual(detectState('claude', detectionContext('showing detailed transcript')).status, null,
+    'the phrase alone is not the viewer: every pattern in the entry must match');
+  assert.strictEqual(detectState('codex', detectionContext('\u2191/\u2193 to scroll \u00b7 q to quit')).status, 'hold');
+
+  // Title rules are overridable through the same setting, under "title".
+  settings.set('detectionRules', { claude: { title: { working: ['^busy'] } } });
+  assert.strictEqual(detectState('claude', detectionContext('', 'busy doing things')).status, 'working',
+    'a title override is honoured');
+  assert.strictEqual(detectState('claude', detectionContext('', '\u28fe Refactoring')).status, null,
+    'and REPLACES the built-in title list');
+  settings.set('detectionRules', {});
+
+  // A hold verdict must survive the frames going quiet: the decay timer is what
+  // used to walk a working agent down to idle behind an open transcript.
+  provider.agentState.claude.status = 'working';
+  provider.agentState.claude.detectionHold = false;
+  provider.agentState.claude.paneTitle = '';
+  provider.updateActivity('claude', TRANSCRIPT, true);
+  assert.strictEqual(provider.agentState.claude.status, 'working', 'opening the transcript changes nothing');
+  assert.strictEqual(provider.agentState.claude.detectionHold, true, 'and latches the freeze');
+  provider.agentState.claude.lastActivity = Date.now() - 60000;
+  provider.updateActivity('claude', TRANSCRIPT, false);
+  assert.strictEqual(provider.agentState.claude.status, 'working',
+    'a minute of still frames behind the viewer still does not decay it');
+  // Closing the viewer hands control back to the ordinary rules.
+  provider.updateActivity('claude', 'thinking\u2026 (esc to interrupt)', true);
+  assert.strictEqual(provider.agentState.claude.detectionHold, false, 'the freeze lifts');
+  provider.agentState.claude.lastActivity = Date.now() - 60000;
+  provider.updateActivity('claude', 'thinking\u2026 (esc to interrupt)', false);
+  assert.strictEqual(provider.agentState.claude.status, 'done', 'and decay resumes');
+
+  // applyTitleState drives status straight off the polled title, with no frame.
+  provider.agentState.claude.status = 'idle';
+  provider.agentState.claude.paneTitle = '\u28fe Refactoring the parser';
+  provider.applyTitleState('claude');
+  assert.strictEqual(provider.agentState.claude.status, 'working',
+    'a spinner in the title moves the dot without capturing a single frame');
+  assert.strictEqual(provider.agentState.claude.lastDetection.region, 'title',
+    'and Explain can say the title is what decided it');
+  provider.agentState.claude.status = 'idle';
+  provider.agentState.claude.paneTitle = '\u2733 Refactoring the parser';
+  provider.applyTitleState('claude');
+  assert.strictEqual(provider.agentState.claude.status, 'idle',
+    'the static idle marker leaves the status alone');
+  provider.agentState.claude.paneTitle = '';
+  provider.applyTitleState('claude');
+  assert.strictEqual(provider.agentState.claude.status, 'idle', 'no title, no verdict');
 
   // Hook state still wins over screen rules.
   provider.agentState.claude.status = 'idle';
@@ -1245,14 +1463,14 @@ async function run() {
   // Rules taken from a live --cli pane: the running turn advertises how to
   // interrupt it, the idle prompt is a bare chevron.
   assert.strictEqual(
-    detectScreenState('hermes', '⚕ ❯ msg=interrupt · /queue · /bg · /steer · Ctrl+C cancel').status,
+    detectState('hermes', detectionContext('⚕ ❯ msg=interrupt · /queue · /bg · /steer · Ctrl+C cancel')).status,
     'working', 'a running Hermes turn is recognised from its interrupt affordance');
-  assert.strictEqual(detectScreenState('hermes', '❯').status, null,
+  assert.strictEqual(detectState('hermes', detectionContext('❯')).status, null,
     'the idle prompt must not read as working');
   assert.strictEqual(
-    detectScreenState('hermes', ' ⚕ deepseek-v4-flash │ 20.7K/1M │ 1m │ ⏲ 3s │ ✓ 0s │ ⚠ YOLO').status,
+    detectState('hermes', detectionContext(' ⚕ deepseek-v4-flash │ 20.7K/1M │ 1m │ ⏲ 3s │ ✓ 0s │ ⚠ YOLO')).status,
     null, 'the finished status bar must not read as working');
-  assert.strictEqual(detectScreenState('hermes', 'Do you want to proceed?').status, 'needs-input',
+  assert.strictEqual(detectState('hermes', detectionContext('Do you want to proceed?')).status, 'needs-input',
     'the shared baseline still applies');
 
   // ---- naming a session tmux 3.4 says nothing about --------------------------------------
@@ -1355,19 +1573,19 @@ async function run() {
 
   // Rules taken from a live pane. The startup banner is the trap: it prints
   // "escape interrupt · …" and stays on screen until the chat scrolls it away.
-  assert.strictEqual(detectScreenState('pi', 'Working... (escape to interrupt)').status, 'working');
+  assert.strictEqual(detectState('pi', detectionContext('Working... (escape to interrupt)')).status, 'working');
   assert.strictEqual(
-    detectScreenState('pi', ' escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more').status,
+    detectState('pi', detectionContext(' escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more')).status,
     null, 'pi\'s startup banner must never read as a running turn');
-  assert.strictEqual(detectScreenState('pi', ' Trust project folder?').status, 'needs-input',
+  assert.strictEqual(detectState('pi', detectionContext(' Trust project folder?')).status, 'needs-input',
     'the first-run project-trust prompt is waiting for the user');
-  assert.strictEqual(detectScreenState('pi', ' ↑↓ navigate  enter select  escape/ctrl+c cancel').status, 'needs-input',
+  assert.strictEqual(detectState('pi', detectionContext(' ↑↓ navigate  enter select  escape/ctrl+c cancel')).status, 'needs-input',
     'the trust prompt footer is waiting for the user');
   assert.strictEqual(
-    detectScreenState('pi', '  Enter to select · Ctrl+S to set as default · Esc to cancel').status,
+    detectState('pi', detectionContext('  Enter to select · Ctrl+S to set as default · Esc to cancel')).status,
     'needs-input',
     'pi\'s built-in pickers are not extension UI, so the hook never sees them: the screen rule must');
-  assert.strictEqual(detectScreenState('pi', 'the idle prompt with nothing to answer').status, null);
+  assert.strictEqual(detectState('pi', detectionContext('the idle prompt with nothing to answer')).status, null);
 
   // ---- free mode: agents declared in settings --------------------------------------------
   settings.set('customAgents', [
@@ -1472,8 +1690,28 @@ async function run() {
   assert.match(markup, /id="handoff-target"/);
   assert.match(markup, /data-palette="theme"/, 'the mirror is told which ANSI palette to use');
 
+  // ---- free mode reachable from the tab bar --------------------------------------------
+  // "add a tab for a tmux session I already have" is the same intent as "start
+  // an agent", so it lives in the + menu and not only in the command palette.
+  assert.match(markup, /data-action="addTmuxSession"/, 'the + menu offers mirroring a tmux session');
+  assert.match(markup, /Mirror a tmux session/);
+  assert.match(markup, /class="launch-sep"/, 'agents and free mode are separated by a rule');
+  // Earlier blocks registered free-mode agents, and the registry is built once
+  // per window, so one exists here — which is exactly when Remove is offered.
+  assert.ok(AGENT_IDS.some((id) => AGENTS[id].custom), 'a custom agent is registered at this point');
+  assert.match(markup, /data-action="removeCustomAgent"/,
+    'and Remove appears alongside it');
+  const sourceOfHtml = fs.readFileSync(path.join(root, 'extension.js'), 'utf8');
+  assert.match(sourceOfHtml, /roster\.some\(\(a\) => a\.custom\)/,
+    'Remove is conditional: with nothing to remove the entry is not rendered');
+
   const webviewSource = fs.readFileSync(path.join(root, 'media/main.js'), 'utf8');
   assert.match(webviewSource, /tab\.classList\.toggle\('hidden', !present\)/);
+  assert.match(webviewSource, /tabAdd\.classList\.toggle\('hidden', !hasWorkspace\)/,
+    'the + button no longer disappears once every agent is running — that took the only '
+    + 'in-UI route to free mode with it, exactly when a full side bar makes you want another tab');
+  assert.match(webviewSource, /closest\('button\[data-action\]'\)/,
+    'menu entries route on their action, so an entry that names no agent still works');
   assert.match(webviewSource, /handoffText\.value/);
   assert.match(webviewSource, /type: 'createHandoff'/);
   assert.match(webviewSource, /m\.type === 'handoffDetails'/);

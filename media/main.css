@@ -129,7 +129,11 @@ html, body {
   z-index: 20;
   top: calc(100% + 2px);
   right: 5px;
-  width: 150px;
+  /* Was a flat 150px, which the free-mode entries overflow. Grows to fit its
+     longest label and stops before it can cover the whole strip. */
+  min-width: 150px;
+  width: max-content;
+  max-width: min(230px, calc(100vw - 12px));
   padding: 4px;
   display: flex;
   flex-direction: column;
@@ -139,8 +143,14 @@ html, body {
   background: var(--vscode-menu-background, #252526);
   box-shadow: 0 5px 16px rgba(0,0,0,.28);
 }
-.launch-menu button { text-align: left; padding: 6px 8px; border: 0; background: transparent; }
+.launch-menu button { text-align: left; padding: 6px 8px; border: 0; background: transparent; white-space: nowrap; }
 .launch-menu button:hover { background: var(--vscode-menu-selectionBackground, #094771); }
+/* Agents above, the free-mode entries below: two different kinds of "add". */
+.launch-sep {
+  height: 1px;
+  margin: 3px 2px;
+  background: var(--vscode-widget-border, rgba(255,255,255,.15));
+}
 /* The agent's colour, ahead of its name, wherever the name appears. */
 .agent-swatch {
   display: inline-block;
@@ -151,6 +161,9 @@ html, body {
   vertical-align: baseline;
   background: rgb(var(--agent-accent, 128,128,128));
 }
+/* Holds the swatch column open for entries that name no agent, so the free-mode
+   labels start on the same x as the agent labels above them. */
+.agent-swatch.swatch-none { background: transparent; }
 #launcher-actions button { text-align: left; }
 
 /* ---- terminal mirror area ------------------------------------------------ */

@@ -1,0 +1,32 @@
+  24
+  25
+  26
+  27
+  28
+  29
+  30
+  31
+  32
+  33
+  34
+  35
+  36
+  37
+  38
+  39
+  40
+
+✻ Crunched for 1s · done 1:48 PM · 1 shell still running
+
+❯ run: sleep 25; echo ok
+
+  Ran 1 shell command
+
+● Running in the background (foreground sleep is blocked here). I'll report the result when it finishes.
+
+✻ Cooked for 3s · done 1:48 PM · 1 shell still running
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏸ manual mode on · 1 shell · ← for agents · ↓ to manage                                         /rc active

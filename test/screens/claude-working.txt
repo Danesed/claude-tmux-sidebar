@@ -1,0 +1,32 @@
+  37
+  38
+  39
+  40
+
+✻ Crunched for 1s · done 1:48 PM · 1 shell still running
+
+❯ run: sleep 25; echo ok
+
+  Ran 1 shell command
+
+● Running in the background (foreground sleep is blocked here). I'll report the result when it finishes.
+
+✻ Cooked for 3s · done 1:48 PM · 1 shell still running
+
+❯ write a 400 word essay about tmux pane titles
+
+● On tmux Pane Titles
+
+  A tmux pane title is one of those features that sits quietly in the terminal until the day you have eleven
+  panes open and no idea which one is running the migration. It is a small string of text attached to a pane,
+  distinct from the window name and the session name, and its usefulness scales directly with how badly your
+  layout has sprawled.
+
+  The mechanism is simpler than the documentation makes it look. Each pane carries a pane_title format
+  variable, which tmux populates from the terminal's title escape sequence — the same OSC 0/OSC 2 sequences
+  that set an xterm window title. Any program that emits them, and most shells configured to do so, will
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏸ manual mode on · 1 shell · esc to interrupt · ← for agents · ↓ to manage                      /rc active

@@ -10,11 +10,11 @@ npm run check
 npm run package
 ```
 
-Install `claude-tmux-sidebar-0.13.0.vsix` from **Extensions → … → Install from
+Install `claude-tmux-sidebar-0.14.0.vsix` from **Extensions → … → Install from
 VSIX…**, then reload VS Code. From a shell you can instead run:
 
 ```bash
-code --install-extension claude-tmux-sidebar-0.13.0.vsix --force
+code --install-extension claude-tmux-sidebar-0.14.0.vsix --force
 ```
 
 With Remote-SSH, perform the install from the connected VS Code window so the
@@ -200,8 +200,24 @@ excluded from everything that destroys: it is never created, restarted or
 resumed over, never offered by **Manage this workspace's tmux sessions…**, and
 never listed by **Clean up this project's leftover tmux sessions…**. The single
 **Kill active agent session** command can still stop it, and says so explicitly.
-Add one from the palette with **AgentMux: Mirror an existing tmux session (free
-mode)…**; entries with a `command` instead are managed like any built-in agent.
+Add one from the **＋** at the end of the tab strip: under the list of agents
+there is **Mirror a tmux session…**, which shows every running tmux session with
+its path and writes the settings entry for you. **Remove a custom agent…**
+appears next to it once you have one. Both are also in the palette, as
+**AgentMux: Mirror an existing tmux session (free mode)…**.
+
+If that list is empty, nothing is broken — sessions AgentMux already drives are
+filtered out of it, so if the only tmux session on the machine is already an
+agent tab there is nothing left to mirror. Start the session first:
+
+```bash
+tmux new-session -d -s notes
+```
+
+then open the **＋** again and it is there.
+
+Entries that carry a `command` instead of a `session` are launched and managed
+like any built-in agent.
 
 ## Status and toolbar
 
@@ -248,7 +264,39 @@ or two entries and rechecks the workspace path immediately before killing.
 
 Agents that write a summary into the tmux pane title — Claude Code does — show
 it as the second line of the tab tooltip, so you can tell two tabs apart without
-switching.
+switching. The title is also read as a state signal where an agent animates it,
+and it is read on every poll even for a tab you are not looking at.
+
+### When the dot looks wrong
+
+Screen detection asks *where* a phrase appears, not only whether it does. The
+pane is cut into regions and each rule names one, which is why typing "do you
+want to delete these files?" at Claude no longer makes its own tab claim it is
+asking **you** something: that text is in the prompt box, and the region
+needs-input rules read has the prompt box cut out of it.
+
+Some screens say nothing about the agent at all. Claude's transcript viewer
+(Ctrl+O) and its model picker cover the pane with their own chrome, so they
+**freeze** the status rather than resetting it — otherwise a working agent
+decayed to idle behind an open transcript.
+
+Two commands explain a verdict:
+
+- **AgentMux: Explain the active agent's state** — which signal won (a hook, a
+  rule, or decay), the regions the current frame was cut into, and what every
+  rule made of them.
+- **AgentMux: Explain a captured screen** — the same report against a file, with
+  no tmux involved:
+
+  ```bash
+  tmux capture-pane -p -t '=tmux_claude_myproject:' > screen.txt
+  ```
+
+  Useful because a misfiring rule is usually gone by the time you go looking,
+  and because the file travels: capture on one machine, explain on another.
+
+Any rule can be replaced in `claudeTmux.detectionRules`; see the README for the
+regions, priorities and guards.
 
 ## Getting to the right agent
 

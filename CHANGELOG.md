@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.14.0
+
+One theme: knowing what an agent is actually doing. Screen detection used to
+throw every pattern at the last 12 lines of the pane and take the first hit —
+which is why typing *"do you want to delete the old migrations?"* into Claude's
+prompt box turned the tab orange. The engine was rebuilt around the idea that
+**where** a phrase appears is what decides its meaning, taking its shape from
+[herdr](https://github.com/herdrdev/herdr), whose per-agent detection manifests
+solve the same problem for 21 agents.
+
+- **Every rule now names the region it is matched against**, because where a phrase sits is what decides its meaning. `body` is the tail with the prompt box cut out of it and is the default for needs-input rules — so what you type can no longer impersonate what the agent asks. `foot` is the last five lines, where a TUI pins its mode line. `head` is the first twenty, where first-run banners live. There are also `prompt`, `dialog` (below the last rule the TUI drew), `tail`, `screen` and `title`.
+- **A rule can freeze the status instead of setting one.** Opening Claude's transcript with Ctrl+O, or the model picker, replaces the bottom of the frame with chrome that describes itself and not the agent: nothing matched, the frame stopped changing, and the decay timer quietly walked a working agent down to *done* and then *idle* while it was still working. Those screens are now `hold` rules — the status is frozen until the covering UI goes away.
+- **Rules carry a priority and can guard themselves.** They are evaluated highest first, so a broad low-confidence rule can coexist with a narrow high-confidence one instead of racing it. An entry may be one pattern, several that must **all** match, or `{ region, priority, match, any, not }` — and `not` is what lets a broad rule stay broad: Claude's live turn line and its finished line begin with the same glyph.
+- **The pane title is read as a state channel.** A TUI that animates its own title reports its status better than any screen scrape can infer it, it costs nothing (the title already rides along with every presence poll, whether that pane's frame is being captured or not), and it works for panes AgentMux never launched, where no hook could have been installed. Title rules outrank everything else and ship for Claude, Codex and Hermes.
+  - Measured rather than copied, and the measurement changed the design: on the versions installed here **only Claude and pi write a title at all** — Codex, Hermes and OpenCode leave it at the hostname or at a constant — and Claude Code v2.1.252 writes `✳ <summary>` where that prefix **never changes**. Sampled every 200 ms across a full 12-second turn, and again across twenty minutes of continuous work, it stayed `✳` throughout; only the summary text was rewritten. So there is deliberately **no idle rule** for the title: reading `✳` as idle would drag a working agent to *done* on every poll. The working and blocked markers ship anyway, since they are unambiguous on versions that do emit them and simply never match on versions that do not.
+- **Three new rules for Claude, all measured on a live v2.1.252 pane.** A backgrounded shell keeps running after the turn ends — the mode line reads `⏸ manual mode on · 1 shell · ← for agents` with no interrupt affordance anywhere, and used to decay straight to idle while the work was still going. The live turn line above the prompt box (`· Spinning… (8s · ↓ 494 tokens)`) reads as working, guarded against the finished line it resembles. And Codex's first-run *"Do you trust the contents of this directory?"*, which sits at the **top** of the frame where no tail rule could ever reach it, now reads as needs input.
+- **Add "AgentMux: Explain a captured screen".** A rule that misfires is gone by the time anyone looks at it, so detection has to be answerable offline. Capture a pane to a file (`tmux capture-pane -p -t =<session>: > screen.txt`) and this prints the regions the frame was cut into and what **every** rule made of them — matched, missed by which pattern, vetoed by which guard, or matched but outranked — with no tmux involved. It works on a screen captured on another machine or pasted into a bug report. *Explain the active agent's state* gained the same breakdown. Five real Claude screens are committed under `test/screens/` and the test suite asserts against them.
+- **Only Claude's rules were narrowed.** Moving a rule into a tighter region can only *lose* a state, so it is done where the screen was actually measured: Claude (measured live), Codex and Hermes (corroborated — herdr's own measured manifest reads Codex's working line out of the bottom 3, and Hermes' status and input lines are the last two before its closing rule). OpenCode's and Antigravity's working rules were **left as wide as they were**, because nothing here measured them and herdr matches both against the whole recent screen.
+- `claudeTmux.detectionRules` covers all of it: regions, priorities, `any`/`not` guards, `hold` rules and title rules are all overridable per agent, and a provided list still REPLACES the built-in one, so `[]` disables a noisy rule.
+
+### Free mode you can find
+
+- **The ＋ at the end of the tab strip now opens onto free mode too.** Under the agents it can start or resume, behind a rule, it offers **Mirror a tmux session…** and — once you have one — **Remove a custom agent…**. Free mode shipped in 0.13.0 but lived only in the command palette, which meant knowing its name to use it.
+- **The ＋ no longer disappears when every agent is running.** It used to hide itself once there was nothing left to start, which removed the only in-UI route to free mode at exactly the moment a full side bar makes you want another tab.
+- The mirror list filters out sessions AgentMux already drives, so it can legitimately come back empty and say so. Both docs now name that dead end and how to get past it, because it reads like a broken feature rather than an empty list.
+
 ## 0.13.0
 
 A sixth agent, a way to add a seventh without a release, and a sustained push on

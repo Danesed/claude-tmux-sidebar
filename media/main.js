@@ -733,9 +733,11 @@
   }
   tabAdd.addEventListener('click', () => setLaunchMenu(launchMenu.classList.contains('hidden'), true));
   launchMenu.addEventListener('click', (e) => {
-    const button = e.target.closest('button[data-agent]');
+    const button = e.target.closest('button[data-action]');
     if (!button) return;
     setLaunchMenu(false);
+    // Agent entries carry a data-agent; the free-mode entries do not and simply
+    // hand the action across on its own.
     vscode.postMessage({ type: button.dataset.action, agent: button.dataset.agent });
   });
   document.addEventListener('click', (e) => {
@@ -835,10 +837,11 @@
     const presentAgents = AGENT_IDS.filter((agent) => agentPresence[agent].present);
     const hasWorkspace = message.hasWorkspace !== false;
     // Free-mode agents have nothing to launch, so they never keep the launch
-    // menu alive: it hides once every startable agent is already running.
-    const startable = AGENT_IDS.filter((agent) => AGENT_META[agent]?.canStart !== false);
-    tabAdd.classList.toggle('hidden',
-      !hasWorkspace || startable.every((agent) => agentPresence[agent].present));
+    // The menu now holds the free-mode entries too, so the button stays as
+    // long as there is a workspace: it used to vanish the moment every startable
+    // agent was running, taking the only in-UI route to "mirror a tmux session"
+    // with it — exactly when a full side bar makes you want another tab.
+    tabAdd.classList.toggle('hidden', !hasWorkspace);
     for (const button of launcherActions.querySelectorAll('button')) button.disabled = !hasWorkspace;
     for (const button of launchMenu.querySelectorAll('button')) button.disabled = !hasWorkspace;
     btnPair.disabled = !agentPresence[activeAgent].present || !!handoffPhase;
