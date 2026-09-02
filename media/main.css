@@ -63,11 +63,14 @@ html, body {
   .agent-label { display: none; }
   .agent-mark { display: inline; }
 }
+.agent-tab {
+  transition: background-color .12s ease, color .12s ease, border-color .12s ease;
+}
 .agent-tab:hover { background: var(--vscode-list-hoverBackground, rgba(255,255,255,0.06)); }
 .agent-tab.active {
   color: var(--vscode-foreground, #ddd);
   border-bottom-color: rgb(var(--agent-accent, 14,99,156));
-  background: var(--vscode-list-activeSelectionBackground, rgba(255,255,255,0.08));
+  background: var(--vscode-list-activeSelectionBackground, rgba(255,255,255,0.09));
 }
 .agent-tab:focus-visible { outline: 1px solid var(--vscode-focusBorder, #0e639c); outline-offset: -1px; }
 .agent-state {
@@ -77,6 +80,7 @@ html, body {
   flex: 0 0 auto;
   background: var(--vscode-descriptionForeground, #777);
   opacity: .65;
+  transition: opacity .15s ease, transform .15s ease;
 }
 .writer-mark { display: none; font-size: 7px; color: var(--vscode-focusBorder, #4daafc); }
 .agent-tab.writer .writer-mark { display: inline; }
@@ -104,15 +108,18 @@ html, body {
   opacity: 1;
 }
 @keyframes workingGlow {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(88,199,213,.05); transform: scale(.9); }
-  50% { box-shadow: 0 0 0 4px rgba(88,199,213,.14); transform: scale(1); }
+  0%, 100% { transform: scale(0.9); opacity: 0.75; }
+  50% { transform: scale(1.22); opacity: 1; filter: drop-shadow(0 0 2.5px rgba(88,199,213,.7)); }
 }
 @keyframes doneShimmer {
-  0% { box-shadow: 0 0 0 0 rgba(63,185,80,.4); transform: scale(.7); }
-  55% { box-shadow: 0 0 0 5px rgba(63,185,80,.12); transform: scale(1.15); }
-  100% { box-shadow: none; transform: scale(1); }
+  0% { transform: scale(0.7); opacity: 0.4; }
+  55% { transform: scale(1.3); opacity: 1; filter: drop-shadow(0 0 2.5px rgba(63,185,80,.6)); }
+  100% { transform: scale(1); opacity: 1; }
 }
-@keyframes inputBreath { 0%, 100% { opacity: .55; } 50% { opacity: 1; box-shadow: 0 0 5px rgba(215,168,56,.35); } }
+@keyframes inputBreath {
+  0%, 100% { transform: scale(0.9); opacity: .55; }
+  50% { transform: scale(1.2); opacity: 1; filter: drop-shadow(0 0 2.5px rgba(215,168,56,.65)); }
+}
 .tab-add {
   flex: 0 0 28px;
   padding: 5px 4px 6px;
@@ -122,15 +129,14 @@ html, body {
   color: var(--vscode-descriptionForeground, #999);
   font-size: 16px;
   line-height: 1;
+  transition: background-color .12s ease, color .12s ease;
 }
-.tab-add:hover { background: var(--vscode-list-hoverBackground, rgba(255,255,255,.06)); }
+.tab-add:hover { background: var(--vscode-list-hoverBackground, rgba(255,255,255,.06)); color: var(--vscode-foreground, #ddd); }
 .launch-menu {
   position: absolute;
   z-index: 20;
   top: calc(100% + 2px);
   right: 5px;
-  /* Was a flat 150px, which the free-mode entries overflow. Grows to fit its
-     longest label and stops before it can cover the whole strip. */
   min-width: 150px;
   width: max-content;
   max-width: min(230px, calc(100vw - 12px));
@@ -139,9 +145,11 @@ html, body {
   flex-direction: column;
   gap: 2px;
   border: 1px solid var(--vscode-widget-border, rgba(255,255,255,.15));
-  border-radius: 5px;
+  border-radius: 6px;
   background: var(--vscode-menu-background, #252526);
-  box-shadow: 0 5px 16px rgba(0,0,0,.28);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow: 0 8px 24px rgba(0,0,0,.35), 0 0 0 1px rgba(255,255,255,.05);
 }
 .launch-menu button { text-align: left; padding: 6px 8px; border: 0; background: transparent; white-space: nowrap; }
 .launch-menu button:hover { background: var(--vscode-menu-selectionBackground, #094771); }
@@ -188,6 +196,9 @@ html, body {
   box-sizing: border-box;
   min-width: 100%;
   min-height: 100%;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
   /* Explicit monospace stack — never trust --vscode-editor-font-family here:
      in a webview it can resolve to empty and fall back to a serif font, which
      destroys all column alignment. */
@@ -200,7 +211,15 @@ html, body {
   outline: none;
   cursor: text;
 }
-#screen .row { display: block; height: 1.15em; }
+#screen ::selection {
+  background: var(--vscode-editor-selectionBackground, rgba(38, 79, 120, 0.65));
+  color: inherit;
+}
+#screen .row {
+  display: block;
+  height: 1.15em;
+  contain: layout inline-size;
+}
 
 /* subtle focus ring so you know keystrokes are captured */
 #screen:focus { box-shadow: inset 0 0 0 1px var(--vscode-focusBorder, #0e639c); }
@@ -208,12 +227,15 @@ html, body {
 
 #cursor {
   position: absolute;
+  top: 0;
+  left: 0;
   pointer-events: none;
   background: var(--vscode-terminalCursor-foreground, #d4d4d4);
   opacity: 0.7;
   mix-blend-mode: difference;
   display: none;
   border-radius: 1px;
+  will-change: transform;
 }
 #screen:focus ~ #cursor { display: block; animation: blink 1.05s steps(1) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
@@ -231,8 +253,59 @@ html, body {
 #screen-wrap:focus-within #hint { opacity: 0; }
 
 /* Cmd/Ctrl+click to open in the editor */
-.path-link { text-decoration: underline dotted 1px; text-underline-offset: 2px; }
-.path-link:hover { text-decoration: underline; cursor: pointer; }
+.path-link {
+  text-decoration: underline dotted 1px;
+  text-underline-offset: 2px;
+  border-radius: 2px;
+  padding: 0 1px;
+  transition: background-color .1s ease, color .1s ease;
+}
+.path-link:hover {
+  text-decoration: none;
+  cursor: pointer;
+  background: var(--vscode-textLink-activeForeground, rgba(77, 170, 252, 0.15));
+  color: var(--vscode-textLink-activeForeground, #4daafc);
+}
+
+/* thin, modern themed scrollbars */
+#screen-wrap::-webkit-scrollbar,
+#session-list::-webkit-scrollbar,
+#recall-list::-webkit-scrollbar,
+#timeline-list::-webkit-scrollbar,
+#arbiter-body::-webkit-scrollbar,
+#timeline-list pre::-webkit-scrollbar,
+.arb-answer pre::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+#screen-wrap::-webkit-scrollbar-track,
+#session-list::-webkit-scrollbar-track,
+#recall-list::-webkit-scrollbar-track,
+#timeline-list::-webkit-scrollbar-track,
+#arbiter-body::-webkit-scrollbar-track,
+#timeline-list pre::-webkit-scrollbar-track,
+.arb-answer pre::-webkit-scrollbar-track {
+  background: transparent;
+}
+#screen-wrap::-webkit-scrollbar-thumb,
+#session-list::-webkit-scrollbar-thumb,
+#recall-list::-webkit-scrollbar-thumb,
+#timeline-list::-webkit-scrollbar-thumb,
+#arbiter-body::-webkit-scrollbar-thumb,
+#timeline-list pre::-webkit-scrollbar-thumb,
+.arb-answer pre::-webkit-scrollbar-thumb {
+  background: var(--vscode-scrollbarSlider-background, rgba(121, 121, 121, 0.35));
+  border-radius: 3px;
+}
+#screen-wrap::-webkit-scrollbar-thumb:hover,
+#session-list::-webkit-scrollbar-thumb:hover,
+#recall-list::-webkit-scrollbar-thumb:hover,
+#timeline-list::-webkit-scrollbar-thumb:hover,
+#arbiter-body::-webkit-scrollbar-thumb:hover,
+#timeline-list pre::-webkit-scrollbar-thumb:hover,
+.arb-answer pre::-webkit-scrollbar-thumb:hover {
+  background: var(--vscode-scrollbarSlider-hoverBackground, rgba(100, 100, 100, 0.65));
+}
 
 /* Alt+Up prompt recall */
 #prompt-recall {
@@ -244,33 +317,38 @@ html, body {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 6px;
+  padding: 7px;
   border: 1px solid var(--vscode-widget-border, rgba(255,255,255,.15));
-  border-radius: 6px;
+  border-radius: 8px;
   background: var(--vscode-menu-background, #252526);
-  box-shadow: 0 6px 18px rgba(0,0,0,.3);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-shadow: 0 8px 24px rgba(0,0,0,.35), 0 0 0 1px rgba(255,255,255,.05);
   font-family: var(--vscode-font-family);
 }
 #recall-filter {
-  padding: 4px 8px;
+  padding: 5px 9px;
   font-size: 12px;
   color: var(--vscode-input-foreground, #ddd);
   background: var(--vscode-input-background, #2a2d2e);
   border: 1px solid var(--vscode-input-border, rgba(255,255,255,0.12));
   border-radius: 4px;
   outline: none;
+  transition: border-color .12s ease;
 }
+#recall-filter:focus { border-color: var(--vscode-focusBorder, #0e639c); }
 #recall-list { display: flex; flex-direction: column; gap: 2px; max-height: 30vh; overflow-y: auto; }
 .recall-item {
   text-align: left;
-  padding: 4px 8px;
+  padding: 5px 8px;
   border: 0;
-  border-radius: 3px;
+  border-radius: 4px;
   background: transparent;
   font: 11px/1.4 ui-monospace, monospace;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  transition: background-color .08s ease;
 }
 .recall-item:hover, .recall-item.sel { background: var(--vscode-list-hoverBackground, rgba(255,255,255,.08)); }
 
@@ -282,11 +360,13 @@ html, body {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 8px;
+  padding: 10px;
   border: 1px solid var(--vscode-widget-border, rgba(255,255,255,.15));
-  border-radius: 6px;
+  border-radius: 8px;
   background: var(--vscode-editorWidget-background, #252526);
-  box-shadow: 0 6px 18px rgba(0,0,0,.3);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-shadow: 0 8px 24px rgba(0,0,0,.35), 0 0 0 1px rgba(255,255,255,.05);
   font-family: var(--vscode-font-family);
   font-size: 11.5px;
 }
@@ -328,11 +408,17 @@ html, body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   text-align: center;
   width: 100%;
-  max-width: 340px;
+  max-width: 350px;
   max-height: 100%;
+  padding: 22px 18px;
+  box-sizing: border-box;
+  border: 1px solid var(--vscode-widget-border, rgba(255,255,255,0.08));
+  border-radius: 9px;
+  background: var(--vscode-sideBar-background, rgba(255,255,255,0.02));
+  box-shadow: 0 6px 20px rgba(0,0,0,0.15);
   font-family: var(--vscode-font-family);
 }
 .card-logo svg { width: 40px; height: 40px; opacity: 0.85; color: var(--vscode-textLink-foreground, #4daafc); }
@@ -439,27 +525,30 @@ html, body {
 
 button {
   font-family: var(--vscode-font-family);
-  font-size: 12.5px;
-  padding: 7px 14px;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 6px 14px;
   border: 1px solid var(--vscode-button-border, transparent);
   border-radius: 4px;
   cursor: pointer;
   color: var(--vscode-button-secondaryForeground, #ccc);
   background: var(--vscode-button-secondaryBackground, #3a3d41);
-  transition: background .12s;
+  transition: background-color .12s ease, transform .08s ease;
 }
 button:hover { background: var(--vscode-button-secondaryHoverBackground, #45494e); }
+button:active:not(:disabled) { transform: scale(0.98); }
 button:disabled { opacity: .4; cursor: default; }
 button.primary {
   color: var(--vscode-button-foreground, #fff);
   background: var(--vscode-button-background, #0e639c);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.18);
 }
 button.primary:hover { background: var(--vscode-button-hoverBackground, #1177bb); }
 
 /* ---- status footer ------------------------------------------------------- */
 #statusbar {
   flex: 0 0 auto;
-  height: 22px;
+  height: 23px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -482,16 +571,21 @@ button.primary:hover { background: var(--vscode-button-hoverBackground, #1177bb)
 }
 #status-right { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
 #status-meta {
-  opacity: 0.6;
+  opacity: 0.72;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: min(52vw, 320px);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 10.5px;
+  letter-spacing: -0.01em;
 }
 #status-state { display: flex; align-items: center; gap: 5px; flex: 0 0 auto; }
 .dot {
   width: 7px; height: 7px; border-radius: 50%;
   background: var(--vscode-descriptionForeground, #888);
+  flex: 0 0 auto;
+  transition: background-color .15s ease, transform .15s ease;
 }
 .dot.live { background: var(--vscode-testing-iconPassed, #3fb950); box-shadow: 0 0 5px var(--vscode-testing-iconPassed, #3fb950); }
 .dot.idle { background: var(--vscode-charts-yellow, #d7a838); }
@@ -522,21 +616,22 @@ button.primary:hover { background: var(--vscode-button-hoverBackground, #1177bb)
   justify-content: center;
   padding: 12px;
   box-sizing: border-box;
-  background: rgba(0,0,0,.48);
+  background: rgba(0,0,0,.45);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
 }
 .modal-card {
   width: min(620px, 100%);
   height: min(78vh, 720px);
   display: flex;
   flex-direction: column;
-  gap: 7px;
-  padding: 13px;
+  gap: 8px;
+  padding: 16px;
   box-sizing: border-box;
   border: 1px solid var(--vscode-widget-border, rgba(255,255,255,.16));
-  border-radius: 7px;
+  border-radius: 8px;
   background: var(--vscode-editorWidget-background, #252526);
-  box-shadow: 0 12px 40px rgba(0,0,0,.42);
-  font-family: var(--vscode-font-family);
+  box-shadow: 0 16px 44px rgba(0,0,0,.45), 0 0 0 1px rgba(255,255,255,.05);
 }
 .modal-title { font-weight: 600; font-size: 13px; margin-bottom: 2px; }
 .modal-meta { color: var(--vscode-descriptionForeground, #999); font-size: 11px; line-height: 1.35; }

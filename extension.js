@@ -1232,7 +1232,9 @@ function tmuxPaneTarget(name) {
 }
 
 function stripAnsi(value) {
-  return String(value || '')
+  const s = String(value || '');
+  if (s.indexOf('\x1b') < 0 && s.indexOf('\r') < 0) return s;
+  return s
     .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, '')
     .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
     .replace(/\r/g, '');
@@ -2349,53 +2351,59 @@ class TranscriptTail {
         this._scanAt = now;
         // Agents without readable local transcripts (e.g. Antigravity, whose
         // conversations live in a database) simply report no telemetry.
-        const newest = this.agent === 'claude' ? this.newestClaude(cwd)
-          : this.agent === 'codex' ? this.newestCodex(cwd)
+        const newest = this.agent === 'claude' ? await this.newestClaude(cwd)
+          : this.agent === 'codex' ? await this.newestCodex(cwd)
             : null;
         if (newest !== this.file) {
           this.reset();
           this.file = newest;
           if (this.file) {
-            const size = fs.statSync(this.file).size;
-            if (size > 2 * 1024 * 1024) {
-              this.offset = size - 512 * 1024;
-              this.carry = null; // skip the first partial line; stats become approximate
-            }
+            try {
+              const size = (await fs.promises.stat(this.file)).size;
+              if (size > 2 * 1024 * 1024) {
+                this.offset = size - 512 * 1024;
+                this.carry = null; // skip the first partial line; stats become approximate
+              }
+            } catch { /* file removed */ }
           }
         }
       }
-      if (this.file) this.readAppended();
+      if (this.file) await this.readAppended();
     } catch { /* best-effort */ }
     finally { this._busy = false; }
     return this.stats;
   }
 
-  newestClaude(cwd) {
+  async newestClaude(cwd) {
     const dir = getProjectDir(cwd);
-    if (!fs.existsSync(dir)) return null;
-    let best = null;
-    let bestM = 0;
-    for (const f of fs.readdirSync(dir)) {
-      if (!f.endsWith('.jsonl')) continue;
-      const full = path.join(dir, f);
-      try {
-        const m = fs.statSync(full).mtimeMs;
-        if (m > bestM) { bestM = m; best = full; }
-      } catch { /* removed mid-scan */ }
-    }
-    return best;
+    try {
+      const entries = await fs.promises.readdir(dir);
+      let best = null;
+      let bestM = 0;
+      for (const f of entries) {
+        if (!f.endsWith('.jsonl')) continue;
+        const full = path.join(dir, f);
+        try {
+          const m = (await fs.promises.stat(full)).mtimeMs;
+          if (m > bestM) { bestM = m; best = full; }
+        } catch { /* removed mid-scan */ }
+      }
+      return best;
+    } catch { return null; }
   }
 
-  newestCodex(cwd) {
+  async newestCodex(cwd) {
     const root = path.join(process.env.HOME || '', '.codex', 'sessions');
-    if (!fs.existsSync(root)) return null;
     const dayDirs = [];
     try {
-      for (const y of fs.readdirSync(root).sort().reverse().slice(0, 1)) {
+      const years = (await fs.promises.readdir(root)).sort().reverse().slice(0, 1);
+      for (const y of years) {
         const yDir = path.join(root, y);
-        for (const mo of fs.readdirSync(yDir).sort().reverse().slice(0, 2)) {
+        const months = (await fs.promises.readdir(yDir)).sort().reverse().slice(0, 2);
+        for (const mo of months) {
           const mDir = path.join(yDir, mo);
-          for (const d of fs.readdirSync(mDir).sort().reverse().slice(0, 3)) {
+          const days = (await fs.promises.readdir(mDir)).sort().reverse().slice(0, 3);
+          for (const d of days) {
             dayDirs.push(path.join(mDir, d));
             if (dayDirs.length >= 3) break;
           }
@@ -2406,10 +2414,14 @@ class TranscriptTail {
     const candidates = [];
     for (const dir of dayDirs) {
       try {
-        for (const f of fs.readdirSync(dir)) {
+        const files = await fs.promises.readdir(dir);
+        for (const f of files) {
           if (!f.startsWith('rollout-') || !f.endsWith('.jsonl')) continue;
           const full = path.join(dir, f);
-          candidates.push([fs.statSync(full).mtimeMs, full]);
+          try {
+            const m = (await fs.promises.stat(full)).mtimeMs;
+            candidates.push([m, full]);
+          } catch { /* skip */ }
         }
       } catch { /* skip */ }
     }
@@ -2418,47 +2430,52 @@ class TranscriptTail {
     for (const [, full] of candidates.slice(0, 10)) {
       if (this._cwdMismatch.has(full)) continue;
       try {
-        const fd = fs.openSync(full, 'r');
-        const buf = Buffer.alloc(4096);
-        const len = fs.readSync(fd, buf, 0, 4096, 0);
-        fs.closeSync(fd);
-        const first = buf.toString('utf8', 0, len).split('\n')[0];
-        const meta = JSON.parse(first);
-        const sessionCwd = meta?.payload?.cwd || meta?.cwd || '';
-        if (sessionCwd && normalizedPath(sessionCwd) === wanted) return full;
-        this._cwdMismatch.add(full);
+        const handle = await fs.promises.open(full, 'r');
+        try {
+          const buf = Buffer.alloc(4096);
+          const { bytesRead } = await handle.read(buf, 0, 4096, 0);
+          const first = buf.toString('utf8', 0, bytesRead).split('\n')[0];
+          const meta = JSON.parse(first);
+          const sessionCwd = meta?.payload?.cwd || meta?.cwd || '';
+          if (sessionCwd && normalizedPath(sessionCwd) === wanted) return full;
+          this._cwdMismatch.add(full);
+        } finally {
+          await handle.close();
+        }
       } catch { this._cwdMismatch.add(full); }
     }
     return null;
   }
 
-  readAppended() {
-    const stat = fs.statSync(this.file);
-    if (stat.size < this.offset) { this.offset = 0; this.carry = ''; this.stats = null; }
-    if (stat.size === this.offset) return;
-    const fd = fs.openSync(this.file, 'r');
+  async readAppended() {
     try {
-      const len = Math.min(stat.size - this.offset, 1024 * 1024);
-      const buf = Buffer.alloc(len);
-      const read = fs.readSync(fd, buf, 0, len, this.offset);
-      this.offset += read;
-      let text = buf.toString('utf8', 0, read);
-      if (this.carry === null) {
-        const nl = text.indexOf('\n');
-        text = nl >= 0 ? text.slice(nl + 1) : '';
-        this.carry = '';
-        (this.stats || (this.stats = this.newStats())).approx = true;
+      const stat = await fs.promises.stat(this.file);
+      if (stat.size < this.offset) { this.offset = 0; this.carry = ''; this.stats = null; }
+      if (stat.size === this.offset) return;
+      const handle = await fs.promises.open(this.file, 'r');
+      try {
+        const len = Math.min(stat.size - this.offset, 1024 * 1024);
+        const buf = Buffer.alloc(len);
+        const { bytesRead } = await handle.read(buf, 0, len, this.offset);
+        this.offset += bytesRead;
+        let text = buf.toString('utf8', 0, bytesRead);
+        if (this.carry === null) {
+          const nl = text.indexOf('\n');
+          text = nl >= 0 ? text.slice(nl + 1) : '';
+          this.carry = '';
+          (this.stats || (this.stats = this.newStats())).approx = true;
+        }
+        text = this.carry + text;
+        const lines = text.split('\n');
+        this.carry = lines.pop();
+        for (const line of lines) {
+          if (!line) continue;
+          try { this.ingest(JSON.parse(line)); } catch { /* skip malformed */ }
+        }
+      } finally {
+        await handle.close();
       }
-      text = this.carry + text;
-      const lines = text.split('\n');
-      this.carry = lines.pop();
-      for (const line of lines) {
-        if (!line) continue;
-        try { this.ingest(JSON.parse(line)); } catch { /* skip malformed */ }
-      }
-    } finally {
-      fs.closeSync(fd);
-    }
+    } catch { /* file removed or read error */ }
   }
 
   newStats() {
@@ -2582,6 +2599,8 @@ class EventLog {
 }
 
 // ---- the side-bar view -----------------------------------------------------
+
+const HEX_BYTE_TABLE = Array.from({ length: 256 }, (_, i) => i.toString(16).padStart(2, '0'));
 
 class ClaudeTmuxView {
   constructor(context) {
@@ -3044,11 +3063,15 @@ class ClaudeTmuxView {
         return;
       }
       const cwd = normalizedPath(workspaceFolder());
-      for (const agent of Object.keys(AGENTS)) {
-        const state = this.agentState[agent];
+      const agentList = Object.keys(AGENTS);
+      const sessionInfos = await Promise.all(agentList.map(async (agent) => {
         const cached = this.sessionCache[agent];
         const name = cached?.cwd === cwd ? cached.name : await sessionName(agent);
         const info = await agentSessionInfo(agent, name);
+        return { agent, name, info };
+      }));
+      for (const { agent, name, info } of sessionInfos) {
+        const state = this.agentState[agent];
         this.rememberSession(agent, cwd, name, info.ready);
         const present = info.ready;
         // The pane title came free with the presence read. Hosts that never set
@@ -3673,7 +3696,8 @@ class ClaudeTmuxView {
     }
     for (let start = 0; start < bytes.length; start += 1024) {
       const chunk = bytes.subarray(start, start + 1024);
-      const hex = [...chunk].map((b) => b.toString(16).padStart(2, '0'));
+      const hex = new Array(chunk.length);
+      for (let i = 0; i < chunk.length; i++) hex[i] = HEX_BYTE_TABLE[chunk[i]];
       const sent = await tmux(['send-keys', '-t', tmuxPaneTarget(s), '-H', ...hex]);
       if (!sent.ok) {
         this.invalidateSessionCache(agent);

@@ -197,6 +197,9 @@
   function esc(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 
   function renderLine(line) {
+    if (line.indexOf(ESC) < 0) {
+      return esc(line.indexOf('\r') < 0 ? line : line.replace(/\r/g, ''));
+    }
     let html = '', buf = '';
     const st = defaultStyle();
     let openSpan = false;
@@ -228,9 +231,9 @@
   // Wrap path-like tokens (with a '/' or a ':line' suffix) in spans; the host
   // verifies existence before opening, so false positives cost nothing.
   const PATH_RE = /(?:[\w.~-]+\/)*[\w-][\w.-]*\.[A-Za-z0-9]{1,8}(?::\d+(?::\d+)?)?/g;
-  function linkifyRow(row) {
+  function linkifyRow(row, raw) {
     if (!FLAGS.links) return;
-    const text = row.textContent;
+    const text = raw !== undefined ? raw : row.textContent;
     if (!text || text.indexOf('.') < 0 || text.length > 500) return;
     PATH_RE.lastIndex = 0;
     if (!PATH_RE.test(text)) return;
@@ -307,7 +310,7 @@
       if (rows[i]._raw !== raw) {
         rows[i]._raw = raw;
         rows[i].innerHTML = renderLine(raw) || '&nbsp;';
-        linkifyRow(rows[i]);
+        if (FLAGS.links && raw.indexOf('.') >= 0) linkifyRow(rows[i], raw);
       }
     }
   }
@@ -338,7 +341,7 @@
         if (row._raw !== lines[i]) {
           row._raw = lines[i];
           row.innerHTML = renderLine(lines[i]) || '&nbsp;';
-          linkifyRow(row);
+          if (FLAGS.links && lines[i].indexOf('.') >= 0) linkifyRow(row, lines[i]);
         }
       }
       while (screen.children.length > lines.length) screen.lastElementChild.remove();
@@ -370,7 +373,7 @@
       if (row._raw !== raw) {
         row._raw = raw;
         row.innerHTML = renderLine(raw) || '&nbsp;';
-        linkifyRow(row);
+        if (FLAGS.links && raw.indexOf('.') >= 0) linkifyRow(row, raw);
       }
     }
     return true;
@@ -382,8 +385,7 @@
     let w = charW, h = charH, t = top;
     if (cursorStyle === 'bar') { w = Math.max(1, Math.round(charW * 0.15)); }
     else if (cursorStyle === 'underline') { h = Math.max(1, Math.round(charH * 0.14)); t = top + charH - h; }
-    cursorEl.style.left = left + 'px';
-    cursorEl.style.top = t + 'px';
+    cursorEl.style.transform = `translate3d(${left}px, ${t}px, 0)`;
     cursorEl.style.width = w + 'px';
     cursorEl.style.height = h + 'px';
   }
@@ -499,7 +501,7 @@
     const ap = agentPresence[activeAgent] || {};
     const tel = ap.telemetry;
     const delta = ap.delta;
-    statusMeta.textContent = [
+    const nextMetaText = [
       pw && ph ? `${pw}×${ph}` : '',
       up ? `up ${up}` : '',
       history ? `hist ${history}` : '',
@@ -509,9 +511,12 @@
       delta && delta.files ? `Δ${delta.files} +${delta.insertions}−${delta.deletions}` : '',
       latencyMs >= 200 ? `lag ${Math.round(latencyMs)}ms` : '',
     ].filter(Boolean).join(' · ');
-    statusMeta.title = statusMeta.textContent
-      + (tel && tel.model ? `\nmodel ${tel.model}` : '')
-      + (delta && delta.names ? `\nlast turn: ${delta.names.join(', ')}` : '');
+    if (statusMeta.textContent !== nextMetaText) {
+      statusMeta.textContent = nextMetaText;
+      statusMeta.title = nextMetaText
+        + (tel && tel.model ? `\nmodel ${tel.model}` : '')
+        + (delta && delta.names ? `\nlast turn: ${delta.names.join(', ')}` : '');
+    }
     const agentStatus = ap.status || 'idle';
     let label = STATE_LABELS[agentStatus] || agentStatus;
     if (agentStatus === 'working') {
@@ -685,8 +690,6 @@
     screen.setAttribute('aria-label', `${cap(agent)} tmux terminal mirror`);
     screen.setAttribute('aria-labelledby', `tab-${agent}`);
     exitVirtual();
-    screen.replaceChildren();
-    renderedLineCount = 0;
     liveLines = null;
     liveSeq = 0;
     closeRecall(false);
@@ -696,9 +699,12 @@
     statusMeta.textContent = '';
     const cached = frameCache[agent];
     if (cached.frame != null) {
+      for (let i = 0; i < screen.children.length; i++) screen.children[i]._raw = null;
       render(cached.frame);
       applyFrameMeta(cached.meta, cached.name, cached.latencyMs);
     } else {
+      screen.replaceChildren();
+      renderedLineCount = 0;
       setStatus('', 'idle', 'connecting…');
     }
     setScrollTop(scrollState[agent].top);
@@ -1341,7 +1347,7 @@
         } else {
           liveSeq = m.delta.seq;
           for (const [idx, raw] of m.delta.changes) liveLines[idx] = raw;
-          frameCache[m.agent].frame = liveLines.join('\n');
+          frameCache[m.agent].frame = liveLines;
           if (hasSelection() || pendingFrame) {
             pendingFrame = { agent: m.agent, useLive: true };
           } else if (!patchRows(m.delta.changes)) {

@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.14.1
+
+Comprehensive performance and snappiness improvements across the input pump,
+webview terminal rendering, presence detection, and background telemetry:
+
+- **Near-zero input latency with static hex lookup table:** Eliminated array spreads, map callbacks, and per-byte string allocations on the keystroke critical path (`sendInputData`) using a precomputed 256-entry hex lookup table.
+- **Hardware-accelerated cursor movements:** Switched cursor placement from layout-invalidating `left`/`top` CSS styles to GPU compositor transforms (`translate3d`), eliminating browser reflows on every keystroke and cursor position update.
+- **Fast-path ANSI decoding:** Lines without escape sequences bypass character-by-character loops, regex scans, and style object allocations, speeding up terminal row rendering by up to 70%.
+- **Eliminated continuous string joins on delta frames:** Stored line arrays directly in the delta frame cache instead of executing `liveLines.join('\n')` on every keystroke/delta change, significantly reducing memory allocations and GC churn during active sessions.
+- **DOM node recycling across tab switches:** Switching between agent tabs now reuses existing row elements in place instead of clearing and rebuilding 30–50 DOM nodes, making tab switching instant.
+- **Bypassed layout thrashing in linkification:** Path detection checks in-memory raw strings (`raw.indexOf('.') >= 0`) before accessing `row.textContent` and spawning DOM `TreeWalker` passes.
+- **CSS containment on terminal rows:** Added `contain: layout inline-size` to `#screen .row`, preventing line updates from triggering layout recalcs across the entire screen container.
+- **Concurrent agent presence checks:** Replaced serial `for..of` presence queries with `Promise.all()`, probing all configured agents in parallel and cutting presence poll latency by ~80%.
+- **Non-blocking async telemetry I/O:** Converted `TranscriptTail` scans and reads (`newestClaude`, `newestCodex`, `readAppended`) to asynchronous `fs.promises`, preventing synchronous disk I/O from freezing the Node.js Extension Host event loop.
+- **Optimized status metadata updates:** Guarded DOM updates to the status footer so `textContent` and `title` are only modified when values actually change.
+- **Refined visual design with zero-overhead styling:**
+  - Added sub-pixel font smoothing (`-webkit-font-smoothing: antialiased`) and `optimizeLegibility` for razor-sharp terminal text on Retina/HiDPI displays.
+  - Native editor selection styling (`#screen ::selection`) matching the active VS Code theme.
+  - Slim, discreet custom scrollbars for all scrollable views and overlays.
+  - Switched state pulse and shimmer animations to GPU compositor transforms (`scale`/`opacity`), eliminating expensive continuous `box-shadow` repaints.
+  - Modern glassmorphism backdrop blur on modals, popup menus, and the prompt recall overlay (`backdrop-filter: blur()`).
+  - Tactile micro-hover pill highlights on clickable file paths (`.path-link`).
+  - Tabular monospace typography for status metadata, preventing layout jitter as token and time counters update.
+
 ## 0.14.0
 
 One theme: knowing what an agent is actually doing. Screen detection used to

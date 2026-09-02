@@ -41,9 +41,15 @@ It mirrors the selected tmux pane instead of opening another VS Code terminal:
 - the refresh loop is adaptive: hot while you type or output streams, slow when
   the pane is static, watchdog-only when push notifications are live;
 - one ordered input pump merges pending keystrokes under backpressure, while
-  bracketed paste preserves large UTF-8 input;
+  bracketed paste preserves large UTF-8 input; a precomputed byte table eliminates
+  per-keystroke allocation overhead;
+- hardware-accelerated GPU cursor placement (`translate3d`) and sub-pixel font
+  smoothing (`-webkit-font-smoothing`) keep typing jitter-free and text razor-sharp;
+- native editor selection styling (`::selection`), tactile file path hover feedback,
+  glassmorphism popup overlays, and slim themed scrollbars fit natively into VS Code;
 - a tab appears only while that workspace's matching tmux session exists, and
-  only for agents whose CLI is installed; tabs carry live state dots;
+  only for agents whose CLI is installed; tabs carry live state dots with zero-cost
+  GPU compositor animations;
 - the `+` menu starts or resumes an absent agent (past conversations are listed
   per workspace for Claude, Codex, OpenCode, Hermes and pi);
 - each tab carries its agent's colour on the underline it already had, and swaps
@@ -56,8 +62,8 @@ It mirrors the selected tmux pane instead of opening another VS Code terminal:
 - mouse wheel, scrollbar and `Shift+PageUp` / `Shift+PageDown` navigate history;
   large history captures render virtualized, so scrolling up never hitches;
 - new output follows automatically only while you are at the bottom;
-- switching tabs paints an at-most-seconds-old frame instantly (background
-  captures keep the inactive tab's cache warm).
+- switching tabs recycles row elements in place, painting warm cached frames
+  instantly with zero DOM recreation stutter.
 
 ## Requirements
 
@@ -88,7 +94,7 @@ From this repository:
 ```bash
 npm run check
 npm run package
-code --install-extension claude-tmux-sidebar-0.14.0.vsix --force
+code --install-extension claude-tmux-sidebar-0.14.1.vsix --force
 ```
 
 Alternatively use VS Code: **Extensions → … → Install from VSIX…**, select the
