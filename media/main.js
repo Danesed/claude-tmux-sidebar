@@ -579,6 +579,7 @@
 
   const isMac = navigator.platform.startsWith('Mac');
   let composing = false;
+  let paneMode = ''; // tmux mode the pane sits in (copy-mode): typing here leaves it
   function isInputLocked() {
     return ['drafting', 'delivering', 'awaitingAck', 'ackTimeout'].includes(handoffPhase)
       || ['delivering', 'gathering'].includes(arbiterPhase)
@@ -673,6 +674,11 @@
     if (text) { e.preventDefault(); vscode.postMessage({ type: 'paste', agent: activeAgent, data: text }); }
   });
   screen.addEventListener('mousedown', () => screen.focus());
+  wrap.addEventListener('mousedown', (e) => {
+    if (!e.target.closest('button, input, textarea, select, a, .path-link')) {
+      screen.focus({ preventScroll: true });
+    }
+  });
   btnStart.addEventListener('click', () => vscode.postMessage({ type: 'start', agent: activeAgent }));
   btnResume.addEventListener('click', () => vscode.postMessage({ type: 'attach', agent: activeAgent }));
 
@@ -778,7 +784,8 @@
     screen.setAttribute('aria-readonly', locked ? 'true' : 'false');
     document.getElementById('hint').textContent = transactionLocked
       ? 'handoff in progress'
-      : locked ? `Pair Mode · ${cap(writerAgent)} is writer` : 'click to type';
+      : locked ? `Pair Mode · ${cap(writerAgent)} is writer`
+        : paneMode ? `pane is in tmux ${paneMode} · typing here leaves it` : 'click to type';
     btnUnlock.classList.toggle('hidden', !writerAgent);
   }
 
@@ -975,7 +982,7 @@
         + (e.tool ? ` · ${e.tool}` : '')
         + (d && d.files ? ` · ${d.files}f +${d.insertions}−${d.deletions}` : '');
     }
-    if (e.type === 'input-discarded') return `input not delivered to ${cap(e.agent)} (${e.failedBytes || 0}B failed, ${e.pendingBytes || 0}B discarded)`;
+    if (e.type === 'input-discarded') return `input not delivered to ${cap(e.agent)} (${e.failedBytes || 0}B failed, ${e.pendingBytes || 0}B discarded${e.reason ? ` · ${e.reason}` : ''})`;
     if (e.type === 'handoff') {
       return `handoff ${e.phase}${e.source ? ` · ${cap(e.source)} → ${cap(e.target)}` : ''}${e.mode ? ` · ${e.mode}` : ''}`;
     }
@@ -1080,6 +1087,30 @@
     if (e.key === 'Escape' && !arbiterModal.classList.contains('hidden')) {
       e.preventDefault();
       arbiterCancel.click();
+      return;
+    }
+    // If the user starts typing while focus is on body/wrap (e.g. after
+    // switching windows or clicking empty space), focus the screen AND deliver
+    // the key: focusing alone would swallow this first keystroke (the screen's
+    // keydown listener never sees an event dispatched before it was focused).
+    if (document.activeElement !== screen) {
+      const isInput = document.activeElement && ['input', 'textarea', 'select'].includes(document.activeElement.tagName.toLowerCase());
+      const isModalOpen = !handoffModal.classList.contains('hidden') || !arbiterModal.classList.contains('hidden')
+        || !overlay.classList.contains('hidden') || !recallEl.classList.contains('hidden') || !timelineEl.classList.contains('hidden');
+      if (!isInput && !isModalOpen && !e.metaKey && !e.altKey && !e.isComposing && isTextKey(e.key)) {
+        screen.focus({ preventScroll: true });
+        if (!isInputLocked()) {
+          const bytes = keyToBytes(e);
+          if (bytes !== null) {
+            e.preventDefault();
+            vscode.postMessage({
+              type: 'input', agent: activeAgent, data: bytes,
+              immediate: e.ctrlKey || !isTextKey(e.key),
+            });
+            return;
+          }
+        }
+      }
     }
   });
 
@@ -1245,8 +1276,15 @@
       document.getElementById('hint').textContent = m.reason === 'handoff' ? 'handoff in progress' : 'session operation in progress';
       setTimeout(applyPairLock, 1200);
     } else if (m.type === 'inputError') {
-      document.getElementById('hint').textContent = m.pendingBytes ? 'input failed · later keys discarded' : 'input not delivered';
-      setStatus('', 'dead', 'input failed');
+      if (m.reason === 'workspace') {
+        document.getElementById('hint').textContent = 'workspace changed · unsent text discarded';
+      } else {
+        const why = m.reason ? ` (${m.reason})` : '';
+        document.getElementById('hint').textContent = m.pendingBytes
+          ? `input not delivered${why} · later keys discarded, retype`
+          : `input not delivered${why} · retype`;
+        setStatus('', 'dead', 'input failed');
+      }
       setTimeout(applyPairLock, 2500);
     } else if (m.type === 'agentStalled') {
       if (m.agent === activeAgent) {
@@ -1368,6 +1406,8 @@
       frameCache[m.agent].name = m.name || frameCache[m.agent].name;
       frameCache[m.agent].latencyMs = parseInt(m.latencyMs, 10) || 0;
       applyFrameMeta(frameCache[m.agent].meta, frameCache[m.agent].name, frameCache[m.agent].latencyMs);
+      const mode = typeof m.paneMode === 'string' ? m.paneMode : '';
+      if (mode !== paneMode) { paneMode = mode; applyPairLock(); }
     } else if (m.type === 'bgFrame') {
       // Background agent captures keep the inactive tab's cache warm so a
       // switch paints an at-most-seconds-old frame (and cursor) instantly.
@@ -1447,6 +1487,7 @@
       statusMeta.textContent = '';
       setStatus(m.name, 'dead', 'stopped');
       lastSeen = 0;
+      if (paneMode) { paneMode = ''; applyPairLock(); }
     } else if (m.type === 'sessions') {
       if (m.agent !== activeAgent) return;
       btnStart.disabled = false;

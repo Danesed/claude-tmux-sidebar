@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.15.1
+
+Bug-fix release: typing in the sidebar could silently stop reaching the agent, especially with many tmux clients and several AgentMux windows sharing one tmux server.
+
+- **Fix: typing in the sidebar silently stopped reaching the agent when the pane was in tmux copy mode.** Scrolling an agent pane from a terminal attached to the same session (prefix+`[`, PageUp, or the mouse wheel with `mouse on`) leaves the pane in copy mode after you look away. In that state `send-keys` is consumed by copy mode, nothing reaches the agent, and `capture-pane` keeps showing the ordinary screen, so the mirror gave no hint. The presence probe now reports `#{pane_in_mode}`/`#{pane_mode}`, the input path cancels copy/view mode once before delivering keys (the ordinary keystroke path is unchanged: still one tmux command), and the hint line says "pane is in tmux copy-mode · typing here leaves it" while it lasts.
+- **Fix: input could wedge or be silently lost when one tmux server is shared by many sessions and several AgentMux windows.** Every tmux invocation is now time-bounded (execFile timeout, control-client watchdog) and resolves `timedOut` instead of hanging forever — previously a single unanswered call stuck `inFlight`/`_presenceRunning` and typing died silently until reload. A timed-out capture or presence probe now skips the cycle instead of tearing down the session (no more flashing "no session" overlays or dropped tabs under load). Keystrokes go out on a dedicated execFile instead of queuing behind heavy captures on the shared control-mode FIFO.
+- **Failed input now says why.** Every discarded send carries a reason (`timeout`, `transport`, `no-session`, `workspace`, `tmux`) in the hint line, the Timeline entry and a throttled line in the AgentMux output channel. Input is never replayed: a tmux client hands its command to the server as soon as it connects, so a send that timed out may still run once the server catches up, and re-sending it would type the text (and any Enter) twice. Debounced keystrokes are dropped when their pane is killed or recreated, so they can never fire into a recycled session.
+- **Fix: first keystroke lost after switching windows.** Typing while the sidebar webview itself is not focused now focuses the mirror *and* delivers the key instead of only focusing.
+
 ## 0.15.0
 
 Major release introducing **Agent-to-Agent Coordination**, **Local IPC & MCP Bridge**, **Git Worktree Isolation**, **Stall & Collision Protection**, **Built-in Agent Presets**, and **Unseen Attention Notifications**:

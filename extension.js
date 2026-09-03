@@ -21,11 +21,54 @@ const net = require('net');
 // per-command timeout, everything in flight resolves ok:false, and NOTHING is
 // ever replayed (failed input must be reported, not re-sent).
 
-function tmuxExecFile(args) {
+// Every tmux invocation is bounded: a tmux server shared with many sessions
+// and several AgentMux windows can answer slowly, and an unanswered call must
+// degrade to "try again" rather than wedge the input pump (queue.inFlight),
+// the presence loop (_presenceRunning) or the tick loop forever — that wedge
+// is what used to make typing silently stop working until a window reload.
+// Timeouts resolve { ok:false, timedOut:true } so callers can tell "unknown"
+// (keep state, keep the user's text) from a real tmux error (session gone).
+let tmuxExecTimeoutMs = 15000;
+let tmuxInputTimeoutMs = 10000;
+// Session-identity probes are small and frequent: bound them tighter than full
+// frame captures so a slow server degrades presence instead of stalling it.
+const TMUX_PROBE_TIMEOUT_MS = 8000;
+const TMUX_CAPTURE_TIMEOUT_MS = 20000;
+
+// Test seam (see test/test.js): shorten the bounds so timeout paths run fast.
+function setTmuxTimeouts(execMs, inputMs) {
+  if (Number.isFinite(execMs) && execMs > 0) tmuxExecTimeoutMs = execMs;
+  if (Number.isFinite(inputMs) && inputMs > 0) tmuxInputTimeoutMs = inputMs;
+}
+
+function tmuxExecFile(args, timeoutMs = tmuxExecTimeoutMs) {
   return new Promise((resolve) => {
-    execFile('tmux', args, { maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => {
-      resolve({ ok: !err, out: stdout || '' });
-    });
+    let settled = false;
+    let timer = null;
+    const done = (value) => {
+      if (settled) return;
+      settled = true;
+      if (timer) { clearTimeout(timer); timer = null; }
+      resolve(value);
+    };
+    let child = null;
+    try {
+      child = execFile('tmux', args, { maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => {
+        done(err && err.killed
+          ? { ok: false, out: stdout || '', timedOut: true }
+          : { ok: !err, out: stdout || '' });
+      });
+    } catch { done({ ok: false, out: '' }); }
+    // One mechanism only (no execFile `timeout` option alongside this): the
+    // flag above is what makes timeouts deterministic, including under the
+    // test mock, which ignores spawn options entirely.
+    if (!settled && timeoutMs > 0) {
+      timer = setTimeout(() => {
+        timer = null;
+        if (child) { try { child.kill('SIGKILL'); } catch { /* already gone */ } }
+        done({ ok: false, out: '', timedOut: true });
+      }, timeoutMs);
+    }
   });
 }
 
@@ -132,7 +175,7 @@ class TmuxControlClient {
     return new Promise((resolve) => {
       const entry = {
         remaining: parts, ok: true, out: '', resolve,
-        timer: setTimeout(() => this.destroy(true), 10000),
+        timer: setTimeout(() => this.destroy(true, { timedOut: true }), 10000),
       };
       for (let i = 0; i < parts; i++) this.pending.push(entry);
       const lines = commands
@@ -158,7 +201,7 @@ class TmuxControlClient {
 
   onLine(line) {
     if (this.current) {
-      if (line.startsWith('%end ') || line.startsWith('%error ')) {
+      if (/^%end \d+ \d+/.test(line) || /^%error \d+ \d+/.test(line)) {
         const { entry, lines } = this.current;
         this.current = null;
         entry.ok = entry.ok && line.startsWith('%end ');
@@ -173,7 +216,7 @@ class TmuxControlClient {
       this.current.lines.push(line);
       return;
     }
-    if (line.startsWith('%begin ')) {
+    if (/^%begin \d+ \d+/.test(line)) {
       const entry = this.pending.shift();
       if (entry) this.current = { entry, lines: [] };
       else this.current = { entry: { remaining: 1, ok: true, out: '', resolve: () => {}, timer: null }, lines: [] };
@@ -191,7 +234,7 @@ class TmuxControlClient {
     this.failedAt = Date.now();
   }
 
-  destroy(failed = false) {
+  destroy(failed = false, extra = null) {
     const proc = this.proc;
     this.proc = null;
     this.alive = false;
@@ -203,7 +246,7 @@ class TmuxControlClient {
       // transportFailed distinguishes "the control client died" from a real
       // tmux error reply, so callers can retry over execFile instead of
       // treating a wedged transport as a missing session or failed input.
-      entry.resolve({ ok: false, out: '', transportFailed: true });
+      entry.resolve({ ok: false, out: '', transportFailed: true, ...(extra || {}) });
     };
     if (this.current) flush(this.current.entry);
     for (const entry of this.pending) flush(entry);
@@ -233,17 +276,30 @@ const TRANSPORT_RETRY_SAFE = new Set([
   'set-option', 'set-window-option', 'resize-window', 'refresh-client', 'list-sessions',
 ]);
 
-function tmux(args) {
+function tmux(args, timeoutMs) {
   if (['auto', 'control'].includes(transportMode())
     && TmuxControlClient.controlSafe(args) && controlClient.ensure()) {
     // A control-client death (watchdog kill, tmux exit) fails the command at
     // the transport layer, not in tmux; retry idempotent commands once over
     // execFile so a wedged client never masquerades as "no session".
+    // Input commands (send-keys, set-buffer, paste-buffer) are deliberately
+    // NOT retried: a command that died in flight may or may not have executed,
+    // and replaying it would double-type into the agent's prompt. Callers
+    // receive transportFailed/timedOut and preserve the text instead.
     return controlClient.exec(args).then((result) => (
-      result.transportFailed && TRANSPORT_RETRY_SAFE.has(args[0]) ? tmuxExecFile(args) : result
+      result.transportFailed && TRANSPORT_RETRY_SAFE.has(args[0]) ? tmuxExecFile(args, timeoutMs) : result
     ));
   }
-  return tmuxExecFile(args);
+  return tmuxExecFile(args, timeoutMs);
+}
+
+// Input takes a dedicated execFile instead of queuing behind heavy captures on
+// the shared control-mode FIFO: with several windows capturing against one
+// tmux server, head-of-line stalls make keystrokes time out and read as "not
+// delivered". One fork per input burst is negligible next to that.
+function tmuxInput(args) {
+  if (transportMode() === 'control') return tmux(args);
+  return tmuxExecFile(args, tmuxInputTimeoutMs);
 }
 
 // Event-tap fallback when control-mode subscriptions are unavailable:
@@ -1280,7 +1336,7 @@ async function sessionName(agent) {
   if (!base) return '';
   // A mirrored session's name is the user's, not ours to disambiguate.
   if (AGENTS[agent]?.attachSession) return base;
-  const found = await tmux(['display-message', '-p', '-t', tmuxPaneTarget(base), '#{session_path}']);
+  const found = await tmux(['display-message', '-p', '-t', tmuxPaneTarget(base), '#{session_path}'], TMUX_PROBE_TIMEOUT_MS);
   // tmux 3.4 answers a missing '=name:' target with exit 0 and an EMPTY line
   // rather than an error, so "not ok" is not the only way to say "no such
   // session". Without treating empty as absent, every brand-new session was
@@ -1300,7 +1356,7 @@ async function sessionName(agent) {
   // every session was named that way, and starting a second one under the clean
   // name would orphan the agent the user is actually running. One extra probe,
   // and only on the path where no agent answers to the plain name anyway.
-  const legacy = await tmux(['display-message', '-p', '-t', tmuxPaneTarget(hashed), '#{session_path}']);
+  const legacy = await tmux(['display-message', '-p', '-t', tmuxPaneTarget(hashed), '#{session_path}'], TMUX_PROBE_TIMEOUT_MS);
   const legacyOwner = legacy.ok ? legacy.out.trim() : '';
   if (legacyOwner) {
     const normLegacy = normalizedPath(legacyOwner);
@@ -2017,20 +2073,31 @@ function isShellCommand(command) {
 async function agentSessionInfo(agent, name) {
   const result = await tmux([
     'display-message', '-p', '-t', tmuxPaneTarget(name),
-    '#{session_path}\t#{@claude_tmux_agent}\t#{@claude_tmux_running}\t#{pane_current_command}\t#{session_created}\t#{@claude_tmux_generation}\t#{@agentmux_state}\t#{@agentmux_tool}\t#{@agentmux_session_id}\t#{pane_pid}\t#{pid}\t#{pane_title}',
-  ]);
+    '#{session_path}\t#{@claude_tmux_agent}\t#{@claude_tmux_running}\t#{pane_current_command}\t#{session_created}\t#{@claude_tmux_generation}\t#{@agentmux_state}\t#{@agentmux_tool}\t#{@agentmux_session_id}\t#{pane_pid}\t#{pid}\t#{pane_in_mode}\t#{pane_mode}\t#{pane_title}',
+  ], TMUX_PROBE_TIMEOUT_MS);
+  // Timed out or transport-dead is "unknown", never "absent": callers on the
+  // live path (tick, presence, input) must skip the cycle rather than tear
+  // down state for a session that is probably still there.
+  if (result.timedOut || result.transportFailed) return { exists: false, ready: false, transient: true };
   if (!result.ok) return { exists: false, ready: false };
   const fields = result.out.replace(/\r?\n$/, '').split('\t');
   const [sessionPath, marker, running, command = '', created = '', generation = '',
-    hookState = '', hookTool = '', hookSessionId = '', panePid = '', serverPid = ''] = fields;
+    hookState = '', hookTool = '', hookSessionId = '', panePid = '', serverPid = '',
+    inModeFlag = '', modeName = ''] = fields;
   // The title is last so a tab inside it cannot shift any other field.
-  const title = fields.slice(11).join('\t');
+  const title = fields.slice(13).join('\t');
+  // A pane sitting in copy mode (someone scrolled it from an attached
+  // terminal, then walked away) swallows every key send-keys delivers while
+  // capture-pane still shows the ordinary screen underneath. Surfacing the
+  // mode lets the input path leave it before typing, instead of losing keys
+  // with no visible reason.
+  const paneMode = inModeFlag === '1' ? (modeName || 'mode') : '';
   const shell = isShellCommand(command);
   // panePid is the pane's shell process and serverPid the tmux server's, so the
   // pair distinguishes "this is the same pane I validated" from "a pane that
   // reuses its name after a recreate or a tmux server restart". session_created
   // alone cannot: it has one-second resolution.
-  const base = { shell, command, created, generation, hookState, hookTool, hookSessionId, panePid, serverPid, title };
+  const base = { shell, command, created, generation, hookState, hookTool, hookSessionId, panePid, serverPid, title, paneMode };
   // Free mode: the user named this session explicitly, so mirroring it is the
   // whole point and it is not bound to the workspace root the way a managed
   // session is. Whatever runs in it — agent or plain shell — is ready to
@@ -2777,6 +2844,7 @@ class ClaudeTmuxView {
       stalled: false,
       lastPromptTime: 0,
       paneTitle: '',           // what the TUI wrote there (Claude: the conversation summary)
+      paneMode: '',            // tmux mode the pane sits in ('copy-mode'): keys are swallowed until it ends
       detectionHold: false,    // a viewer/picker is covering the pane: freeze the status
       promptLine: '',          // reconstructed prompt for Alt+Up recall (null = bailed)
     };
@@ -3436,12 +3504,18 @@ class ClaudeTmuxView {
       }));
       for (const { agent, name, info } of sessionInfos) {
         const state = this.agentState[agent];
+        // The server was too slow to answer: keep everything as it was and let
+        // the next pass re-verify. Marking the session absent here is what used
+        // to flash "no session" overlays and drop tabs under multi-window load.
+        if (info.transient) continue;
         this.rememberSession(agent, cwd, name, info.ready);
         const present = info.ready;
         // The pane title came free with the presence read. Hosts that never set
         // one leave it at the machine name, which is noise, not a summary.
         const paneTitle = present && info.title && info.title !== os.hostname() ? info.title.slice(0, 120) : '';
         if (paneTitle !== state.paneTitle) { state.paneTitle = paneTitle; changed = true; }
+        const paneMode = present ? (info.paneMode || '') : '';
+        if (paneMode !== state.paneMode) { state.paneMode = paneMode; changed = true; }
         if (present && info.hookState && cfg().get('stateHooks') !== false) {
           this.applyHookState(agent, info.hookState, info.hookTool);
         } else if (present) {
@@ -3744,9 +3818,14 @@ class ClaudeTmuxView {
     }
     if (queue.data && queue.cwd !== cwd) {
       if (queue.timer) clearTimeout(queue.timer);
+      // Workspace switched with keystrokes still debounced in the queue: the
+      // bytes belong to the old session and can never be delivered to the new
+      // one — say so instead of dropping silently.
+      const droppedBytes = Buffer.byteLength(queue.data, 'utf8');
       queue.data = '';
       queue.paste = false;
       queue.timer = null;
+      if (!system && droppedBytes > 0) this.reportInputIssue(agent, { reason: 'workspace', failedBytes: droppedBytes });
     }
     queue.cwd = cwd;
     queue.data += data;
@@ -4000,6 +4079,10 @@ class ClaudeTmuxView {
     const queue = this.inputQueues[agent];
     if (queue.timer) { clearTimeout(queue.timer); queue.timer = null; }
     if (!queue.data || queue.inFlight) return queue.chain;
+    // No external watchdog mutating inFlight/data here: every tmux call below
+    // is time-bounded (tmuxExecFile timeout / control-client watchdog), so this
+    // block always settles. A timer clearing flags from the outside would race
+    // with a late-resolving send and let two flushes interleave on one pane.
     queue.inFlight = true;
     queue.chain = (async () => {
       while (queue.data) {
@@ -4009,70 +4092,174 @@ class ClaudeTmuxView {
         queue.data = '';
         queue.cwd = null;
         queue.paste = false;
-        const delivered = await this.sendInputData(agent, data, cwd, paste);
-        if (!delivered) {
+        const result = await this.sendInputData(agent, data, cwd, paste);
+        if (!result.ok) {
+          // A timeout or a dead transport means delivery is UNKNOWN, and
+          // unknown is not "not delivered": the tmux client hands its command
+          // to the server the moment it connects, so a server that answers
+          // late still runs the send-keys after the client was killed.
+          // Replaying the bytes would then type them twice — and a replayed
+          // Enter submits whatever sits in the agent's prompt. So failed input
+          // is reported with its reason and never re-sent (see the transport
+          // rules at the top of this file); the user retypes what the hint
+          // says was lost.
           const pendingBytes = Buffer.byteLength(queue.data, 'utf8');
           queue.data = '';
           queue.cwd = null;
           queue.paste = false;
-          if (this.view) this.view.webview.postMessage({
-            type: 'inputError', agent,
-            failedBytes: Buffer.byteLength(data, 'utf8'),
-            pendingBytes,
-            pendingDiscarded: pendingBytes > 0,
-          });
-          this.eventLog.append({
-            type: 'input-discarded', agent,
-            failedBytes: Buffer.byteLength(data, 'utf8'), pendingBytes,
+          this.reportInputIssue(agent, {
+            reason: result.reason || 'tmux',
+            failedBytes: Buffer.byteLength(result.unsent || data, 'utf8'), pendingBytes,
           });
           return false;
         }
+        this.noteInputSuccess(agent);
       }
       return true;
     })().finally(() => { queue.inFlight = false; });
     return queue.chain;
   }
 
+  // Failed input is reported three ways — the hint line, the ledger (Timeline)
+  // and the Output channel — with the reason ('timeout', 'transport',
+  // 'no-session', 'workspace', 'tmux') so a bug report says which branch failed.
+  reportInputIssue(agent, { reason, failedBytes = 0, pendingBytes = 0 }) {
+    const state = this.agentState[agent];
+    state.inputErrorCount = (state.inputErrorCount || 0) + 1;
+    const count = state.inputErrorCount;
+    if (this.view) this.view.webview.postMessage({
+      type: 'inputError', agent, reason, failedBytes, pendingBytes, pendingDiscarded: pendingBytes > 0,
+    });
+    this.eventLog.append({ type: 'input-discarded', agent, reason, failedBytes, pendingBytes });
+    // Throttled so a sustained outage logs the first failure and then one line in ten.
+    if (count === 1 || count % 10 === 0) {
+      const label = AGENTS[agent]?.label || agent;
+      this.output().appendLine(
+        `[${new Date().toLocaleTimeString()}] AgentMux: input to ${label} not delivered (${reason}): `
+        + `${failedBytes} bytes discarded${pendingBytes ? `, ${pendingBytes} pending discarded` : ''} (#${count}).`
+      );
+    }
+  }
+
+  noteInputSuccess(agent) {
+    const state = this.agentState[agent];
+    if (state) state.inputErrorCount = 0;
+  }
+
+  // Text queued for a pane that no longer exists must never fire into whatever
+  // reuses the session name next: drop it when the pane is destroyed.
+  dropQueuedInput(agent) {
+    const queue = this.inputQueues[agent];
+    if (!queue) return;
+    if (queue.timer) { clearTimeout(queue.timer); queue.timer = null; }
+    queue.data = '';
+    queue.cwd = null;
+    queue.paste = false;
+  }
+
+  // Delivery result: { ok, transient, reason, unsent }. transient means "the
+  // bytes may or may not have reached the pane" (timeout, dead transport);
+  // unsent is the suffix that was definitely never handed to tmux, for the
+  // report. Nothing is ever replayed either way (see flushInput).
   async sendInputData(agent, data, cwd = normalizedPath(workspaceFolder()), paste = false) {
-    if (!cwd || normalizedPath(workspaceFolder()) !== cwd) return false;
+    if (!cwd || normalizedPath(workspaceFolder()) !== cwd) return { ok: false, reason: 'workspace' };
     // Hot path: reuse the session identity the presence loop verified moments
-    // ago, so a keystroke flush costs one tmux process instead of four.
+    // ago, so a keystroke flush costs one tmux process instead of four. When
+    // the cache is cold, a recent presence-verified name is re-verified with a
+    // single probe (cheaper than the full disambiguation) but never trusted
+    // blindly — a pane recycled under the same name by another project must
+    // never receive these keystrokes.
     let s = this.cachedReadySession(agent, cwd);
     if (!s) {
-      s = await sessionName(agent);
-      const info = await agentSessionInfo(agent, s);
-      if (!info.ready) {
-        this.invalidateSessionCache(agent);
-        return false;
+      const lastName = this.agentState[agent]?.present ? this.agentState[agent]?.lastName : null;
+      if (lastName) {
+        const verify = await agentSessionInfo(agent, lastName);
+        if (verify.transient) return { ok: false, transient: true, reason: 'timeout', unsent: data };
+        if (verify.ready) {
+          s = lastName;
+          this.rememberSession(agent, cwd, s, true);
+        }
       }
-      this.rememberSession(agent, cwd, s, true);
+      if (!s) {
+        s = await sessionName(agent);
+        const info = await agentSessionInfo(agent, s);
+        if (info.transient) return { ok: false, transient: true, reason: 'timeout', unsent: data };
+        if (!s || !info.ready) {
+          this.invalidateSessionCache(agent);
+          return { ok: false, reason: 'no-session' };
+        }
+        this.rememberSession(agent, cwd, s, true);
+      }
     }
+    const left = await this.leavePaneMode(agent, s);
+    if (!left.ok) return { ok: false, transient: true, reason: 'timeout', unsent: data };
+    const fail = (reason, unsent, invalidate = true) => {
+      if (invalidate) this.invalidateSessionCache(agent);
+      const transient = reason === 'timeout' || reason === 'transport';
+      return { ok: false, transient, reason, unsent: transient ? unsent : undefined };
+    };
+    const classify = (result) => {
+      if (result.ok) return null;
+      if (result.timedOut || result.transportFailed) return 'timeout';
+      return 'tmux';
+    };
     const bytes = Buffer.from(data, 'utf8');
     if (paste && !data.includes('\0')) {
       const bufferName = `claude-tmux-${process.pid}-${crypto.randomBytes(6).toString('hex')}`;
-      const loaded = await tmux(['set-buffer', '-b', bufferName, '--', data]);
-      if (!loaded.ok) return false;
-      const pasted = await tmux(['paste-buffer', '-dpr', '-b', bufferName, '-t', tmuxPaneTarget(s)]);
-      if (!pasted.ok) {
-        await tmux(['delete-buffer', '-b', bufferName]);
-        this.invalidateSessionCache(agent);
-        return false;
+      const loaded = await tmuxInput(['set-buffer', '-b', bufferName, '--', data]);
+      const loadedErr = classify(loaded);
+      if (loadedErr) return fail(loadedErr === 'timeout' ? 'timeout' : 'tmux', data);
+      const pasted = await tmuxInput(['paste-buffer', '-dpr', '-b', bufferName, '-t', tmuxPaneTarget(s)]);
+      const pastedErr = classify(pasted);
+      if (pastedErr) {
+        await tmuxInput(['delete-buffer', '-b', bufferName]);
+        return fail(pastedErr === 'timeout' ? 'timeout' : 'tmux', data);
       }
       this.tick(false);
-      return true;
+      return { ok: true };
     }
+    let sentBytes = 0;
     for (let start = 0; start < bytes.length; start += 1024) {
       const chunk = bytes.subarray(start, start + 1024);
       const hex = new Array(chunk.length);
       for (let i = 0; i < chunk.length; i++) hex[i] = HEX_BYTE_TABLE[chunk[i]];
-      const sent = await tmux(['send-keys', '-t', tmuxPaneTarget(s), '-H', ...hex]);
-      if (!sent.ok) {
-        this.invalidateSessionCache(agent);
-        return false;
+      const sent = await tmuxInput(['send-keys', '-t', tmuxPaneTarget(s), '-H', ...hex]);
+      const err = classify(sent);
+      if (err) {
+        sentBytes = start;
+        // Backtrack to a UTF-8 boundary so the preserved suffix decodes
+        // cleanly (the sent prefix may end mid-character; that one char can
+        // render oddly in the pane, which beats losing the whole suffix).
+        while (sentBytes > 0 && (bytes[sentBytes] & 0xC0) === 0x80) sentBytes--;
+        return fail(err === 'timeout' ? 'timeout' : 'tmux', bytes.subarray(sentBytes).toString('utf8'));
       }
     }
     this.tick(false);
-    return true;
+    return { ok: true };
+  }
+
+  // copy-mode (and its view-mode twin) eats every key send-keys delivers —
+  // typing "hello" scrolls and selects instead of reaching the agent, and
+  // capture-pane never shows it. The presence probe reports the mode; when it
+  // does, cancel it before the keys go in. Only these modes take -X commands,
+  // and a stale flag costs one harmless "not in a mode" reply; anything else
+  // (clock, tree) ends on its own with the first key.
+  // Runs only while a mode is reported, so the ordinary keystroke path stays
+  // one tmux command. Returns { ok }: a hard "not in a mode" error still means
+  // "proceed" (best effort), while a timeout means "unknown" and the caller
+  // must preserve the keys instead of typing into a possibly-modal pane.
+  async leavePaneMode(agent, name) {
+    const state = this.agentState[agent];
+    if (!state || !state.paneMode) return { ok: true };
+    const mode = state.paneMode;
+    if (!['copy-mode', 'view-mode'].includes(mode)) {
+      state.paneMode = '';
+      return { ok: true };
+    }
+    const cancelled = await tmuxInput(['send-keys', '-t', tmuxPaneTarget(name), '-X', 'cancel']);
+    if (cancelled.timedOut || cancelled.transportFailed) return { ok: false };
+    state.paneMode = ''; // one cancel per reported mode: a repeat would only error
+    return { ok: true };
   }
 
   async withInputSuspended(agent, action, requireFlush = false) {
@@ -4276,6 +4463,9 @@ class ClaudeTmuxView {
       await this.reportLaunchFailure(agent, s);
       return;
     }
+    // Fresh pane: anything still debounced in the queue belonged to the
+    // previous incarnation and must not fire here.
+    this.dropQueuedInput(agent);
     this.activateSession(agent);
   }
 
@@ -4492,10 +4682,15 @@ class ClaudeTmuxView {
     // One process per tick: frame + cursor/size meta, fused and atomic.
     captureArgs.push(';', 'display-message', '-p', '-t', tmuxPaneTarget(s), META_SENTINEL + META_FORMAT);
     const captureStartedAt = Date.now();
-    const frame = await tmux(captureArgs);
+    const frame = await tmux(captureArgs, TMUX_CAPTURE_TIMEOUT_MS);
     const latencyMs = Date.now() - captureStartedAt;
     if (agent !== this.activeAgent) return;
     if (state.historyMode !== historyMode || state.historyPending !== historyPending) return;
+
+    // Slow server, not a dead session: keep the last frame and presence as
+    // they were. Invalidating here is what used to hide live tabs and flash
+    // the launcher whenever several windows hammered one tmux server.
+    if (frame.timedOut || frame.transportFailed) return;
 
     if (!frame.ok) {
       this.invalidateSessionCache(agent);
@@ -4584,6 +4779,7 @@ class ClaudeTmuxView {
       historyMode,
       historyAvailable: Math.min(state.historySize, scrollback),
       latencyMs,
+      paneMode: state.paneMode,
     });
   }
 
@@ -4629,6 +4825,7 @@ class ClaudeTmuxView {
     if (pick !== 'Kill') return;
     await this.withInputSuspended(agent, () => tmux(['kill-session', '-t', tmuxSessionTarget(s)]));
     this.invalidateSessionCache(agent);
+    this.dropQueuedInput(agent);
     this.agentState[agent] = this.newAgentState();
     if (this.writerAgent === agent) {
       this.writerAgent = null;
@@ -5490,8 +5687,8 @@ class ClaudeTmuxView {
       sourceReady = true;
       this.rememberSession(source, cwd, sourceName, true);
       if (this.view) this.view.webview.postMessage({ type: 'handoffPreparing', id, source, target });
-      return await this.sendInputData(source, prompt, cwd, true)
-        && await this.sendInputData(source, '\r', cwd, false);
+      return (await this.sendInputData(source, prompt, cwd, true)).ok
+        && (await this.sendInputData(source, '\r', cwd, false)).ok;
     }, true);
     if (!sourceReady) {
       return this.returnHandoffToDetails(transaction, `${AGENTS[source].label} must be running and back at its prompt before creating the handoff.`);
@@ -5697,8 +5894,8 @@ class ClaudeTmuxView {
         return false;
       }
       this.rememberSession(target, cwd, targetName, true);
-      return await this.sendInputData(target, payload, cwd, true)
-        && await this.sendInputData(target, '\r', cwd, false);
+      return (await this.sendInputData(target, payload, cwd, true)).ok
+        && (await this.sendInputData(target, '\r', cwd, false)).ok;
     }, true);
     if (!targetInfo?.ready) {
       transaction.phase = 'review';
@@ -6027,8 +6224,8 @@ class ClaudeTmuxView {
           return false;
         }
         this.rememberSession(agent, cwd, name, true);
-        return await this.sendInputData(agent, prompt, cwd, true)
-          && await this.sendInputData(agent, '\r', cwd, false);
+        return (await this.sendInputData(agent, prompt, cwd, true)).ok
+          && (await this.sendInputData(agent, '\r', cwd, false)).ok;
       }, true);
       if (ok) {
         this.agentState[agent].lastActivity = Date.now();

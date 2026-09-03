@@ -12,6 +12,8 @@ let failPaste = false;
 let agentInfoOutput = null;
 let holdNextSend = false;
 let heldSendCallback = null;
+let hangNextCapture = false;
+let heldCaptureCallback = null;
 let captureOutput = 'terminal frame\n';
 let opencodeSessionsJson = null;
 let hermesSessionsTable = null;
@@ -103,6 +105,11 @@ function execFile(command, args, options, callback) {
   }
   if (args[0] === 'capture-pane') {
     // Live ticks fuse the meta display-message into the same invocation.
+    if (hangNextCapture) {
+      hangNextCapture = false;
+      heldCaptureCallback = callback;
+      return;
+    }
     const fused = args.includes(';');
     return callback(null, captureOutput + (fused ? '\x1f2,3,80,24,1700000000,240,0\n' : ''), '');
   }
@@ -166,7 +173,7 @@ const vscode = {
 };
 
 const source = fs.readFileSync(path.join(root, 'extension.js'), 'utf8')
-  + '\nmodule.exports.__test = { ClaudeTmuxView, sessionName, accentChannels, derivedAccent, derivedMark, decodeEscapes, AGENT_DETECTION, paneIdentity, identityMatches, STATE_HOOK_SCRIPT, setStateHookDir, codexHookArgs, tomlString, listPiSessions, piSessionDir, piExtensionPath, ensurePiExtension, removePiExtension, PI_EXTENSION, customAgentSpecs, registerCustomAgents, freeAgentId, mirroredSessionNames, baseSessionName, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions, AGENTS, AGENT_IDS, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, hermesProfileSlug, hermesProfileHome, ensureHermesProfile, launchEnvPrefix, detectionRules, detectState, detectionContext, isRuleLine, explainDetection, DETECTION_REGIONS, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath, AGENT_PRESETS, promptAddAgentPreset };';
+  + '\nmodule.exports.__test = { ClaudeTmuxView, sessionName, accentChannels, derivedAccent, derivedMark, decodeEscapes, AGENT_DETECTION, paneIdentity, identityMatches, STATE_HOOK_SCRIPT, setStateHookDir, codexHookArgs, tomlString, listPiSessions, piSessionDir, piExtensionPath, ensurePiExtension, removePiExtension, PI_EXTENSION, customAgentSpecs, registerCustomAgents, freeAgentId, mirroredSessionNames, baseSessionName, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions, AGENTS, AGENT_IDS, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, hermesProfileSlug, hermesProfileHome, ensureHermesProfile, launchEnvPrefix, detectionRules, detectState, detectionContext, isRuleLine, explainDetection, DETECTION_REGIONS, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath, AGENT_PRESETS, promptAddAgentPreset, setTmuxTimeouts };';
 const moduleUnderTest = { exports: {} };
 const sandbox = {
   module: moduleUnderTest,
@@ -187,7 +194,7 @@ const sandbox = {
   clearInterval,
 };
 vm.runInNewContext(source, sandbox, { filename: 'extension.js' });
-const { ClaudeTmuxView, sessionName, accentChannels, derivedAccent, derivedMark, decodeEscapes, AGENT_DETECTION, paneIdentity, identityMatches, STATE_HOOK_SCRIPT, setStateHookDir, codexHookArgs, tomlString, listPiSessions, piSessionDir, piExtensionPath, ensurePiExtension, removePiExtension, PI_EXTENSION, customAgentSpecs, registerCustomAgents, freeAgentId, mirroredSessionNames, baseSessionName, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions, AGENTS, AGENT_IDS, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, hermesProfileSlug, hermesProfileHome, ensureHermesProfile, launchEnvPrefix, detectionRules, detectState, detectionContext, isRuleLine, explainDetection, DETECTION_REGIONS, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath, AGENT_PRESETS, promptAddAgentPreset } = moduleUnderTest.exports.__test;
+const { ClaudeTmuxView, sessionName, accentChannels, derivedAccent, derivedMark, decodeEscapes, AGENT_DETECTION, paneIdentity, identityMatches, STATE_HOOK_SCRIPT, setStateHookDir, codexHookArgs, tomlString, listPiSessions, piSessionDir, piExtensionPath, ensurePiExtension, removePiExtension, PI_EXTENSION, customAgentSpecs, registerCustomAgents, freeAgentId, mirroredSessionNames, baseSessionName, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions, AGENTS, AGENT_IDS, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, hermesProfileSlug, hermesProfileHome, ensureHermesProfile, launchEnvPrefix, detectionRules, detectState, detectionContext, isRuleLine, explainDetection, DETECTION_REGIONS, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath, AGENT_PRESETS, promptAddAgentPreset, setTmuxTimeouts } = moduleUnderTest.exports.__test;
 
 function makeProvider() {
   const provider = new ClaudeTmuxView({
@@ -867,7 +874,7 @@ async function run() {
   // marker, running, command, created, generation, hookState, hookTool,
   // hookSessionId, panePid, serverPid, title.
   const paneInfo = (command, title, panePid = '4242', serverPid = '999') =>
-    `\t\t${command}\t1700000000\tgen-a\t\t\t\t${panePid}\t${serverPid}\t${title}\n`;
+    `\t\t${command}\t1700000000\tgen-a\t\t\t\t${panePid}\t${serverPid}\t0\t\t${title}\n`;
 
   agentInfoOutput = paneInfo('node', 'Claude Code — refactor the tick loop');
   assert.strictEqual((await agentSessionInfo('claude', 'adopted_pane')).ready, true,
@@ -2075,6 +2082,142 @@ async function run() {
     provider.switchAgent('codex');
     assert.strictEqual(provider.agentState.codex.attention, null, 'switching to agent clears attention');
 
+    provider.closeIpcServer();
+  }
+
+  // ---- input resilience & tmux control regex --------------------------------------
+  {
+    const client = new TmuxControlClient();
+    client.alive = true;
+    client.proc = { stdin: { write: () => {} }, exitCode: null };
+    let resolved = null;
+    const entry = { remaining: 1, ok: true, out: '', resolve: (res) => { resolved = res; }, timer: null };
+    client.pending.push(entry);
+
+    // Terminal screen output containing '%end of file' should NOT trigger %end
+    client.onLine('%begin 1725350000 1 0');
+    assert.ok(client.current, 'current block opened by exact %begin');
+    client.onLine('%end of ruby file');
+    assert.ok(client.current, 'text line starting with %end does not close block');
+    assert.strictEqual(client.current.lines.length, 1);
+    assert.strictEqual(client.current.lines[0], '%end of ruby file');
+
+    // Real %end closes block
+    client.onLine('%end 1725350000 1 0');
+    assert.strictEqual(client.current, null, 'exact %end closes block');
+    assert.ok(resolved, 'entry resolved');
+    assert.strictEqual(resolved.ok, true);
+    assert.strictEqual(resolved.out, '%end of ruby file\n');
+  }
+
+  // ---- a timed-out send is reported and discarded, never replayed ---------------
+  // A send-keys child that never answers (wedged tmux server under multi-window
+  // load) used to wedge the pump forever. Now the timeout fails the send with
+  // its reason; the bytes are NOT kept for a later replay, because the server
+  // may still run that send-keys once it catches up (the client already handed
+  // it over), and a replay would type the text — and any Enter — twice.
+  {
+    const provider = makeProvider();
+    setTmuxTimeouts(0, 40); // short input bound so the timeout path runs fast
+    provider.activeAgent = 'codex';
+    messages.length = 0;
+    calls.length = 0;
+    holdNextSend = true; // the send-keys child never answers
+    provider.queueInput('codex', 'hello', true);
+    await provider.inputQueues.codex.chain;
+    assert.strictEqual(provider.inputQueues.codex.data, '', 'timed-out input is not kept for replay');
+    assert.strictEqual(provider.inputQueues.codex.inFlight, false, 'the pump is not wedged');
+    const err = lastOfType('inputError');
+    assert.ok(err, 'the UI is told the text was not delivered');
+    assert.strictEqual(err.reason, 'timeout', 'the hint carries the reason');
+    assert.strictEqual(err.failedBytes, 5);
+    // The hung child answering late must not deliver anything by itself...
+    const late = heldSendCallback;
+    heldSendCallback = null;
+    late(null, '', '');
+    await new Promise((r) => setTimeout(r, 10));
+    assert.strictEqual(provider.inputQueues.codex.data, '', 'a late answer changes nothing');
+    // ...and the next keystroke sends only itself.
+    calls.length = 0;
+    await provider.queueInput('codex', ' world', true);
+    assert.strictEqual(decodeSendCalls(sendCalls()), ' world', 'nothing from the failed send is replayed');
+    assert.strictEqual(provider.inputQueues.codex.inFlight, false);
+    setTmuxTimeouts(15000, 10000);
+    provider.closeIpcServer();
+  }
+
+  // ---- a timed-out capture must not tear down a live session -----------------
+  // Under load the server can be too slow to answer; that is "unknown", never
+  // "absent": no overlay flash, no dropped tab, no cache invalidation.
+  {
+    const provider = makeProvider();
+    setTmuxTimeouts(40, 10000);
+    vscode.workspace.workspaceFolders[0].uri.fsPath = workspace;
+    provider.activeAgent = 'codex';
+    provider.agentState.codex.present = true;
+    provider.agentState.codex.lastFrame = 'old-frame';
+    messages.length = 0;
+    hangNextCapture = true; // this tick's capture-pane never answers
+    await provider.tickOnce(false);
+    assert.strictEqual(provider.agentState.codex.present, true, 'presence survives a slow capture');
+    assert.strictEqual(provider.agentState.codex.lastFrame, 'old-frame', 'the last frame is kept');
+    assert.ok(!messages.some((m) => m.type === 'nosession'), 'no "no session" overlay on timeout');
+    assert.ok(!messages.some((m) => m.type === 'frame'), 'no frame is posted on timeout');
+    const lateCapture = heldCaptureCallback;
+    heldCaptureCallback = null;
+    lateCapture(null, 'too late\n', '');
+    setTmuxTimeouts(15000, 10000);
+    provider.closeIpcServer();
+  }
+
+  // ---- copy mode swallows typing: leave it before delivering keys ---------------
+  {
+    const provider = makeProvider();
+    provider.activeAgent = 'claude';
+    messages.length = 0;
+    // A pane someone scrolled from an attached terminal: healthy agent, but the
+    // pane sits in copy-mode, where send-keys is silently eaten.
+    agentInfoOutput = 'claude\t1\tclaude\t1700000000\tgen-a\t\t\t\t4242\t999\t1\tcopy-mode\tClaude Code\n';
+    await provider.pollPresence(true);
+    assert.strictEqual(provider.agentState.claude.present, true, 'a pane in copy mode is still a running agent');
+    assert.strictEqual(provider.agentState.claude.paneMode, 'copy-mode', 'the presence probe must report the pane mode');
+    await provider.tick(true);
+    const frame = messages.findLast((m) => m.type === 'frame' && m.agent === 'claude');
+    assert.strictEqual(frame && frame.paneMode, 'copy-mode', 'the frame tells the webview the pane is in copy mode');
+
+    calls.length = 0;
+    provider.queueInput('claude', 'h');
+    await waitForFlush(provider, 'claude');
+    const tmuxCalls = calls.filter((call) => call.command === 'tmux');
+    assert.strictEqual(tmuxCalls[0].args[0], 'send-keys', 'copy mode is left with a send-keys command');
+    assert.deepStrictEqual(tmuxCalls[0].args.slice(-2), ['-X', 'cancel'], 'the cancel goes out before the keys');
+    assert.strictEqual(sendCalls().length, 1, 'the keystroke itself is still delivered');
+    assert.ok(calls.indexOf(tmuxCalls[0]) < calls.indexOf(sendCalls()[0]), 'cancel first, keys second');
+    assert.strictEqual(provider.agentState.claude.paneMode, '', 'the mode is cleared once cancelled');
+
+    calls.length = 0;
+    provider.queueInput('claude', 'i');
+    await waitForFlush(provider, 'claude');
+    assert.strictEqual(calls.filter((call) => call.args.includes('cancel')).length, 0,
+      'a second keystroke must not cancel again (that would error and cost a tmux command)');
+    assert.strictEqual(calls[0].args[0], 'send-keys', 'the hot path stays one send-keys');
+
+    // Modes that do not take -X commands (clock) end with the first key on
+    // their own; never send a cancel that tmux would refuse.
+    agentInfoOutput = 'claude\t1\tclaude\t1700000000\tgen-a\t\t\t\t4242\t999\t1\tclock-mode\tClaude Code\n';
+    await provider.pollPresence(true);
+    assert.strictEqual(provider.agentState.claude.paneMode, 'clock-mode');
+    calls.length = 0;
+    provider.queueInput('claude', 'j');
+    await waitForFlush(provider, 'claude');
+    assert.strictEqual(calls.filter((call) => call.args.includes('cancel')).length, 0, 'no -X cancel outside copy/view mode');
+    assert.strictEqual(sendCalls().length, 1);
+
+    // Back to a plain pane: the flag clears without any input.
+    agentInfoOutput = 'claude\t1\tclaude\t1700000000\tgen-a\t\t\t\t4242\t999\t0\t\tClaude Code\n';
+    await provider.pollPresence(true);
+    assert.strictEqual(provider.agentState.claude.paneMode, '', 'leaving the mode in tmux clears the flag on the next probe');
+    agentInfoOutput = null;
     provider.closeIpcServer();
   }
 

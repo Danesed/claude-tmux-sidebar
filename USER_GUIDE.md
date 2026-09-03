@@ -10,11 +10,11 @@ npm run check
 npm run package
 ```
 
-Install `claude-tmux-sidebar-0.15.0.vsix` from **Extensions → … → Install from
+Install `claude-tmux-sidebar-0.15.1.vsix` from **Extensions → … → Install from
 VSIX…**, then reload VS Code. From a shell you can instead run:
 
 ```bash
-code --install-extension claude-tmux-sidebar-0.15.0.vsix --force
+code --install-extension claude-tmux-sidebar-0.15.1.vsix --force
 ```
 
 With Remote-SSH, perform the install from the connected VS Code window so the
