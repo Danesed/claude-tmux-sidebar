@@ -1,0 +1,196 @@
+#!/usr/bin/env node
+const fs = require('fs');
+const path = require('path');
+const net = require('net');
+
+function findSocketPath() {
+  if (process.env.AGENTMUX_SOCK && fs.existsSync(process.env.AGENTMUX_SOCK)) {
+    return process.env.AGENTMUX_SOCK;
+  }
+  let dir = process.cwd();
+  while (dir && dir !== path.dirname(dir)) {
+    const p = path.join(dir, '.claude', 'agentmux', 'agentmux.sock');
+    if (fs.existsSync(p)) {
+      try {
+        const target = fs.readFileSync(p, 'utf8').trim();
+        if (target && fs.existsSync(target)) return target;
+      } catch {}
+    }
+    dir = path.dirname(dir);
+  }
+  const os = require('os');
+  const tmp = os.tmpdir();
+  try {
+    const files = fs.readdirSync(tmp).filter((f) => f.startsWith('agentmux-') && f.endsWith('.sock'));
+    if (files.length) {
+      files.sort((a, b) => fs.statSync(path.join(tmp, b)).mtimeMs - fs.statSync(path.join(tmp, a)).mtimeMs);
+      return path.join(tmp, files[0]);
+    }
+  } catch {}
+  return null;
+}
+
+function sendRequest(req) {
+  const sockPath = findSocketPath();
+  if (!sockPath) {
+    console.error('Error: AgentMux socket not found. Is VS Code with AgentMux running?');
+    process.exit(1);
+  }
+
+  const client = net.createConnection(sockPath, () => {
+    client.write(JSON.stringify(req) + '\n');
+  });
+
+  let buf = '';
+  client.setEncoding('utf8');
+  client.on('data', (chunk) => {
+    buf += chunk;
+    if (buf.includes('\n')) {
+      const line = buf.split('\n')[0];
+      client.end();
+      try {
+        const res = JSON.parse(line);
+        handleResponse(req, res);
+      } catch (err) {
+        console.error('Failed to parse response:', err.message);
+        process.exit(1);
+      }
+    }
+  });
+
+  client.on('error', (err) => {
+    if (err.code === 'ECONNREFUSED' || err.code === 'ENOENT') {
+      console.error('Error: Cannot connect to AgentMux (server is not running or socket is stale). Make sure VS Code is open.');
+    } else {
+      console.error('Connection error:', err.message);
+    }
+    process.exit(1);
+  });
+}
+
+function handleResponse(req, res) {
+  const asJson = process.argv.includes('--json');
+  if (asJson) {
+    console.log(JSON.stringify(res, null, 2));
+    process.exit(res.ok ? 0 : 1);
+  }
+
+  if (!res.ok) {
+    console.error(`Error [${res.error || 'unknown'}]: ${res.message || 'Action failed'}`);
+    process.exit(1);
+  }
+
+  switch (req.action) {
+    case 'list':
+      if (!res.agents || !res.agents.length) {
+        console.log('No active agents detected.');
+      } else {
+        console.log('AGENT           STATUS        TOOL/MODEL');
+        console.log('-------------   -----------   ---------------------');
+        for (const a of res.agents) {
+          const id = a.id.padEnd(15);
+          const st = (a.status + (a.attention ? ` (${a.attention})` : '')).padEnd(13);
+          const detail = a.lastTool || a.model || '';
+          console.log(`${id} ${st} ${detail}`);
+        }
+      }
+      break;
+
+    case 'status':
+      console.log(`Agent: ${res.label || res.agent}`);
+      console.log(`Status: ${res.status}${res.attention ? ` [attention: ${res.attention}]` : ''}`);
+      if (res.lastTool) console.log(`Last Tool: ${res.lastTool}`);
+      if (res.title) console.log(`Title: ${res.title}`);
+      if (res.telemetry) console.log(`Turns: ${res.telemetry.turns || 0} (model: ${res.telemetry.model || 'unknown'})`);
+      break;
+
+    case 'read':
+      if (res.lines) {
+        console.log(res.lines.join('\n'));
+      }
+      break;
+
+    case 'prompt':
+      if (req.wait) {
+        console.log(`[${res.agent}] finished with status: ${res.status} (${res.durationMs}ms)`);
+        if (res.output) {
+          console.log('--- Output tail ---');
+          console.log(res.output);
+        }
+      } else {
+        console.log(`Prompt sent to ${res.agent}`);
+      }
+      break;
+
+    default:
+      console.log(JSON.stringify(res, null, 2));
+  }
+  process.exit(0);
+}
+
+function main() {
+  const args = process.argv.slice(2).filter((a) => a !== '--json');
+  const cmd = args[0] || 'help';
+
+  switch (cmd) {
+    case 'list':
+    case 'ls':
+      sendRequest({ action: 'list' });
+      break;
+
+    case 'status':
+      sendRequest({ action: 'status', agent: args[1] });
+      break;
+
+    case 'read': {
+      const linesIdx = args.indexOf('--lines');
+      const lines = linesIdx >= 0 ? parseInt(args[linesIdx + 1], 10) : 50;
+      sendRequest({ action: 'read', agent: args[1], lines });
+      break;
+    }
+
+    case 'prompt': {
+      const agent = args[1];
+      if (!agent) {
+        console.error('Usage: agentmux prompt <agent> <text...> [--wait] [--until <status>] [--timeout <ms>]');
+        process.exit(1);
+      }
+      const wait = args.includes('--wait');
+      const raw = args.includes('--raw');
+      const untilIdx = args.indexOf('--until');
+      const until = untilIdx >= 0 ? args[untilIdx + 1] : 'done';
+      const timeoutIdx = args.indexOf('--timeout');
+      const timeout = timeoutIdx >= 0 ? parseInt(args[timeoutIdx + 1], 10) : 60000;
+
+      const textParts = [];
+      for (let i = 2; i < args.length; i++) {
+        if (['--wait', '--raw'].includes(args[i])) continue;
+        if (['--until', '--timeout'].includes(args[i])) { i++; continue; }
+        textParts.push(args[i]);
+      }
+      const text = textParts.join(' ');
+      if (!text) {
+        console.error('Error: Prompt text cannot be empty');
+        process.exit(1);
+      }
+      sendRequest({ action: 'prompt', agent, text, wait, until, timeout, raw });
+      break;
+    }
+
+    case 'help':
+    default:
+      console.log('AgentMux CLI - Orchestrate coding agents across tmux');
+      console.log('\nUsage:');
+      console.log('  agentmux list                         List all running agents and their status');
+      console.log('  agentmux status [agent]               Inspect agent detailed status and telemetry');
+      console.log('  agentmux read <agent> [--lines N]     Read the latest terminal output lines');
+      console.log('  agentmux prompt <agent> <text...>     Send prompt to an agent');
+      console.log('    --wait                              Wait until the agent finishes processing');
+      console.log('    --until <status>                    Target state (done, blocked, idle; default: done)');
+      console.log('    --timeout <ms>                      Timeout in ms (default: 60000)');
+      console.log('    --json                              Output raw JSON response');
+      break;
+  }
+}
+
+main();

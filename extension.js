@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const net = require('net');
 
 // ---- tmux transport ----------------------------------------------------------
 //
@@ -1028,6 +1029,93 @@ function validSessionName(value) {
   return /[:.\s]/.test(name) ? '' : name;
 }
 
+const AGENT_PRESETS = [
+  {
+    id: 'aider',
+    label: 'Aider',
+    command: 'aider',
+    accent: '#0984e3',
+    mark: 'Ai',
+    installCmd: 'pip install aider-chat',
+    detection: {
+      needsInput: [{ region: 'foot', any: ['>', 'yes/no', '[y/N]'] }],
+      working: [{ region: 'tail', any: ['Thinking', 'Tokens:', 'Applied edit', 'Search and replace'] }],
+    },
+    resume: { latest: 'aider --restore' },
+  },
+  {
+    id: 'goose',
+    label: 'Goose',
+    command: 'goose',
+    args: 'session',
+    accent: '#00b894',
+    mark: 'Go',
+    installCmd: 'curl -fsSL https://github.com/block/goose/releases/download/stable/download_cli.sh | bash',
+    detection: {
+      needsInput: [{ region: 'foot', any: ['Goo', 'goose>', '(?i)confirm'] }],
+      working: [{ region: 'tail', any: ['thinking', 'running tool', 'processing'] }],
+    },
+    resume: { latest: 'goose session --resume' },
+  },
+  {
+    id: 'cursor',
+    label: 'Cursor Agent',
+    command: 'cursor-agent',
+    accent: '#6c5ce7',
+    mark: 'Cu',
+    installCmd: 'npm install -g cursor-agent',
+    detection: {
+      needsInput: [{ region: 'foot', any: ['?', 'Enter to continue', '[y/N]'] }],
+      working: [{ region: 'tail', any: ['Generating', 'Applying'] }],
+    },
+  },
+  {
+    id: 'continue',
+    label: 'Continue',
+    command: 'cn',
+    accent: '#e17055',
+    mark: 'Cn',
+    installCmd: 'npm install -g @continuedev/cli',
+    detection: {
+      needsInput: [{ region: 'foot', any: ['>', '>>>'] }],
+      working: [{ region: 'tail', any: ['Thinking...', 'Working...'] }],
+    },
+  },
+];
+
+async function promptAddAgentPreset() {
+  const current = cfg().get('customAgents') || [];
+  const existingIds = new Set([...Object.keys(AGENTS), ...current.map((c) => c && c.id).filter(Boolean)]);
+  const available = AGENT_PRESETS.filter((p) => !existingIds.has(p.id));
+
+  if (!available.length) {
+    vscode.window.showInformationMessage('All built-in presets (Aider, Goose, Cursor, Continue) are already in your configuration.');
+    return;
+  }
+
+  const items = available.map((p) => ({
+    label: p.label,
+    description: `${p.command}${p.args ? ' ' + p.args : ''} · ${p.installCmd}`,
+    preset: p,
+  }));
+
+  const pick = await vscode.window.showQuickPick(items, {
+    placeHolder: 'Select an agent preset to add to AgentMux',
+  });
+  if (!pick) return;
+
+  const target = pick.preset;
+  const next = [...current, target];
+  await cfg().update('customAgents', next, vscode.ConfigurationTarget.Global);
+  const action = await vscode.window.showInformationMessage(
+    `Added ${target.label} to AgentMux custom agents. Reload window to load the new agent tab.`,
+    'Reload Window'
+  );
+  if (action === 'Reload Window') {
+    vscode.commands.executeCommand('workbench.action.reloadWindow');
+  }
+}
+
 function customAgentSpecs() {
   const raw = cfg().get('customAgents');
   if (!Array.isArray(raw)) return [];
@@ -1200,7 +1288,13 @@ async function sessionName(agent) {
   // owns — even when the plain name was free.
   const hashed = `${base}-${pathHash(cwd)}`;
   const owner = found.ok ? found.out.trim() : '';
-  if (owner) return normalizedPath(owner) === normalizedPath(cwd) ? base : hashed;
+  if (owner) {
+    const normOwner = normalizedPath(owner);
+    const normCwd = normalizedPath(cwd);
+    const isOwnerThisWorkspace = normOwner === normCwd
+      || !!(normOwner && normCwd && normOwner.startsWith(normCwd + '/.agentmux/worktrees/'));
+    return isOwnerThisWorkspace ? base : hashed;
+  }
   // Nothing holds the plain name. Before claiming it, adopt a hashed session
   // that already belongs to this workspace: on a tmux affected by the bug above
   // every session was named that way, and starting a second one under the clean
@@ -1208,7 +1302,13 @@ async function sessionName(agent) {
   // and only on the path where no agent answers to the plain name anyway.
   const legacy = await tmux(['display-message', '-p', '-t', tmuxPaneTarget(hashed), '#{session_path}']);
   const legacyOwner = legacy.ok ? legacy.out.trim() : '';
-  if (legacyOwner && normalizedPath(legacyOwner) === normalizedPath(cwd)) return hashed;
+  if (legacyOwner) {
+    const normLegacy = normalizedPath(legacyOwner);
+    const normCwd = normalizedPath(cwd);
+    const isLegacyThisWorkspace = normLegacy === normCwd
+      || !!(normLegacy && normCwd && normLegacy.startsWith(normCwd + '/.agentmux/worktrees/'));
+    if (isLegacyThisWorkspace) return hashed;
+  }
   return base;
 }
 
@@ -1216,7 +1316,10 @@ async function sessionBelongsToWorkspace(name) {
   const cwd = workspaceFolder();
   if (!name || !cwd) return false;
   const found = await tmux(['display-message', '-p', '-t', tmuxPaneTarget(name), '#{session_path}']);
-  return found.ok && normalizedPath(found.out.trim()) === normalizedPath(cwd);
+  if (!found.ok) return false;
+  const p = normalizedPath(found.out.trim());
+  const normCwd = normalizedPath(cwd);
+  return p === normCwd || !!(p && normCwd && p.startsWith(normCwd + '/.agentmux/worktrees/'));
 }
 
 function shellQuote(value) {
@@ -1937,7 +2040,11 @@ async function agentSessionInfo(agent, name) {
   // missing '=name:' target with exit 0 and an empty line, not an error.
   if (!sessionPath) return { exists: false, ready: false };
   if (AGENTS[agent]?.attachSession) return { exists: true, ready: true, ...base };
-  if (normalizedPath(sessionPath) !== normalizedPath(workspaceFolder())) return { exists: false, ready: false };
+  const normSessionPath = normalizedPath(sessionPath);
+  const normWorkspace = normalizedPath(workspaceFolder());
+  const inWorkspace = normSessionPath === normWorkspace
+    || !!(normSessionPath && normWorkspace && normSessionPath.startsWith(normWorkspace + '/.agentmux/worktrees/'));
+  if (!inWorkspace) return { exists: false, ready: false };
   if (marker === agent) {
     if (running === 'starting' && !shell) {
       await tmux(['set-option', '-p', '-t', tmuxPaneTarget(name), '@claude_tmux_running', '1']);
@@ -2641,6 +2748,11 @@ class ClaudeTmuxView {
     this._resizeQueued = false;
     this._resizePromise = Promise.resolve();
     this.handoff = null;
+    this._ipcServer = null;
+    this._ipcSocketPath = null;
+    this._statusListeners = [];
+    this._stallTimers = {};
+    this.initIpcServer();
   }
 
   newAgentState() {
@@ -2662,10 +2774,233 @@ class ClaudeTmuxView {
       lastName: '',
       backgroundPollAt: 0,
       attention: null,
+      stalled: false,
+      lastPromptTime: 0,
       paneTitle: '',           // what the TUI wrote there (Claude: the conversation summary)
       detectionHold: false,    // a viewer/picker is covering the pane: freeze the status
       promptLine: '',          // reconstructed prompt for Alt+Up recall (null = bailed)
     };
+  }
+
+  initIpcServer() {
+    if (this._ipcServer) return;
+    const sockPath = process.platform === 'win32'
+      ? `\\\\.\\pipe\\agentmux-${process.pid}`
+      : path.join(os.tmpdir(), `agentmux-${process.pid}.sock`);
+
+    try {
+      if (process.platform !== 'win32' && fs.existsSync(sockPath)) {
+        fs.unlinkSync(sockPath);
+      }
+    } catch { /* best effort */ }
+
+    const server = net.createServer((socket) => {
+      let buf = '';
+      socket.setEncoding('utf8');
+      socket.on('data', (chunk) => {
+        buf += chunk;
+        const lines = buf.split('\n');
+        buf = lines.pop();
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const req = JSON.parse(line);
+            this.handleIpcRequest(req, socket);
+          } catch (err) {
+            socket.write(JSON.stringify({ ok: false, error: 'invalid_json', message: String(err.message) }) + '\n');
+          }
+        }
+      });
+      socket.on('error', () => { /* client disconnected */ });
+    });
+
+    server.on('error', () => { /* socket error */ });
+
+    server.listen(sockPath, () => {
+      server.unref();
+      this._ipcSocketPath = sockPath;
+      this.writeWorkspaceSocketPointer(sockPath);
+    });
+
+    this._ipcServer = server;
+  }
+
+  writeWorkspaceSocketPointer(sockPath) {
+    try {
+      const folder = workspaceFolder();
+      if (!folder) return;
+      const agentmuxDir = path.join(folder, '.claude', 'agentmux');
+      fs.mkdirSync(agentmuxDir, { recursive: true });
+      fs.writeFileSync(path.join(agentmuxDir, 'agentmux.sock'), sockPath, 'utf8');
+    } catch { /* best effort */ }
+  }
+
+  closeIpcServer() {
+    if (this._ipcServer) {
+      try { this._ipcServer.close(); } catch {}
+      this._ipcServer = null;
+    }
+    if (this._ipcSocketPath && process.platform !== 'win32') {
+      try {
+        if (fs.existsSync(this._ipcSocketPath)) fs.unlinkSync(this._ipcSocketPath);
+      } catch {}
+      this._ipcSocketPath = null;
+    }
+    try {
+      const folder = workspaceFolder();
+      if (folder) {
+        const p = path.join(folder, '.claude', 'agentmux', 'agentmux.sock');
+        if (fs.existsSync(p)) fs.unlinkSync(p);
+      }
+    } catch { /* best effort */ }
+  }
+
+  async handleIpcRequest(req, socket) {
+    const action = req && req.action;
+    switch (action) {
+      case 'list': {
+        const present = Object.keys(AGENTS).filter((a) => this.agentState[a]?.present);
+        const agents = present.map((a) => ({
+          id: a,
+          label: AGENTS[a].label,
+          status: this.agentState[a].status,
+          attention: this.agentState[a].attention || null,
+          lastTool: this.agentState[a].lastTool || '',
+          turns: this.agentState[a].telemetry?.turns || 0,
+          model: this.agentState[a].telemetry?.model || '',
+        }));
+        socket.write(JSON.stringify({ ok: true, agents }) + '\n');
+        break;
+      }
+
+      case 'status': {
+        const agent = req.agent || this.activeAgent;
+        const state = this.agentState[agent];
+        if (!state || !state.present) {
+          socket.write(JSON.stringify({ ok: false, error: 'agent_not_found', agent }) + '\n');
+          return;
+        }
+        socket.write(JSON.stringify({
+          ok: true,
+          agent,
+          label: AGENTS[agent].label,
+          status: state.status,
+          statusSince: state.statusSince,
+          attention: state.attention || null,
+          lastTool: state.lastTool || '',
+          title: state.paneTitle || '',
+          telemetry: state.telemetry || null,
+          delta: state.lastTurnDelta || null,
+        }) + '\n');
+        break;
+      }
+
+      case 'read': {
+        const agent = req.agent || this.activeAgent;
+        const state = this.agentState[agent];
+        if (!state || !state.present) {
+          socket.write(JSON.stringify({ ok: false, error: 'agent_not_found', agent }) + '\n');
+          return;
+        }
+        const frame = state.lastFrame || state.backgroundFrame || '';
+        const lines = stripAnsi(frame).split('\n');
+        const count = Math.max(1, Math.min(500, parseInt(req.lines, 10) || 50));
+        socket.write(JSON.stringify({ ok: true, agent, lines: lines.slice(-count) }) + '\n');
+        break;
+      }
+
+      case 'prompt': {
+        const agent = req.agent || this.activeAgent;
+        const state = this.agentState[agent];
+        if (!state || !state.present) {
+          socket.write(JSON.stringify({ ok: false, error: 'agent_not_found', agent }) + '\n');
+          return;
+        }
+        if (state.status === 'needs-input' && req.protectDialog !== false) {
+          socket.write(JSON.stringify({
+            ok: false,
+            error: 'agent_blocked',
+            message: `${AGENTS[agent].label} is awaiting input on a question/permission dialog. Complete or cancel the dialog first.`
+          }) + '\n');
+          return;
+        }
+        const text = String(req.text || '');
+        if (!text.trim()) {
+          socket.write(JSON.stringify({ ok: false, error: 'empty_prompt' }) + '\n');
+          return;
+        }
+        await this.queueInput(agent, text + (req.raw ? '' : '\r'), true, false);
+
+        if (!req.wait) {
+          socket.write(JSON.stringify({ ok: true, agent, sent: true }) + '\n');
+          return;
+        }
+
+        const targetStatus = req.until || 'done';
+        const timeoutMs = Math.max(1000, Math.min(300000, parseInt(req.timeout, 10) || 60000));
+        const start = Date.now();
+        let resolved = false;
+
+        const cleanup = () => {
+          resolved = true;
+          clearTimeout(timer);
+          const idx = (this._statusListeners || []).indexOf(onStatus);
+          if (idx >= 0) this._statusListeners.splice(idx, 1);
+        };
+
+        const timer = setTimeout(() => {
+          if (resolved) return;
+          cleanup();
+          socket.write(JSON.stringify({
+            ok: false,
+            error: 'timeout',
+            agent,
+            status: state.status,
+            durationMs: Date.now() - start
+          }) + '\n');
+        }, timeoutMs);
+
+        const onStatus = ({ agent: a, status }) => {
+          if (resolved || a !== agent) return;
+          if (status === targetStatus || (targetStatus === 'done' && status === 'idle')) {
+            cleanup();
+            const frame = state.lastFrame || state.backgroundFrame || '';
+            const lines = stripAnsi(frame).split('\n').slice(-30);
+            socket.write(JSON.stringify({
+              ok: true,
+              agent,
+              status,
+              output: lines.join('\n'),
+              durationMs: Date.now() - start
+            }) + '\n');
+          }
+        };
+
+        this._statusListeners = this._statusListeners || [];
+        this._statusListeners.push(onStatus);
+        break;
+      }
+
+      default:
+        socket.write(JSON.stringify({ ok: false, error: 'unknown_action', action }) + '\n');
+    }
+  }
+
+  armStallWatchdog(agent) {
+    if (this._stallTimers?.[agent]) clearTimeout(this._stallTimers[agent]);
+    this._stallTimers = this._stallTimers || {};
+    const startFrame = this.agentState[agent]?.lastFrame;
+    this._stallTimers[agent] = setTimeout(() => {
+      const state = this.agentState[agent];
+      if (state && state.present && state.status === 'idle') {
+        const currentFrame = state.lastFrame;
+        if (currentFrame === startFrame) {
+          state.stalled = true;
+          this.eventLog.append({ type: 'stall', agent, reason: 'No transition to working within 5s' });
+          if (this.view) this.view.webview.postMessage({ type: 'agentStalled', agent });
+        }
+      }
+    }, 5000);
   }
 
   newInputQueue() {
@@ -2818,7 +3153,14 @@ class ClaudeTmuxView {
     const heldFor = Date.now() - state.statusSince;
     state.status = status;
     state.statusSince = Date.now();
-    if (status === 'working') state.attention = null;
+    if (status === 'working') {
+      state.attention = null;
+      state.stalled = false;
+      if (this._stallTimers?.[agent]) {
+        clearTimeout(this._stallTimers[agent]);
+        delete this._stallTimers[agent];
+      }
+    }
     if (['done', 'needs-input'].includes(status) && (agent !== this.activeAgent || !this.view?.visible)) {
       state.attention = status;
     }
@@ -2835,9 +3177,31 @@ class ClaudeTmuxView {
       });
     }
     if (status === 'needs-input') this.maybeNotifyPrompt(agent);
+    if (status === 'done' && previous === 'working' && (agent !== this.activeAgent || !this.view?.visible)) {
+      this.maybeNotifyDone(agent);
+    }
+    if (this._statusListeners?.length) {
+      for (const fn of this._statusListeners.slice()) {
+        try { fn({ agent, status, previous }); } catch {}
+      }
+    }
     this.postAgents();
     this.updateBadge();
     return true;
+  }
+
+  maybeNotifyDone(agent) {
+    if (cfg().get('notifyDone') === false) return;
+    const label = AGENTS[agent]?.label || agent;
+    vscode.window.showInformationMessage(
+      `${label} finished working in the background.`,
+      `Switch to ${label}`
+    ).then((choice) => {
+      if (choice) {
+        vscode.commands.executeCommand('claudeTmux.view.focus');
+        this.switchAgent(agent);
+      }
+    });
   }
 
   // ---- richer view badge -----------------------------------------------------
@@ -3314,12 +3678,14 @@ class ClaudeTmuxView {
     this.focusHistory = [this.activeAgent, ...this.focusHistory.filter((a) => a !== this.activeAgent)].slice(0, 8);
     this.activeAgent = agent;
     const state = this.agentState[agent];
+    state.attention = null;
     state.historyMode = false;
     state.historyPending = false;
     this.resetLiveFrame(agent);
     this.context.workspaceState.update('claudeTmux.activeAgent', agent);
     this.clearBadge();
     this.postActiveAgent();
+    this.postAgents();
     this.maybeAutoResume();
     this.setSize(this.cols, this.rows);
     this.ensureEventSources();
@@ -3389,6 +3755,7 @@ class ClaudeTmuxView {
       const state = this.agentState[agent];
       state.lastActivity = Date.now();
       this.setAgentStatus(agent, 'working');
+      this.armStallWatchdog(agent);
     }
     if (queue.timer) clearTimeout(queue.timer);
     if (immediate || queue.data.length >= 2048) return this.flushInput(agent);
@@ -3824,11 +4191,71 @@ class ClaudeTmuxView {
     await this.createSession(agent, command);
   }
 
-  async createSession(agent, command) {
+  async ensureAgentWorktree(agent, cwd) {
+    try {
+      const isGit = await runFile('git', ['rev-parse', '--is-inside-work-tree'], cwd);
+      if (!isGit.ok || isGit.out.trim() !== 'true') return null;
+      const wtDir = path.join(cwd, '.agentmux', 'worktrees', agent);
+      if (fs.existsSync(wtDir)) return wtDir;
+      fs.mkdirSync(path.dirname(wtDir), { recursive: true });
+      const branch = `agent/${agent}`;
+      const addRes = await runFile('git', ['worktree', 'add', '-B', branch, wtDir, 'HEAD'], cwd);
+      if (!addRes.ok) return null;
+      const gitDirRes = await runFile('git', ['rev-parse', '--git-dir'], cwd);
+      if (gitDirRes.ok) {
+        const excludeFile = path.join(gitDirRes.out.trim(), 'info', 'exclude');
+        try {
+          if (fs.existsSync(excludeFile)) {
+            const content = fs.readFileSync(excludeFile, 'utf8');
+            if (!content.includes('.agentmux')) {
+              fs.appendFileSync(excludeFile, '\n.agentmux/\n');
+            }
+          }
+        } catch {}
+      }
+      return wtDir;
+    } catch {
+      return null;
+    }
+  }
+
+  async mergeAgentWorktree(agent = this.activeAgent) {
     const cwd = workspaceFolder();
+    if (!cwd) return;
+    const branch = `agent/${agent}`;
+    const res = await runFile('git', ['merge', branch], cwd);
+    if (res.ok) {
+      vscode.window.showInformationMessage(`Merged branch "${branch}" into current branch.`);
+    } else {
+      vscode.window.showErrorMessage(`Merge conflict or error while merging "${branch}": ${res.out || res.err}`);
+    }
+  }
+
+  async removeAgentWorktree(agent = this.activeAgent) {
+    const cwd = workspaceFolder();
+    if (!cwd) return;
+    const wtDir = path.join(cwd, '.agentmux', 'worktrees', agent);
+    if (!fs.existsSync(wtDir)) {
+      vscode.window.showInformationMessage(`No dedicated worktree found for ${AGENTS[agent]?.label || agent}.`);
+      return;
+    }
+    const res = await runFile('git', ['worktree', 'remove', wtDir, '--force'], cwd);
+    if (res.ok) {
+      vscode.window.showInformationMessage(`Removed dedicated worktree for ${AGENTS[agent]?.label || agent}.`);
+    } else {
+      vscode.window.showErrorMessage(`Failed to remove worktree: ${res.out || res.err}`);
+    }
+  }
+
+  async createSession(agent, command) {
+    let cwd = workspaceFolder();
     if (!cwd) {
       vscode.window.showWarningMessage('Open a folder before starting a tmux agent.');
       return;
+    }
+    if (cfg().get('worktrees')) {
+      const wt = await this.ensureAgentWorktree(agent, cwd);
+      if (wt) cwd = wt;
     }
     const s = await sessionName(agent);
     const created = await tmux([
@@ -4256,7 +4683,9 @@ class ClaudeTmuxView {
       if (!line.trim()) continue;
       const [name, sessionPath = '', created = '', attached = '', windows = ''] = line.split('\t');
       // The only gate that matters: is this session rooted in THIS project?
-      if (!sessionPath || normalizedPath(sessionPath) !== here) continue;
+      const isProjectSession = normalizedPath(sessionPath) === here
+        || !!(sessionPath && here && normalizedPath(sessionPath).startsWith(here + '/.agentmux/worktrees/'));
+      if (!sessionPath || !isProjectSession) continue;
       if (mirrored.has(name)) continue; // mirrored in free mode, not ours to kill
       if (!prefixes.some((prefix) => name.startsWith(prefix))) continue; // not created by us
       const age = created ? fmtDurationShort(Date.now() - Number(created) * 1000) : '?';
@@ -4416,6 +4845,9 @@ class ClaudeTmuxView {
     if (text.length > 30000) return { ok: false, agent, reason: 'too-long' };
     const live = await this.currentStatus(agent);
     if (!live.present) return { ok: false, agent, reason: 'not-running' };
+    if (live.status === 'needs-input' && args?.protectDialog !== false) {
+      return { ok: false, agent, reason: 'agent_blocked', message: 'Target agent is awaiting input on a dialog' };
+    }
     if (this.handoff || this.arbiter) return { ok: false, agent, reason: 'transaction-in-progress' };
     if (this.writerAgent && agent !== this.writerAgent) {
       return { ok: false, agent, reason: 'pair-locked', writer: this.writerAgent };
@@ -5929,6 +6361,9 @@ function activate(context) {
     vscode.commands.registerCommand('claudeTmux.manageIntegrations', () => provider.manageIntegrations()),
     vscode.commands.registerCommand('claudeTmux.addTmuxSession', () => provider.addTmuxSession()),
     vscode.commands.registerCommand('claudeTmux.removeCustomAgent', () => provider.removeCustomAgent()),
+    vscode.commands.registerCommand('claudeTmux.addAgentFromPreset', () => promptAddAgentPreset()),
+    vscode.commands.registerCommand('claudeTmux.mergeWorktree', () => provider.mergeAgentWorktree()),
+    vscode.commands.registerCommand('claudeTmux.removeWorktree', () => provider.removeAgentWorktree()),
     vscode.commands.registerCommand('claudeTmux.arbiter', () => provider.prepareArbiter()),
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('claudeTmux.refreshMs')) provider.startLoop();
@@ -5965,7 +6400,10 @@ function activate(context) {
 
 function deactivate() {
   controlClient.destroy(false);
-  if (activeProvider) activeProvider.pipeTap.disarm();
+  if (activeProvider) {
+    activeProvider.pipeTap.disarm();
+    activeProvider.closeIpcServer();
+  }
 }
 
 module.exports = { activate, deactivate };

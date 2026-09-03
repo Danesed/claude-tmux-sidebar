@@ -2,7 +2,7 @@
   "name": "claude-tmux-sidebar",
   "displayName": "AgentMux — Claude, Codex, OpenCode, Hermes, Pi & Antigravity in tmux",
   "description": "Six agents, one terminal flow — plus free mode, which mirrors any tmux session you already have: switch fast and hand off work intelligently between Claude Code, Codex, OpenCode, Hermes, Pi and Google Antigravity in tmux.",
-  "version": "0.14.1",
+  "version": "0.15.0",
   "publisher": "Danesed",
   "license": "MIT",
   "icon": "icon.png",
@@ -46,6 +46,9 @@
   "homepage": "https://github.com/Danesed/claude-tmux-sidebar#readme",
   "activationEvents": [],
   "main": "./extension.js",
+  "bin": {
+    "agentmux": "./bin/agentmux"
+  },
   "scripts": {
     "check": "node --check extension.js && node --check media/main.js && node test/test.js",
     "test": "node test/test.js",
@@ -201,6 +204,21 @@
       {
         "command": "claudeTmux.waitFor",
         "title": "Wait for an agent to finish",
+        "category": "AgentMux"
+      },
+      {
+        "command": "claudeTmux.addAgentFromPreset",
+        "title": "Add agent preset (Aider, Goose, Cursor, Continue)…",
+        "category": "AgentMux"
+      },
+      {
+        "command": "claudeTmux.mergeWorktree",
+        "title": "Merge active agent Git worktree into current branch",
+        "category": "AgentMux"
+      },
+      {
+        "command": "claudeTmux.removeWorktree",
+        "title": "Remove active agent Git worktree",
         "category": "AgentMux"
       }
     ],
@@ -643,6 +661,16 @@
               }
             }
           }
+        },
+        "claudeTmux.worktrees": {
+          "type": "boolean",
+          "default": false,
+          "description": "Start each agent in its own isolated Git worktree (.agentmux/worktrees/<agent>) on branch agent/<agent> to prevent multi-agent file write collisions."
+        },
+        "claudeTmux.notifyDone": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a notification when an agent finishes work in the background while its tab is not active or the sidebar is hidden."
         }
       }
     }

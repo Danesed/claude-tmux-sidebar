@@ -1,6 +1,39 @@
 # Changelog
 
-## 0.14.1
+## 0.15.0
+
+Major release introducing **Agent-to-Agent Coordination**, **Local IPC & MCP Bridge**, **Git Worktree Isolation**, **Stall & Collision Protection**, **Built-in Agent Presets**, and **Unseen Attention Notifications**:
+
+- **Local IPC Socket Server & `agentmux` CLI:**
+  - Added an embedded, zero-overhead Unix domain socket IPC server (`agentmux-<pid>.sock`) running inside the extension host.
+  - Automatically exports the active socket path to `.claude/agentmux/agentmux.sock` and in the environment (`AGENTMUX_SOCK`), allowing terminal commands and agents to query AgentMux directly.
+  - Bundled a fast, dependency-free CLI executable (`bin/agentmux`):
+    - `agentmux list`: View all active agents and their live lifecycle states (`idle`, `working`, `needs-input`, `done`).
+    - `agentmux status [agent]`: Inspect detailed agent status, telemetry, turns, model, and active tool.
+    - `agentmux read <agent> [--lines N]`: Read recent terminal output from any agent pane.
+    - `agentmux prompt <agent> <text...> [--wait] [--until status] [--timeout ms]`: Send prompts to any agent with optional atomic wait until completion.
+- **Model Context Protocol (MCP) Server for Agents (`bin/agentmux-mcp.js`):**
+  - Agents (Claude Code, Codex, Antigravity, OpenCode, Hermes, Pi) can now drive other agents as peers via standard MCP stdio protocol.
+  - Exposes tools: `list_agents`, `get_agent_status`, `read_agent_output`, and `prompt_agent`.
+  - Enables true autonomous multi-agent workflows (e.g. Claude delegating tests to Codex and reading results back).
+  - Bundled `skills/agentmux/SKILL.md` for zero-configuration integration in agent worktrees.
+- **Unseen Attention & Smart Notifications:**
+  - Distinct state tracking for background completions (`done`) and blocking prompts (`needs-input`).
+  - Added native VS Code notification when an agent finishes work in the background with a single-click `"Switch to <Agent>"` button (`claudeTmux.notifyDone`).
+  - Automatically clears attention markers and badge indicators as soon as the user focuses the respective agent's tab.
+- **Multi-Agent Git Worktree Isolation (`claudeTmux.worktrees`):**
+  - Added support for running each agent in its own dedicated Git worktree (`.agentmux/worktrees/<agent>`) on branch `agent/<agent>`.
+  - Prevents write collisions, file overwrite races, and dirty git tree conflicts when running multiple agents concurrently.
+  - Added commands:
+    - `claudeTmux.mergeWorktree`: Merges the active agent's worktree branch back into the current branch.
+    - `claudeTmux.removeWorktree`: Cleans up the agent's worktree.
+  - Automatically excludes `.agentmux/` in `.git/info/exclude` to keep working directories clean.
+- **Prompt Collision Prevention & Stall Watchdog:**
+  - Dialog protection: programmatic prompts and handoffs are prevented from sending arbitrary text when an agent is awaiting input on a critical question/dialog (`needs-input`), avoiding accidental selection of confirmation options.
+  - Stall detection watchdog: detects if a submitted prompt fails to transition the agent to `working` or change the screen within 5 seconds, logging a stall event and warning in the UI.
+- **Extensible Native Agent Presets (`claudeTmux.addAgentFromPreset`):**
+  - Added first-class presets for popular coding tools: **Aider**, **Goose**, **Cursor CLI**, and **Continue**.
+  - One-click palette command to add any preset to `claudeTmux.customAgents` with complete detection rules, brand colors, and glyph marks with zero manual configuration.
 
 Comprehensive performance and snappiness improvements across the input pump,
 webview terminal rendering, presence detection, and background telemetry:

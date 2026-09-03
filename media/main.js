@@ -684,6 +684,10 @@
     tabs.forEach((tab) => {
       const selected = tab.dataset.agent === agent;
       tab.classList.toggle('active', selected);
+      if (selected) {
+        tab.classList.remove('attention-done', 'attention-needs-input');
+        if (agentPresence[agent]) agentPresence[agent].attention = null;
+      }
       tab.setAttribute('aria-selected', selected ? 'true' : 'false');
       tab.tabIndex = selected ? 0 : -1;
     });
@@ -1244,6 +1248,11 @@
       document.getElementById('hint').textContent = m.pendingBytes ? 'input failed · later keys discarded' : 'input not delivered';
       setStatus('', 'dead', 'input failed');
       setTimeout(applyPairLock, 2500);
+    } else if (m.type === 'agentStalled') {
+      if (m.agent === activeAgent) {
+        document.getElementById('hint').textContent = 'agent stalled (no response to prompt)';
+        setTimeout(applyPairLock, 4000);
+      }
     } else if (m.type === 'handoffCreateError') {
       if (!handoffDraft || handoffDraft.id !== m.id) return;
       handoffDraft.phase = 'collecting';

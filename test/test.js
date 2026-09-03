@@ -166,7 +166,7 @@ const vscode = {
 };
 
 const source = fs.readFileSync(path.join(root, 'extension.js'), 'utf8')
-  + '\nmodule.exports.__test = { ClaudeTmuxView, sessionName, accentChannels, derivedAccent, derivedMark, decodeEscapes, AGENT_DETECTION, paneIdentity, identityMatches, STATE_HOOK_SCRIPT, setStateHookDir, codexHookArgs, tomlString, listPiSessions, piSessionDir, piExtensionPath, ensurePiExtension, removePiExtension, PI_EXTENSION, customAgentSpecs, registerCustomAgents, freeAgentId, mirroredSessionNames, baseSessionName, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions, AGENTS, AGENT_IDS, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, hermesProfileSlug, hermesProfileHome, ensureHermesProfile, launchEnvPrefix, detectionRules, detectState, detectionContext, isRuleLine, explainDetection, DETECTION_REGIONS, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath };';
+  + '\nmodule.exports.__test = { ClaudeTmuxView, sessionName, accentChannels, derivedAccent, derivedMark, decodeEscapes, AGENT_DETECTION, paneIdentity, identityMatches, STATE_HOOK_SCRIPT, setStateHookDir, codexHookArgs, tomlString, listPiSessions, piSessionDir, piExtensionPath, ensurePiExtension, removePiExtension, PI_EXTENSION, customAgentSpecs, registerCustomAgents, freeAgentId, mirroredSessionNames, baseSessionName, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions, AGENTS, AGENT_IDS, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, hermesProfileSlug, hermesProfileHome, ensureHermesProfile, launchEnvPrefix, detectionRules, detectState, detectionContext, isRuleLine, explainDetection, DETECTION_REGIONS, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath, AGENT_PRESETS, promptAddAgentPreset };';
 const moduleUnderTest = { exports: {} };
 const sandbox = {
   module: moduleUnderTest,
@@ -187,7 +187,7 @@ const sandbox = {
   clearInterval,
 };
 vm.runInNewContext(source, sandbox, { filename: 'extension.js' });
-const { ClaudeTmuxView, sessionName, accentChannels, derivedAccent, derivedMark, decodeEscapes, AGENT_DETECTION, paneIdentity, identityMatches, STATE_HOOK_SCRIPT, setStateHookDir, codexHookArgs, tomlString, listPiSessions, piSessionDir, piExtensionPath, ensurePiExtension, removePiExtension, PI_EXTENSION, customAgentSpecs, registerCustomAgents, freeAgentId, mirroredSessionNames, baseSessionName, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions, AGENTS, AGENT_IDS, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, hermesProfileSlug, hermesProfileHome, ensureHermesProfile, launchEnvPrefix, detectionRules, detectState, detectionContext, isRuleLine, explainDetection, DETECTION_REGIONS, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath } = moduleUnderTest.exports.__test;
+const { ClaudeTmuxView, sessionName, accentChannels, derivedAccent, derivedMark, decodeEscapes, AGENT_DETECTION, paneIdentity, identityMatches, STATE_HOOK_SCRIPT, setStateHookDir, codexHookArgs, tomlString, listPiSessions, piSessionDir, piExtensionPath, ensurePiExtension, removePiExtension, PI_EXTENSION, customAgentSpecs, registerCustomAgents, freeAgentId, mirroredSessionNames, baseSessionName, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions, AGENTS, AGENT_IDS, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, hermesProfileSlug, hermesProfileHome, ensureHermesProfile, launchEnvPrefix, detectionRules, detectState, detectionContext, isRuleLine, explainDetection, DETECTION_REGIONS, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath, AGENT_PRESETS, promptAddAgentPreset } = moduleUnderTest.exports.__test;
 
 function makeProvider() {
   const provider = new ClaudeTmuxView({
@@ -1978,6 +1978,104 @@ async function run() {
       settings.set('stateHooks', false);
       fs.rmSync(fakeHome, { recursive: true, force: true });
     }
+  }
+
+  // ---- agent presets -------------------------------------------------------------
+  {
+    assert.ok(Array.isArray(AGENT_PRESETS), 'AGENT_PRESETS is an array');
+    const presetIds = AGENT_PRESETS.map((p) => p.id);
+    assert.ok(presetIds.includes('aider'), 'includes aider preset');
+    assert.ok(presetIds.includes('goose'), 'includes goose preset');
+    assert.ok(presetIds.includes('cursor'), 'includes cursor preset');
+    assert.ok(presetIds.includes('continue'), 'includes continue preset');
+
+    for (const preset of AGENT_PRESETS) {
+      assert.ok(preset.command, `preset ${preset.id} has a command`);
+      assert.ok(preset.label, `preset ${preset.id} has a label`);
+      assert.ok(preset.detection, `preset ${preset.id} has detection rules`);
+    }
+  }
+
+  // ---- IPC socket server & request handling ---------------------------------------
+  {
+    const provider = makeProvider();
+    provider.agentState.claude.present = true;
+    provider.agentState.claude.status = 'idle';
+    provider.agentState.claude.lastFrame = 'Line 1\nLine 2\nLine 3\n$ ';
+
+    // Test IPC 'list'
+    let written = '';
+    const mockSocket = { write: (str) => { written += str; } };
+    provider.handleIpcRequest({ action: 'list' }, mockSocket);
+    const listRes = JSON.parse(written.trim());
+    assert.strictEqual(listRes.ok, true);
+    assert.ok(listRes.agents.some((a) => a.id === 'claude'));
+
+    // Test IPC 'status'
+    written = '';
+    provider.handleIpcRequest({ action: 'status', agent: 'claude' }, mockSocket);
+    const statusRes = JSON.parse(written.trim());
+    assert.strictEqual(statusRes.ok, true);
+    assert.strictEqual(statusRes.agent, 'claude');
+    assert.strictEqual(statusRes.status, 'idle');
+
+    // Test IPC 'read'
+    written = '';
+    provider.handleIpcRequest({ action: 'read', agent: 'claude', lines: 2 }, mockSocket);
+    const readRes = JSON.parse(written.trim());
+    assert.strictEqual(readRes.ok, true);
+    assert.strictEqual(readRes.lines.length, 2);
+    assert.strictEqual(readRes.lines[1], '$ ');
+
+    // Test IPC dialog collision protection
+    written = '';
+    provider.agentState.claude.status = 'needs-input';
+    provider.handleIpcRequest({ action: 'prompt', agent: 'claude', text: 'ls' }, mockSocket);
+    const blockRes = JSON.parse(written.trim());
+    assert.strictEqual(blockRes.ok, false);
+    assert.strictEqual(blockRes.error, 'agent_blocked');
+    provider.agentState.claude.status = 'idle';
+
+    provider.closeIpcServer();
+  }
+
+  // ---- stall watchdog -------------------------------------------------------------
+  {
+    const provider = makeProvider();
+    provider.agentState.claude.present = true;
+    provider.agentState.claude.status = 'idle';
+    provider.agentState.claude.lastFrame = 'prompt> ';
+
+    provider.armStallWatchdog('claude');
+    assert.ok(provider._stallTimers.claude, 'stall timer armed');
+    // Transition to working clears the stall timer
+    provider.setAgentStatus('claude', 'working');
+    assert.strictEqual(provider.agentState.claude.stalled, false);
+    assert.strictEqual(provider._stallTimers.claude, undefined);
+
+    provider.closeIpcServer();
+  }
+
+  // ---- background done notification -----------------------------------------------
+  {
+    const provider = makeProvider();
+    provider.agentState.claude.present = true;
+    provider.agentState.codex.present = true;
+    provider.activeAgent = 'claude';
+    provider.setAgentStatus('codex', 'working');
+
+    let notified = false;
+    provider.maybeNotifyDone = (agent) => { notified = agent; };
+    provider.setAgentStatus('codex', 'done');
+
+    assert.strictEqual(notified, 'codex', 'background agent transitioning to done triggers notification');
+    assert.strictEqual(provider.agentState.codex.attention, 'done', 'codex attention set to done');
+
+    // Switching to codex clears attention
+    provider.switchAgent('codex');
+    assert.strictEqual(provider.agentState.codex.attention, null, 'switching to agent clears attention');
+
+    provider.closeIpcServer();
   }
 
   console.log('All extension tests passed.');

@@ -94,7 +94,7 @@ From this repository:
 ```bash
 npm run check
 npm run package
-code --install-extension claude-tmux-sidebar-0.14.1.vsix --force
+code --install-extension claude-tmux-sidebar-0.15.0.vsix --force
 ```
 
 Alternatively use VS Code: **Extensions → … → Install from VSIX…**, select the
@@ -236,6 +236,53 @@ A keybinding example:
 { "key": "ctrl+alt+t", "command": "claudeTmux.send",
   "args": { "agent": "claude", "text": "run the tests and summarize failures" } }
 ```
+
+## Agent CLI & MCP Bridge
+
+AgentMux includes an embedded local IPC socket server and exposes a command-line interface and standard Model Context Protocol (MCP) server so that terminal scripts and agents themselves can inspect and drive neighboring agents across tmux panes:
+
+### CLI (`agentmux`)
+
+The bundled `agentmux` binary communicates with the running AgentMux instance:
+
+```bash
+# List all active agents and their status
+agentmux list
+
+# Inspect detailed status, turns, and telemetry
+agentmux status codex
+
+# Read recent terminal output lines from an agent pane
+agentmux read claude --lines 50
+
+# Prompt an agent and atomically wait for completion
+agentmux prompt codex "Run pytest and verify the test suite" --wait --until done
+```
+
+### Model Context Protocol (MCP)
+
+To let Claude Code, Codex, Cursor, or Antigravity interact with AgentMux as peers, add to your project's `.mcp.json` or global config:
+
+```json
+{
+  "mcpServers": {
+    "agentmux": {
+      "command": "node",
+      "args": ["<path-to-agentmux>/bin/agentmux-mcp.js"]
+    }
+  }
+}
+```
+
+Exposed MCP tools: `list_agents`, `get_agent_status`, `read_agent_output`, `prompt_agent`.
+
+## Git Worktree Isolation
+
+When running multiple agents simultaneously on the same repository, enable `claudeTmux.worktrees: true`. Each agent will launch in its own isolated worktree (`.agentmux/worktrees/<agent>`) on branch `agent/<agent>`. Once an agent completes its feature, run `AgentMux: Merge active agent Git worktree into current branch`.
+
+## Native Agent Presets
+
+Add first-class agent definitions for **Aider**, **Goose**, **Cursor CLI**, and **Continue** in one click via **AgentMux: Add agent from preset…** without writing custom regex or configuration.
 
 ## Getting to the right agent
 
