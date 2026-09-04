@@ -148,6 +148,7 @@ async function handleToolCall(name, args = {}) {
       const wait = args.wait !== false;
       const until = args.until || 'done';
       const timeout = args.timeout || 60000;
+      const raw = args.raw !== false;
       const res = await queryIpc({
         action: 'prompt',
         agent: args.agent,
@@ -155,6 +156,7 @@ async function handleToolCall(name, args = {}) {
         wait,
         until,
         timeout,
+        raw,
       });
       if (!res.ok) throw new Error(res.message || res.error);
       let outputText = `Prompt sent to ${res.agent}.`;
