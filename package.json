@@ -2,7 +2,7 @@
   "name": "claude-tmux-sidebar",
   "displayName": "AgentMux — Claude, Codex, OpenCode, Hermes, Pi, Antigravity & Devin in tmux",
   "description": "Seven agents, one terminal flow — plus free mode, which mirrors any tmux session you already have: switch fast and hand off work intelligently between Claude Code, Codex, OpenCode, Hermes, Pi, Google Antigravity and Devin in tmux.",
-  "version": "0.16.0",
+  "version": "0.16.1",
   "publisher": "Danesed",
   "license": "MIT",
   "icon": "icon.png",

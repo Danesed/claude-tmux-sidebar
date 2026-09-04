@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.16.1
+
+Bug-fix and performance release:
+
+- **Hardened home-directory resolution.** Replaced all `process.env.HOME` uses with `os.homedir()` and guarded `getProjectDir()` against null/invalid workspace paths, preventing crashes in CI, Remote-SSH, or sandboxed launches.
+- **Faster, non-blocking session listing.** `listSessions`, `readFileChunk`, and `listCodexSessions` now use `fs.promises` with bounded concurrency, so the resume overlay no longer freezes the Extension Host on large transcript folders.
+- **Workspace realpath cache.** Added `normalizedWorkspace()` with a 30-second TTL and invalidation on workspace-folder changes, removing repeated synchronous `fs.realpathSync.native` calls from the typing, resize, and polling hot paths.
+- **MCP parity.** `prompt_agent` in `bin/agentmux-mcp.js` now passes the `raw` flag, matching the `agentmux` CLI behaviour.
+- **Repository hygiene.** Runtime `.claude/agentmux/` files and sockets are now ignored; missing `devin-*.txt` test fixtures are tracked.
+- **Light UI polish.** Firefox scrollbar support, visible `button:focus-visible`, and `overflow-wrap`/`tab-size` improvements in modals and arbiter text areas.
+
 ## 0.16.0
 
 Added **Devin** (Cognition `devin` CLI) as a first-class 7th built-in agent:
