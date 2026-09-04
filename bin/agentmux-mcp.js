@@ -161,7 +161,10 @@ async function handleToolCall(name, args = {}) {
       if (!res.ok) throw new Error(res.message || res.error);
       let outputText = `Prompt sent to ${res.agent}.`;
       if (wait) {
-        outputText = `Agent [${res.agent}] finished with status: ${res.status} (${res.durationMs || 0}ms)\n\nRecent output:\n${res.output || '(no output captured)'}`;
+        const verb = res.blocked
+          ? 'stopped at a dialog and needs input (answer it or cancel before prompting again)'
+          : `finished with status: ${res.status}`;
+        outputText = `Agent [${res.agent}] ${verb} (${res.durationMs || 0}ms)\n\nRecent output:\n${res.output || '(no output captured)'}`;
       }
       return { content: [{ type: 'text', text: outputText }] };
     }

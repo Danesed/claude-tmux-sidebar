@@ -112,7 +112,8 @@ function handleResponse(req, res) {
 
     case 'prompt':
       if (req.wait) {
-        console.log(`[${res.agent}] finished with status: ${res.status} (${res.durationMs}ms)`);
+        const verb = res.blocked ? 'stopped at a dialog (needs input)' : `finished with status: ${res.status}`;
+        console.log(`[${res.agent}] ${verb} (${res.durationMs}ms)`);
         if (res.output) {
           console.log('--- Output tail ---');
           console.log(res.output);

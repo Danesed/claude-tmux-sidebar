@@ -13,6 +13,15 @@ html, body {
   height: 100vh;
   width: 100vw;
   overflow: hidden;
+  /* The active agent's product colour as "r, g, b" (set by the script on
+     every switch). Cursor, focus ring, state rail and active tab all derive
+     from this one value, so the whole chrome follows the agent you are in. */
+  --agent-accent: 128, 128, 128;
+  --c-working: #58c7d5;
+  --c-done: var(--vscode-testing-iconPassed, #3fb950);
+  --c-input: var(--vscode-charts-yellow, #d7a838);
+  --c-dead: var(--vscode-testing-iconFailed, #f14c4c);
+  --hairline: var(--vscode-widget-border, rgba(128,128,128,.28));
 }
 
 /* ---- agent tabs ---------------------------------------------------------- */
@@ -70,9 +79,14 @@ html, body {
 .agent-tab.active {
   color: var(--vscode-foreground, #ddd);
   border-bottom-color: rgb(var(--agent-accent, 14,99,156));
-  background: var(--vscode-list-activeSelectionBackground, rgba(255,255,255,0.09));
+  /* A wash of the agent's own colour rather than the generic selection tint:
+     the active tab and the rail below it read as one object. */
+  background: rgba(var(--agent-accent, 128,128,128), .12);
 }
-.agent-tab:focus-visible { outline: 1px solid var(--vscode-focusBorder, #0e639c); outline-offset: -1px; }
+.agent-tab:focus-visible { outline: 1px solid rgba(var(--agent-accent, 14,99,156), .8); outline-offset: -1px; }
+/* Attention on a narrow tab: the whole underline breathes, not only the dot. */
+.agent-tab.attention-needs-input { border-bottom-color: var(--c-input); animation: railBreath 2.2s ease-in-out infinite; }
+.agent-tab.attention-done { border-bottom-color: var(--c-done); }
 .agent-state {
   width: 6px;
   height: 6px;
@@ -144,12 +158,12 @@ html, body {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  border: 1px solid var(--vscode-widget-border, rgba(255,255,255,.15));
+  border: 1px solid var(--hairline);
   border-radius: 6px;
+  /* Solid, not glass: a blur over a terminal that repaints 8×/s is paid on
+     every frame while the menu is open, and VS Code's own menus are flat. */
   background: var(--vscode-menu-background, #252526);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  box-shadow: 0 8px 24px rgba(0,0,0,.35), 0 0 0 1px rgba(255,255,255,.05);
+  box-shadow: 0 2px 8px rgba(0,0,0,.22);
 }
 .launch-menu button { text-align: left; padding: 6px 8px; border: 0; background: transparent; white-space: nowrap; }
 .launch-menu button:hover { background: var(--vscode-menu-selectionBackground, #094771); }
@@ -175,12 +189,32 @@ html, body {
 #launcher-actions button { text-align: left; }
 
 /* ---- terminal mirror area ------------------------------------------------ */
+/* ---- state rail ---------------------------------------------------------
+   The mirror's left border is a 2px rail in the active agent's colour that
+   says what the agent is doing without looking for the dot: it breathes while
+   working, turns amber and holds while a question waits, and flashes green
+   once when a turn ends. A border on the scroll container never scrolls away
+   and costs nothing to paint; #app carries the state as a class. */
 #screen-wrap {
   position: relative;
   flex: 1 1 auto;
   overflow: auto;
   min-height: 0;
   scrollbar-color: var(--vscode-scrollbarSlider-background, #5558) transparent;
+  border-left: 2px solid rgba(var(--agent-accent, 128,128,128), .35);
+  transition: border-color .25s ease;
+}
+#app.st-working #screen-wrap { animation: railBreath 1.8s ease-in-out infinite; }
+#app.st-needs-input #screen-wrap { border-left-color: var(--c-input); }
+#app.st-done #screen-wrap { border-left-color: var(--c-done); }
+#app.turn-end #screen-wrap { animation: railFlash .8s ease-out 1; }
+@keyframes railBreath {
+  0%, 100% { border-left-color: rgba(var(--agent-accent, 128,128,128), .4); }
+  50% { border-left-color: rgba(var(--agent-accent, 128,128,128), 1); }
+}
+@keyframes railFlash {
+  0% { border-left-color: var(--c-done); box-shadow: inset 6px 0 12px -8px rgba(63,185,80,.9); }
+  100% { border-left-color: rgba(var(--agent-accent, 128,128,128), .35); box-shadow: inset 0 0 0 0 rgba(63,185,80,0); }
 }
 
 #terminal {
@@ -221,18 +255,21 @@ html, body {
   contain: layout inline-size;
 }
 
-/* subtle focus ring so you know keystrokes are captured */
-#screen:focus { box-shadow: inset 0 0 0 1px var(--vscode-focusBorder, #0e639c); }
+/* subtle focus ring, in the agent's colour, so you know keystrokes are captured */
+#screen:focus { box-shadow: inset 0 0 0 1px rgba(var(--agent-accent, 14,99,156), .55); }
 #screen.input-locked { cursor: default; opacity: .88; }
 
+/* The cursor wears the active agent's colour: with several tabs open, a glance
+   at it says which agent you are typing into. A translucent block beats the
+   old difference-blend, which forced a compositing pass on every blink and
+   vanished on mid-grey backgrounds. */
 #cursor {
   position: absolute;
   top: 0;
   left: 0;
   pointer-events: none;
-  background: var(--vscode-terminalCursor-foreground, #d4d4d4);
-  opacity: 0.7;
-  mix-blend-mode: difference;
+  background: rgba(var(--agent-accent, 212,212,212), .55);
+  box-shadow: inset 0 0 0 1px rgba(var(--agent-accent, 212,212,212), .9);
   display: none;
   border-radius: 1px;
   will-change: transform;
@@ -331,12 +368,10 @@ html, body {
   flex-direction: column;
   gap: 4px;
   padding: 7px;
-  border: 1px solid var(--vscode-widget-border, rgba(255,255,255,.15));
+  border: 1px solid var(--hairline);
   border-radius: 8px;
   background: var(--vscode-menu-background, #252526);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  box-shadow: 0 8px 24px rgba(0,0,0,.35), 0 0 0 1px rgba(255,255,255,.05);
+  box-shadow: 0 2px 10px rgba(0,0,0,.24);
   font-family: var(--vscode-font-family);
 }
 #recall-filter {
@@ -374,12 +409,10 @@ html, body {
   flex-direction: column;
   gap: 6px;
   padding: 10px;
-  border: 1px solid var(--vscode-widget-border, rgba(255,255,255,.15));
+  border: 1px solid var(--hairline);
   border-radius: 8px;
   background: var(--vscode-editorWidget-background, #252526);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  box-shadow: 0 8px 24px rgba(0,0,0,.35), 0 0 0 1px rgba(255,255,255,.05);
+  box-shadow: 0 2px 10px rgba(0,0,0,.24);
   font-family: var(--vscode-font-family);
   font-size: 11.5px;
 }
@@ -433,7 +466,7 @@ html, body {
   border: 1px solid var(--vscode-widget-border, rgba(255,255,255,0.08));
   border-radius: 9px;
   background: var(--vscode-sideBar-background, rgba(255,255,255,0.02));
-  box-shadow: 0 6px 20px rgba(0,0,0,0.15);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.12);
   font-family: var(--vscode-font-family);
 }
 .card-logo svg { width: 40px; height: 40px; opacity: 0.85; color: var(--vscode-textLink-foreground, #4daafc); }
@@ -585,30 +618,53 @@ button.primary:hover { background: var(--vscode-button-hoverBackground, #1177bb)
   flex: 1 1 auto;
   min-width: 0;
 }
-#status-right { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
+#status-right { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+/* Footer facts as chips: hairline-bordered monospace pills, so "80×24", "up 2h"
+   and "↑12k ↓3k" read as separate facts instead of one dotted sentence. */
 #status-meta {
-  opacity: 0.72;
+  display: flex;
+  align-items: center;
+  gap: 4px;
   white-space: nowrap;
   overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: min(52vw, 320px);
+  max-width: min(52vw, 340px);
   font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  font-size: 10.5px;
+  font-size: 10px;
   letter-spacing: -0.01em;
+}
+.chip {
+  flex: 0 0 auto;
+  padding: 0 5px;
+  line-height: 14px;
+  border: 1px solid var(--hairline);
+  border-radius: 7px;
+  color: var(--vscode-descriptionForeground, #9aa0a6);
+  background: rgba(var(--agent-accent, 128,128,128), .06);
 }
 #status-state { display: flex; align-items: center; gap: 5px; flex: 0 0 auto; }
 .dot {
+  position: relative;
   width: 7px; height: 7px; border-radius: 50%;
   background: var(--vscode-descriptionForeground, #888);
   flex: 0 0 auto;
   transition: background-color .15s ease, transform .15s ease;
 }
-.dot.live { background: var(--vscode-testing-iconPassed, #3fb950); box-shadow: 0 0 5px var(--vscode-testing-iconPassed, #3fb950); }
-.dot.idle { background: var(--vscode-charts-yellow, #d7a838); }
-.dot.dead { background: var(--vscode-testing-iconFailed, #f14c4c); }
-.dot.working { background: #58c7d5; animation: workingGlow 1.8s ease-in-out infinite; }
-.dot.done { background: var(--vscode-testing-iconPassed, #3fb950); }
-.dot.needs-input { background: var(--vscode-charts-yellow, #d7a838); animation: inputBreath 2.2s ease-in-out infinite; }
+.dot.live { background: var(--c-done); box-shadow: 0 0 5px var(--c-done); }
+.dot.idle { background: var(--vscode-descriptionForeground, #888); }
+.dot.dead { background: var(--c-dead); }
+.dot.working { background: var(--c-working); animation: workingGlow 1.8s ease-in-out infinite; }
+.dot.done { background: var(--c-done); }
+.dot.needs-input { background: var(--c-input); animation: inputBreath 2.2s ease-in-out infinite; }
+/* Capture latency ≥ 200ms: an amber ring around the dot instead of a "lag"
+   word in the footer (the exact figure sits in the dot's tooltip). */
+.dot.lag::after {
+  content: '';
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  border: 1.5px solid var(--c-input);
+  opacity: .85;
+}
 
 .footer-action {
   width: 20px;
@@ -633,21 +689,19 @@ button.primary:hover { background: var(--vscode-button-hoverBackground, #1177bb)
   padding: 12px;
   box-sizing: border-box;
   background: rgba(0,0,0,.45);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
 }
 .modal-card {
-  width: min(620px, 100%);
-  height: min(78vh, 720px);
+  width: min(560px, 100%);
+  height: min(72vh, 620px);
   display: flex;
   flex-direction: column;
   gap: 8px;
   padding: 16px;
   box-sizing: border-box;
-  border: 1px solid var(--vscode-widget-border, rgba(255,255,255,.16));
+  border: 1px solid var(--hairline);
   border-radius: 8px;
   background: var(--vscode-editorWidget-background, #252526);
-  box-shadow: 0 16px 44px rgba(0,0,0,.45), 0 0 0 1px rgba(255,255,255,.05);
+  box-shadow: 0 6px 24px rgba(0,0,0,.3);
 }
 .modal-title { font-weight: 600; font-size: 13px; margin-bottom: 2px; }
 .modal-meta { color: var(--vscode-descriptionForeground, #999); font-size: 11px; line-height: 1.35; }
@@ -717,6 +771,37 @@ button.primary:hover { background: var(--vscode-button-hoverBackground, #1177bb)
 }
 .arb-answer button { align-self: flex-start; }
 
+/* Launcher rows: label left, a keycap right — press the digit to start. */
+#launcher-actions button { display: flex; align-items: center; }
+#launcher-actions .launch-label { flex: 1 1 auto; text-align: left; }
+kbd {
+  flex: 0 0 auto;
+  min-width: 14px;
+  padding: 0 4px;
+  margin-left: 8px;
+  font: 10px/15px ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  color: var(--vscode-descriptionForeground, #999);
+  border: 1px solid var(--hairline);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--vscode-keybindingLabel-background, rgba(128,128,128,.17));
+}
+
+/* ---- dense mode ------------------------------------------------------------
+   A short or narrow side bar keeps every function and gives the rows back to
+   the terminal: tighter tabs and footer, marks instead of labels, no chips. */
+@media (max-height: 340px) {
+  #agent-tabs { padding-top: 3px; gap: 2px; }
+  .agent-tab, .tab-add { padding-top: 3px; padding-bottom: 4px; font-size: 11px; }
+  #statusbar { height: 19px; font-size: 10px; padding: 0 6px; }
+  #status-meta { display: none; }
+  #hint { display: none; }
+}
+@media (max-width: 240px) {
+  #status-meta { display: none; }
+  #status-name { display: none; }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .agent-state, .dot, #cursor { animation: none !important; }
+  .agent-state, .dot, #cursor, #screen-wrap, .agent-tab { animation: none !important; }
 }

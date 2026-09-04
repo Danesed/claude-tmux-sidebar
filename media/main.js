@@ -56,6 +56,9 @@
     for (const id of AGENT_IDS) out[id] = make(id);
     return out;
   };
+  // Element lookups resolved once: renderAgents runs on every roster update.
+  const TAB_EL = byAgent((id) => document.getElementById(`tab-${id}`));
+  const LAUNCH_BTN = byAgent((id) => [...launchMenu.querySelectorAll(`button[data-agent="${id}"]`)]);
   let activeAgent = AGENT_IDS.includes('claude') ? 'claude' : AGENT_IDS[0];
   let writerAgent = null;
   let handoffPhase = null;
@@ -196,36 +199,48 @@
   const ESC = '\x1b';
   function esc(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 
+  // Hot path: every changed row goes through here. Text is copied out in
+  // slices between escapes rather than one character at a time, CSI final
+  // bytes are found by char code (0x40–0x7E, per ECMA-48) instead of a regex
+  // per byte, and a run whose style is the default is emitted bare — no empty
+  // <span> per \x1b[0m, which on a colourful TUI was a third of the row's nodes.
   function renderLine(line) {
     if (line.indexOf(ESC) < 0) {
       return esc(line.indexOf('\r') < 0 ? line : line.replace(/\r/g, ''));
     }
-    let html = '', buf = '';
+    const out = [];
     const st = defaultStyle();
-    let openSpan = false;
-    const flush = () => { if (buf) { html += esc(buf); buf = ''; } };
-    const closeSpan = () => { if (openSpan) { flush(); html += '</span>'; openSpan = false; } };
-    const openWith = () => { flush(); const css = styleToCss(st); html += css ? `<span style="${css}">` : '<span>'; openSpan = true; };
-    for (let i = 0; i < line.length; i++) {
-      const ch = line[i];
-      if (ch === '\r') continue;
-      if (ch === ESC) {
-        if (line[i + 1] === '[') {
-          let j = i + 2;
-          while (j < line.length && !/[A-Za-z]/.test(line[j])) j++;
-          if (line[j] === 'm') {
-            const codes = line.slice(i + 2, j).split(';').map((x) => (x === '' ? 0 : parseInt(x, 10)));
-            closeSpan(); applySGR(st, codes); openWith();
-          }
-          i = j;
-        } else { i += 1; }
-        continue;
+    let css = '';
+    let segStart = 0;
+    const n = line.length;
+    const emit = (end) => {
+      if (end <= segStart) return;
+      let text = line.slice(segStart, end);
+      if (text.indexOf('\r') >= 0) text = text.replace(/\r/g, '');
+      if (!text) return;
+      out.push(css ? `<span style="${css}">${esc(text)}</span>` : esc(text));
+    };
+    for (let i = 0; i < n; i++) {
+      if (line.charCodeAt(i) !== 27) continue;
+      emit(i);
+      if (line.charCodeAt(i + 1) === 91) { // '['
+        let j = i + 2;
+        let c = line.charCodeAt(j);
+        while (j < n && !(c >= 0x40 && c <= 0x7e)) c = line.charCodeAt(++j);
+        if (c === 109) { // 'm'
+          const params = line.slice(i + 2, j);
+          const codes = params === '' ? [0] : params.split(';').map((x) => (x === '' ? 0 : parseInt(x, 10)));
+          applySGR(st, codes);
+          css = styleToCss(st);
+        }
+        i = j;
+      } else {
+        i += 1;
       }
-      buf += ch;
+      segStart = i + 1;
     }
-    closeSpan();
-    if (!openSpan) flush();
-    return html;
+    emit(n);
+    return out.join('');
   }
   // ---- clickable file paths -------------------------------------------------
   // Wrap path-like tokens (with a '/' or a ':line' suffix) in spans; the host
@@ -453,12 +468,19 @@
 
   // ---- selection-aware refresh (so you can copy text from the mirror) -------
   let pendingFrame = null;
-  function hasSelection() {
+  // Serialising the selection (getSelection().toString()) on every frame is
+  // wasted work 99% of the time; the answer only changes on selectionchange,
+  // so it is computed there and read as a flag from the frame path.
+  let selectionActive = false;
+  function computeSelection() {
     const sel = window.getSelection();
-    return !!(sel && sel.toString().length > 0 && sel.anchorNode && screen.contains(sel.anchorNode));
+    if (!sel || sel.isCollapsed || !sel.anchorNode || !screen.contains(sel.anchorNode)) return false;
+    return sel.toString().length > 0;
   }
+  function hasSelection() { return selectionActive; }
   document.addEventListener('selectionchange', () => {
-    if (!hasSelection() && pendingFrame != null) {
+    selectionActive = computeSelection();
+    if (!selectionActive && pendingFrame != null) {
       if (pendingFrame.agent === activeAgent) {
         if (pendingFrame.useLive && liveLines) render(liveLines);
         else if (pendingFrame.frame != null) render(pendingFrame.frame);
@@ -479,9 +501,15 @@
   let lastSeen = 0;
   function setStatus(name, cls, label) {
     if (name) statusName.textContent = name;
-    const dotClass = 'dot ' + cls;
+    const dotClass = 'dot ' + cls + (statusDot.classList.contains('lag') ? ' lag' : '');
     if (statusDot.className !== dotClass) statusDot.className = dotClass;
     if (statusLabel.textContent !== label) statusLabel.textContent = label;
+  }
+  function clearMeta() {
+    if (statusMeta.dataset.text === undefined && !statusMeta.firstChild) return;
+    delete statusMeta.dataset.text;
+    statusMeta.replaceChildren();
+    statusMeta.title = '';
   }
   function fmtK(n) {
     n = n || 0;
@@ -501,7 +529,9 @@
     const ap = agentPresence[activeAgent] || {};
     const tel = ap.telemetry;
     const delta = ap.delta;
-    const nextMetaText = [
+    // Footer facts as small chips (one <span> each), rebuilt only when the
+    // text changes — the uptime chip ticks once a second, the rest rarely.
+    const chips = [
       pw && ph ? `${pw}×${ph}` : '',
       up ? `up ${up}` : '',
       history ? `hist ${history}` : '',
@@ -509,14 +539,20 @@
       tel && (tel.inTokens || tel.outTokens) ? `↑${fmtK(tel.inTokens)} ↓${fmtK(tel.outTokens)}` : '',
       tel && tel.turns ? `t${tel.turns}` : '',
       delta && delta.files ? `Δ${delta.files} +${delta.insertions}−${delta.deletions}` : '',
-      latencyMs >= 200 ? `lag ${Math.round(latencyMs)}ms` : '',
-    ].filter(Boolean).join(' · ');
-    if (statusMeta.textContent !== nextMetaText) {
-      statusMeta.textContent = nextMetaText;
+    ].filter(Boolean);
+    const nextMetaText = chips.join(' · ');
+    if (statusMeta.dataset.text !== nextMetaText) {
+      statusMeta.dataset.text = nextMetaText;
+      statusMeta.innerHTML = chips.map((c) => `<span class="chip">${esc(c)}</span>`).join('');
       statusMeta.title = nextMetaText
         + (tel && tel.model ? `\nmodel ${tel.model}` : '')
         + (delta && delta.names ? `\nlast turn: ${delta.names.join(', ')}` : '');
     }
+    // Latency is a ring on the dot, not another word in the footer.
+    const lagging = latencyMs >= 200;
+    if (statusDot.classList.contains('lag') !== lagging) statusDot.classList.toggle('lag', lagging);
+    if (lagging) statusDot.title = `capture lag ${Math.round(latencyMs)} ms`;
+    else if (statusDot.title) statusDot.title = '';
     const agentStatus = ap.status || 'idle';
     let label = STATE_LABELS[agentStatus] || agentStatus;
     if (agentStatus === 'working') {
@@ -578,6 +614,10 @@
   }
 
   const isMac = navigator.platform.startsWith('Mac');
+  // Alt+1..9 by physical key: on macOS Option+digit yields a symbol in e.key.
+  function isAltDigit(e) {
+    return e.altKey && !e.ctrlKey && !e.metaKey && typeof e.code === 'string' && /^Digit[1-9]$/.test(e.code);
+  }
   let composing = false;
   let paneMode = ''; // tmux mode the pane sits in (copy-mode): typing here leaves it
   function isInputLocked() {
@@ -626,6 +666,7 @@
     // Cmd stays a UI shortcut on macOS. On Windows/Linux, copy a selection with
     // Ctrl+C and paste with Ctrl+V; otherwise Ctrl combinations reach tmux.
     const key = e.key.toLowerCase();
+    if (isAltDigit(e)) return; // tab chord: handled at the document level, never typed
     if (isMac && e.metaKey && ['c', 'v', 'a', 'x'].includes(key)) return;
     if (!isMac && e.ctrlKey && ((key === 'c' && hasSelection()) || key === 'v')) return;
     if (!isMac && e.ctrlKey && e.shiftKey && ['c', 'v'].includes(key)) return;
@@ -699,6 +740,10 @@
     });
     screen.setAttribute('aria-label', `${cap(agent)} tmux terminal mirror`);
     screen.setAttribute('aria-labelledby', `tab-${agent}`);
+    // One variable, the whole chrome follows: cursor, focus ring, state rail
+    // and active tab all read --agent-accent from #app.
+    const accent = TAB_EL[agent]?.style.getPropertyValue('--agent-accent');
+    if (accent) app.style.setProperty('--agent-accent', accent);
     exitVirtual();
     liveLines = null;
     liveSeq = 0;
@@ -706,10 +751,14 @@
     cursorEl.style.visibility = 'hidden';
     overlay.classList.add('hidden');
     statusName.textContent = '';
-    statusMeta.textContent = '';
+    clearMeta();
     const cached = frameCache[agent];
     if (cached.frame != null) {
-      for (let i = 0; i < screen.children.length; i++) screen.children[i]._raw = null;
+      // A click already painted this agent locally; when the host's echo
+      // arrives for the same agent the row cache is still valid, so only rows
+      // whose text really differs are touched (one full repaint per switch,
+      // not two).
+      if (changed) for (let i = 0; i < screen.children.length; i++) screen.children[i]._raw = null;
       render(cached.frame);
       applyFrameMeta(cached.meta, cached.name, cached.latencyMs);
     } else {
@@ -719,6 +768,7 @@
     }
     setScrollTop(scrollState[agent].top);
     applyPairLock();
+    applyAppState(agentPresence[agent]?.status || 'idle');
   }
 
   tabs.forEach((tab) => {
@@ -785,7 +835,8 @@
     document.getElementById('hint').textContent = transactionLocked
       ? 'handoff in progress'
       : locked ? `Pair Mode · ${cap(writerAgent)} is writer`
-        : paneMode ? `pane is in tmux ${paneMode} · typing here leaves it` : 'click to type';
+        : paneMode ? `pane is in tmux ${paneMode} · typing here leaves it`
+          : (tabs.filter((t) => !t.classList.contains('hidden')).length > 1 ? 'click to type · Alt+1…9 switch agent' : 'click to type');
     btnUnlock.classList.toggle('hidden', !writerAgent);
   }
 
@@ -830,11 +881,11 @@
     btnArbiter.disabled = !canArbitrate || !!handoffPhase || !!arbiterPhase;
     for (const agent of AGENT_IDS) {
       Object.assign(agentPresence[agent], message.agents?.[agent] || { present: false, status: 'idle' });
-      const tab = document.getElementById(`tab-${agent}`);
+      const tab = TAB_EL[agent];
       const present = !!agentPresence[agent].present;
       const status = agentPresence[agent].status || 'idle';
       const attention = agentPresence[agent].attention || null;
-      if (!present) frameCache[agent] = { frame: null, meta: '', name: '', latencyMs: 0 };
+      if (!present && frameCache[agent].frame != null) frameCache[agent] = { frame: null, meta: '', name: '', latencyMs: 0 };
       tab.classList.toggle('hidden', !present);
       tab.classList.toggle('writer', writerAgent === agent);
       for (const name of ['working', 'done', 'needs-input', 'idle']) tab.classList.toggle(`state-${name}`, status === name);
@@ -844,12 +895,14 @@
       const label = `${cap(agent)}: ${STATE_LABELS[status] || status}${attentionLabel}${writerAgent === agent ? ', Pair Mode writer' : ''}`;
       // Agents that write a conversation summary into the tmux pane title get
       // it as a second tooltip line — the cheapest "what is this tab doing".
+      // A background agent stuck on a question also gets the question itself:
+      // hover the amber tab and read what it wants without switching to it.
       const paneTitle = agentPresence[agent].title || '';
-      tab.title = paneTitle ? `${label}\n${paneTitle}` : label;
-      tab.setAttribute('aria-label', label);
-      for (const button of launchMenu.querySelectorAll(`button[data-agent="${agent}"]`)) {
-        button.classList.toggle('hidden', present);
-      }
+      const peek = attention === 'needs-input' && agentPresence[agent].peek ? `\n\n${agentPresence[agent].peek}` : '';
+      const title = (paneTitle ? `${label}\n${paneTitle}` : label) + peek;
+      if (tab.title !== title) tab.title = title;
+      if (tab.getAttribute('aria-label') !== label) tab.setAttribute('aria-label', label);
+      for (const button of LAUNCH_BTN[agent]) button.classList.toggle('hidden', present);
     }
     const presentAgents = AGENT_IDS.filter((agent) => agentPresence[agent].present);
     const hasWorkspace = message.hasWorkspace !== false;
@@ -873,7 +926,7 @@
       launcherActions.classList.remove('hidden');
       btnStart.parentElement.classList.add('hidden');
       statusName.textContent = '';
-      statusMeta.textContent = '';
+      clearMeta();
       setStatus('', 'dead', 'no workspace');
       return;
     }
@@ -887,7 +940,7 @@
       launcherActions.classList.remove('hidden');
       btnStart.parentElement.classList.add('hidden');
       statusName.textContent = '';
-      statusMeta.textContent = '';
+      clearMeta();
       setStatus('', 'dead', 'no sessions');
     } else {
       launcherActions.classList.add('hidden');
@@ -895,6 +948,26 @@
     }
     const activeStatus = agentPresence[activeAgent].status || 'idle';
     if (agentPresence[activeAgent].present) setStatus('', activeStatus, STATE_LABELS[activeStatus] || activeStatus);
+    applyAppState(activeStatus);
+  }
+
+  // #app carries the active agent's state as a class so pure CSS can paint the
+  // peripheral cues (left rail, cursor tint, turn-end flash). One className
+  // write, only when the state actually changes.
+  let appStateClass = '';
+  function applyAppState(status) {
+    const next = `st-${status || 'idle'}`;
+    if (next === appStateClass) return;
+    const finished = appStateClass === 'st-working' && next !== 'st-working';
+    if (appStateClass) app.classList.remove(appStateClass);
+    app.classList.add(next);
+    appStateClass = next;
+    if (finished) {
+      // Restart the one-shot flash even if the class is already there.
+      app.classList.remove('turn-end');
+      void app.offsetWidth;
+      app.classList.add('turn-end');
+    }
   }
 
   // The peer is only a real choice when more than one other agent exists;
@@ -1016,7 +1089,12 @@
     handoffText.value = handoffDraft[handoffCurrentMode];
     vscode.postMessage({ type: 'updateHandoffDraft', id: handoffDraft.id, mode: handoffCurrentMode, text: handoffText.value });
   });
-  handoffText.addEventListener('input', () => {
+  // The host only needs the draft text at the next transition, not after every
+  // keystroke; a 30 KB message per key was pure overhead. Debounced, and flushed
+  // by the Send/Cancel handlers before they act.
+  let handoffSyncTimer = null;
+  function syncHandoffText() {
+    if (handoffSyncTimer !== null) { clearTimeout(handoffSyncTimer); handoffSyncTimer = null; }
     if (handoffDraft?.phase === 'collecting') {
       handoffDraft.details = handoffText.value;
       vscode.postMessage({ type: 'updateHandoffDetails', id: handoffDraft.id, details: handoffText.value });
@@ -1024,8 +1102,15 @@
       handoffDraft[handoffCurrentMode] = handoffText.value;
       vscode.postMessage({ type: 'updateHandoffDraft', id: handoffDraft.id, mode: handoffCurrentMode, text: handoffText.value });
     }
+  }
+  handoffText.addEventListener('input', () => {
+    if (handoffDraft?.phase === 'collecting') handoffDraft.details = handoffText.value;
+    else if (handoffDraft?.phase === 'review') handoffDraft[handoffCurrentMode] = handoffText.value;
+    if (handoffSyncTimer !== null) clearTimeout(handoffSyncTimer);
+    handoffSyncTimer = setTimeout(syncHandoffText, 200);
   });
   handoffCancel.addEventListener('click', () => {
+    if (handoffSyncTimer !== null) { clearTimeout(handoffSyncTimer); handoffSyncTimer = null; }
     if (handoffDraft?.id) vscode.postMessage({ type: 'cancelHandoff', id: handoffDraft.id });
     handoffModal.classList.add('hidden');
     handoffDraft = null;
@@ -1034,6 +1119,7 @@
   });
   handoffSend.addEventListener('click', () => {
     if (!handoffDraft) return;
+    if (handoffSyncTimer !== null) { clearTimeout(handoffSyncTimer); handoffSyncTimer = null; }
     if (handoffDraft.phase === 'collecting') {
       handoffDraft.details = handoffText.value;
       handoffDraft.phase = 'creating';
@@ -1087,6 +1173,29 @@
     if (e.key === 'Escape' && !arbiterModal.classList.contains('hidden')) {
       e.preventDefault();
       arbiterCancel.click();
+      return;
+    }
+    const inField = document.activeElement && ['input', 'textarea', 'select'].includes(document.activeElement.tagName.toLowerCase());
+    // Alt+1..9 jumps to the Nth visible tab — the browser convention, and a
+    // chord no agent TUI reads. Intercepted here so it never reaches tmux.
+    if (isAltDigit(e) && !inField) {
+      const visibleTabs = tabs.filter((tab) => !tab.classList.contains('hidden'));
+      const target = visibleTabs[Number(e.code.slice(5)) - 1];
+      if (target) {
+        e.preventDefault();
+        const agent = target.dataset.agent;
+        if (agent !== activeAgent) setActiveAgent(agent);
+        vscode.postMessage({ type: 'switchAgent', agent });
+        screen.focus({ preventScroll: true });
+      }
+      return;
+    }
+    // On the launcher card a bare digit starts the Nth listed agent.
+    if (!overlay.classList.contains('hidden') && !launcherActions.classList.contains('hidden')
+      && !inField && !e.altKey && !e.ctrlKey && !e.metaKey && e.key >= '1' && e.key <= '9') {
+      const buttons = [...launcherActions.querySelectorAll('button[data-launch-agent]')].filter((b) => !b.disabled);
+      const button = buttons[Number(e.key) - 1];
+      if (button) { e.preventDefault(); button.click(); }
       return;
     }
     // If the user starts typing while focus is on body/wrap (e.g. after
@@ -1278,6 +1387,8 @@
     } else if (m.type === 'inputError') {
       if (m.reason === 'workspace') {
         document.getElementById('hint').textContent = 'workspace changed · unsent text discarded';
+      } else if (m.reason === 'too-large') {
+        document.getElementById('hint').textContent = 'paste too large (limit 100 KB) · not sent';
       } else {
         const why = m.reason ? ` (${m.reason})` : '';
         document.getElementById('hint').textContent = m.pendingBytes
@@ -1484,7 +1595,7 @@
       setScrollTop(0);
       overlay.classList.remove('hidden');
       overlayFolder.textContent = m.folder || '';
-      statusMeta.textContent = '';
+      clearMeta();
       setStatus(m.name, 'dead', 'stopped');
       lastSeen = 0;
       if (paneMode) { paneMode = ''; applyPairLock(); }
@@ -1521,7 +1632,7 @@
       btnStart.disabled = true;
       for (const button of launcherActions.querySelectorAll('button')) button.disabled = true;
       statusName.textContent = '';
-      statusMeta.textContent = '';
+      clearMeta();
       setStatus('', 'dead', 'no workspace');
     }
   });

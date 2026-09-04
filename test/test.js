@@ -529,6 +529,25 @@ async function run() {
   assert.strictEqual(flushed.ok, false);
   assert.strictEqual(flushed.transportFailed, true, 'control-client death must be distinguishable from a tmux error reply');
 
+  // A caller's own timeout gives up on ITS command only: the client stays up,
+  // the late reply is swallowed in order, and the next command still answers.
+  const slowCtl = new TmuxControlClient();
+  slowCtl.proc = { exitCode: null, stdin: { write: () => {} }, kill: () => {} };
+  slowCtl.alive = true;
+  const slow = slowCtl.exec(['display-message', '-p', 'x'], 30);
+  const slowResult = await slow;
+  assert.strictEqual(slowResult.timedOut, true, 'a per-command timeout answers timedOut');
+  assert.strictEqual(slowResult.transportFailed, undefined, 'without blaming the transport');
+  assert.strictEqual(slowCtl.usable(), true, 'and the control client is still alive');
+  const next = slowCtl.exec(['display-message', '-p', 'y']);
+  // Late reply for the timed-out command, then the real reply for the next one.
+  slowCtl.onData('%begin 1 1 0\nstale\n%end 1 1 0\n%begin 1 2 0\nfresh\n%end 1 2 0\n');
+  const nextResult = await next;
+  assert.strictEqual(nextResult.ok, true);
+  assert.strictEqual(nextResult.out, 'fresh\n', 'the queue stays aligned after a swallowed late reply');
+  assert.strictEqual(slowCtl.pending.length, 0);
+  slowCtl.destroy(false);
+
   // Defense in depth: a meta line that ever leaks into pane text is stripped.
   const leaked = splitFusedCapture('line1\nstale\x1f9,9,99,99,1700000000,5,0\nline2\n\x1f1,2,80,24,1700000000,240,0\n');
   assert.strictEqual(leaked.meta, '1,2,80,24,1700000000,240,0');
@@ -1775,7 +1794,12 @@ async function run() {
   assert.match(webviewSource, /m\.type === 'handoffDetails'/);
   assert.match(webviewSource, /m\.type === 'handoffChecking'/);
   assert.match(webviewSource, /hist \$\{history\}/);
-  assert.match(webviewSource, /lag \$\{Math\.round\(latencyMs\)\}ms/);
+  assert.match(webviewSource, /capture lag \$\{Math\.round\(latencyMs\)\} ms/,
+    'latency is surfaced as a ring on the dot with the figure in its tooltip');
+  assert.match(webviewSource, /classList\.toggle\('lag', lagging\)/);
+  assert.match(webviewSource, /class="chip"/, 'footer facts render as chips');
+  assert.match(webviewSource, /isAltDigit\(e\)/, 'Alt+1..9 switches tabs and is never typed into tmux');
+  assert.match(webviewSource, /app\.style\.setProperty\('--agent-accent'/, 'the chrome follows the active agent colour');
   assert.match(webviewSource, /state-history|historyMode/);
   assert.match(source, /value="continue">Continue task/);
   assert.match(webviewSource, /compositionend/);
@@ -2092,6 +2116,41 @@ async function run() {
     const blockRes = JSON.parse(written.trim());
     assert.strictEqual(blockRes.ok, false);
     assert.strictEqual(blockRes.error, 'agent_blocked');
+    provider.agentState.claude.status = 'idle';
+
+    // --until blocked is the documented word for needs-input: it must resolve.
+    written = '';
+    provider.writerAgent = null; // a Pair Mode lock left in workspaceState by an earlier block
+    provider.handleIpcRequest({ action: 'prompt', agent: 'claude', text: 'hi', wait: true, until: 'blocked', timeout: 5000 }, mockSocket);
+    await waitForFlush(provider, 'claude');
+    provider.setAgentStatus('claude', 'needs-input');
+    const blockedWait = JSON.parse(written.trim());
+    assert.strictEqual(blockedWait.ok, true, `--until blocked resolves on needs-input: ${written}`);
+    assert.strictEqual(blockedWait.status, 'needs-input');
+    assert.strictEqual(blockedWait.blocked, true);
+
+    // A caller waiting for `done` is told at once when the agent stops to ask a
+    // question, instead of sitting out the whole timeout.
+    written = '';
+    provider.agentState.claude.status = 'idle';
+    provider.handleIpcRequest({ action: 'prompt', agent: 'claude', text: 'hi', wait: true, until: 'done', timeout: 5000 }, mockSocket);
+    await waitForFlush(provider, 'claude');
+    provider.setAgentStatus('claude', 'needs-input');
+    const doneWait = JSON.parse(written.trim());
+    assert.strictEqual(doneWait.ok, true, '--until done resolves when the agent blocks on a dialog');
+    assert.strictEqual(doneWait.blocked, true);
+
+    // The plain case still reports done.
+    written = '';
+    provider.agentState.claude.status = 'idle';
+    provider.handleIpcRequest({ action: 'prompt', agent: 'claude', text: 'hi', wait: true, until: 'done', timeout: 5000 }, mockSocket);
+    await waitForFlush(provider, 'claude');
+    provider.setAgentStatus('claude', 'done');
+    const plainDone = JSON.parse(written.trim());
+    assert.strictEqual(plainDone.ok, true);
+    assert.strictEqual(plainDone.status, 'done');
+    assert.strictEqual(plainDone.blocked, false);
+    assert.strictEqual((provider._statusListeners || []).length, 0, 'wait listeners are removed once resolved');
     provider.agentState.claude.status = 'idle';
 
     provider.closeIpcServer();

@@ -33,6 +33,8 @@ Send instructions to a neighboring agent and optionally wait until it finishes p
 agentmux prompt codex "Run pytest and verify the new regression tests" --wait --until done --timeout 120000
 ```
 
+`--until done` also returns as soon as the agent stops to ask a question: the reply then carries `"blocked": true` and `status: "needs-input"`, so answer (or cancel) the dialog before prompting again instead of waiting out the timeout. `--until blocked` waits only for that dialog state.
+
 If the target agent is currently paused on a dialog or question prompt (`needs-input`), AgentMux prevents collision and refuses to overwrite the dialog unless `--raw` is passed.
 
 ## MCP Server Integration

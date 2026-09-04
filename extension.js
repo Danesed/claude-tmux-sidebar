@@ -34,6 +34,9 @@ let tmuxInputTimeoutMs = 10000;
 // frame captures so a slow server degrades presence instead of stalling it.
 const TMUX_PROBE_TIMEOUT_MS = 8000;
 const TMUX_CAPTURE_TIMEOUT_MS = 20000;
+// A control-mode command unanswered for this long means the client itself is
+// wedged (not just one slow command): tear it down and fall back to execFile.
+const CONTROL_WEDGED_MS = 10000;
 
 // Test seam (see test/test.js): shorten the bounds so timeout paths run fast.
 function setTmuxTimeouts(execMs, inputMs) {
@@ -157,7 +160,7 @@ class TmuxControlClient {
     return parked.ok;
   }
 
-  exec(args) {
+  exec(args, timeoutMs = 0) {
     if (!this.usable()) return Promise.resolve({ ok: false, out: '', transportFailed: true });
     // One command per control line. A single line always yields exactly one
     // %begin/%end block, on every tmux version. ';'-fused lines do NOT: some
@@ -174,9 +177,23 @@ class TmuxControlClient {
     const parts = commands.length;
     return new Promise((resolve) => {
       const entry = {
-        remaining: parts, ok: true, out: '', resolve,
-        timer: setTimeout(() => this.destroy(true, { timedOut: true }), 10000),
+        remaining: parts, ok: true, out: '', resolve, softTimer: null,
+        timer: setTimeout(() => this.destroy(true, { timedOut: true }), CONTROL_WEDGED_MS),
       };
+      // Two clocks. The caller's own budget (a 1.5s probe, a 3s capture) only
+      // gives up on THIS command: the entry answers `timedOut` now and its
+      // late reply is swallowed when it arrives, so the queue stays in step
+      // and the client keeps serving everyone else. Only the long watchdog
+      // above says "the client itself is wedged" and tears it down.
+      if (timeoutMs > 0 && timeoutMs < CONTROL_WEDGED_MS) {
+        entry.softTimer = setTimeout(() => {
+          entry.softTimer = null;
+          if (!entry.resolve) return;
+          const settle = entry.resolve;
+          entry.resolve = null;
+          settle({ ok: false, out: '', timedOut: true });
+        }, timeoutMs);
+      }
       for (let i = 0; i < parts; i++) this.pending.push(entry);
       const lines = commands
         .map((cmd) => cmd.map((a) => TmuxControlClient.quoteArg(a)).join(' '))
@@ -209,7 +226,10 @@ class TmuxControlClient {
         entry.remaining--;
         if (entry.remaining === 0) {
           if (entry.timer) clearTimeout(entry.timer);
-          entry.resolve({ ok: entry.ok, out: entry.out });
+          if (entry.softTimer) clearTimeout(entry.softTimer);
+          // null: the caller's soft timeout already answered; this is the late
+          // reply, consumed here only to keep the block queue aligned.
+          if (entry.resolve) entry.resolve({ ok: entry.ok, out: entry.out });
         }
         return;
       }
@@ -243,10 +263,11 @@ class TmuxControlClient {
       if (!entry || settled.has(entry)) return;
       settled.add(entry);
       if (entry.timer) clearTimeout(entry.timer);
+      if (entry.softTimer) clearTimeout(entry.softTimer);
       // transportFailed distinguishes "the control client died" from a real
       // tmux error reply, so callers can retry over execFile instead of
       // treating a wedged transport as a missing session or failed input.
-      entry.resolve({ ok: false, out: '', transportFailed: true, ...(extra || {}) });
+      if (entry.resolve) entry.resolve({ ok: false, out: '', transportFailed: true, ...(extra || {}) });
     };
     if (this.current) flush(this.current.entry);
     for (const entry of this.pending) flush(entry);
@@ -286,7 +307,7 @@ function tmux(args, timeoutMs) {
     // NOT retried: a command that died in flight may or may not have executed,
     // and replaying it would double-type into the agent's prompt. Callers
     // receive transportFailed/timedOut and preserve the text instead.
-    return controlClient.exec(args).then((result) => (
+    return controlClient.exec(args, timeoutMs).then((result) => (
       result.transportFailed && TRANSPORT_RETRY_SAFE.has(args[0]) ? tmuxExecFile(args, timeoutMs) : result
     ));
   }
@@ -386,11 +407,13 @@ class PipeTap {
   }
 }
 
-// timeout is optional (0/undefined = none) so a probe of a third-party CLI can
-// never wedge a one-shot path; existing callers keep their old behaviour.
-function runFile(command, args, cwd, timeout) {
+// Every one-shot child (git at turn edges, a CLI's session list) is bounded:
+// callers pass their own budget, everything else gets a generous default so a
+// hung process can never pin a promise — and the status it feeds — forever.
+const RUN_FILE_DEFAULT_TIMEOUT_MS = 30000;
+function runFile(command, args, cwd, timeout = RUN_FILE_DEFAULT_TIMEOUT_MS) {
   return new Promise((resolve) => {
-    execFile(command, args, { cwd, timeout, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
+    execFile(command, args, { cwd, timeout: timeout || undefined, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
       resolve({ ok: !err, out: stdout || '', err: stderr || '' });
     });
   });
@@ -1375,6 +1398,23 @@ function normalizedWorkspace() {
   return _workspaceNorm;
 }
 
+// Minimum spacing between two screen-rule evaluations for frames whose diff
+// touched only a row or two (see updateActivity).
+const DETECT_MIN_INTERVAL_MS = 150;
+// A static screen still gets its cursor/uptime meta refreshed, but not on every
+// 80–120ms tick: at most this often unless the frame or the meta changed.
+const META_HEARTBEAT_MS = 1000;
+// Longest single IPC request line accepted on the local socket (a prompt is
+// capped at 30k chars downstream anyway).
+const IPC_MAX_LINE_BYTES = 1024 * 1024;
+// Paste payloads travel as one tmux argv string; Linux caps a single argument
+// at 128 KiB (MAX_ARG_STRLEN), so larger pastes are refused with a reason
+// rather than failing deep inside tmux with E2BIG.
+const PASTE_MAX_BYTES = 100 * 1024;
+// Fewest milliseconds between two per-turn git diffs for one agent: a flapping
+// detection must not turn into a stream of `git status` on a large repo.
+const GIT_DELTA_MIN_INTERVAL_MS = 5000;
+
 // How long a verified (name, ready) session identity may be reused by the input
 // hot path before it must be re-verified against tmux. The presence loop
 // refreshes it every ~900ms, so entries are normally always fresh.
@@ -1468,6 +1508,17 @@ function stripAnsi(value) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// What an IPC/MCP `--until` word means in terms of internal statuses. The CLI
+// and the skill say "blocked" where the state machine says "needs-input", and a
+// caller waiting for `done` must also be told when the agent stopped to ask a
+// question — otherwise it sits out the whole timeout in front of an idle prompt.
+function ipcWaitTargets(until) {
+  const word = String(until || 'done').trim().toLowerCase();
+  if (word === 'blocked' || word === 'needs-input' || word === 'needs_input') return new Set(['needs-input']);
+  if (word === 'done') return new Set(['done', 'idle', 'needs-input']);
+  return new Set([word]);
 }
 
 function fmtTokens(n) {
@@ -2996,6 +3047,12 @@ class ClaudeTmuxView {
       socket.setEncoding('utf8');
       socket.on('data', (chunk) => {
         buf += chunk;
+        // A client that never sends a newline must not grow this forever.
+        if (buf.length > IPC_MAX_LINE_BYTES) {
+          try { socket.write(JSON.stringify({ ok: false, error: 'request_too_large' }) + '\n'); } catch { /* gone */ }
+          socket.destroy();
+          return;
+        }
         const lines = buf.split('\n');
         buf = lines.pop();
         for (const line of lines) {
@@ -3126,55 +3183,66 @@ class ClaudeTmuxView {
           socket.write(JSON.stringify({ ok: false, error: 'empty_prompt' }) + '\n');
           return;
         }
-        await this.queueInput(agent, text + (req.raw ? '' : '\r'), true, false);
-
-        if (!req.wait) {
-          socket.write(JSON.stringify({ ok: true, agent, sent: true }) + '\n');
-          return;
-        }
-
-        const targetStatus = req.until || 'done';
+        // The listener is registered BEFORE the input goes out: a fast agent
+        // (or a hook firing during the send-keys await) must not slip a
+        // transition past a waiter that is not listening yet.
+        const wanted = req.wait ? ipcWaitTargets(req.until) : null;
         const timeoutMs = Math.max(1000, Math.min(300000, parseInt(req.timeout, 10) || 60000));
         const start = Date.now();
         let resolved = false;
-
+        let timer = null;
+        let onStatus = null;
         const cleanup = () => {
           resolved = true;
-          clearTimeout(timer);
+          if (timer) clearTimeout(timer);
           const idx = (this._statusListeners || []).indexOf(onStatus);
           if (idx >= 0) this._statusListeners.splice(idx, 1);
         };
-
-        const timer = setTimeout(() => {
-          if (resolved) return;
+        const finish = (status) => {
           cleanup();
+          const frame = state.lastFrame || state.backgroundFrame || '';
+          const lines = stripAnsi(frame).split('\n').slice(-30);
           socket.write(JSON.stringify({
-            ok: false,
-            error: 'timeout',
+            ok: true,
             agent,
-            status: state.status,
+            status,
+            // A caller waiting for `done` learns at once when the agent stopped
+            // to ask a question instead of burning the whole timeout.
+            blocked: status === 'needs-input',
+            output: lines.join('\n'),
             durationMs: Date.now() - start
           }) + '\n');
-        }, timeoutMs);
-
-        const onStatus = ({ agent: a, status }) => {
-          if (resolved || a !== agent) return;
-          if (status === targetStatus || (targetStatus === 'done' && status === 'idle')) {
+        };
+        if (wanted) {
+          onStatus = ({ agent: a, status }) => {
+            if (resolved || a !== agent) return;
+            if (wanted.has(status)) finish(status);
+          };
+          this._statusListeners = this._statusListeners || [];
+          this._statusListeners.push(onStatus);
+          timer = setTimeout(() => {
+            if (resolved) return;
             cleanup();
-            const frame = state.lastFrame || state.backgroundFrame || '';
-            const lines = stripAnsi(frame).split('\n').slice(-30);
             socket.write(JSON.stringify({
-              ok: true,
+              ok: false,
+              error: 'timeout',
               agent,
-              status,
-              output: lines.join('\n'),
+              status: state.status,
               durationMs: Date.now() - start
             }) + '\n');
-          }
-        };
+          }, timeoutMs);
+        }
 
-        this._statusListeners = this._statusListeners || [];
-        this._statusListeners.push(onStatus);
+        const delivered = await this.queueInput(agent, text + (req.raw ? '' : '\r'), true, false);
+        if (delivered === false) {
+          cleanup();
+          socket.write(JSON.stringify({ ok: false, error: 'not_delivered', agent }) + '\n');
+          return;
+        }
+        if (!wanted) {
+          socket.write(JSON.stringify({ ok: true, agent, sent: true }) + '\n');
+          return;
+        }
         break;
       }
 
@@ -3280,6 +3348,8 @@ class ClaudeTmuxView {
         // Claude Code writes its conversation summary into the pane title;
         // free for us to show, since presence already reads it every poll.
         title: state.paneTitle || '',
+        // The question a background agent is stuck on, for the tab tooltip.
+        peek: state.status === 'needs-input' && agent !== this.activeAgent ? this.peekLines(state) : '',
       };
     }
     this.view.webview.postMessage({
@@ -3295,6 +3365,19 @@ class ClaudeTmuxView {
       arbiterPhase: this.arbiter?.phase || null,
     });
     this.updateStatusBar();
+  }
+
+  // The last few non-blank screen lines of a pane, plain text, for tooltips.
+  // Cached on the frame identity: postAgents can run several times a second
+  // while a dialog is up, and the answer only changes when the frame does.
+  peekLines(state) {
+    const frame = state.backgroundFrame || state.lastFrame || '';
+    if (!frame) return '';
+    if (state._peekFrame === frame) return state._peekText;
+    const kept = stripAnsi(frame).split('\n').map((l) => l.trim()).filter(Boolean);
+    state._peekFrame = frame;
+    state._peekText = kept.slice(-4).map((l) => l.slice(0, 100)).join('\n');
+    return state._peekText;
   }
 
   // One consolidated status bar item: the active agent's live state, every
@@ -3455,6 +3538,8 @@ class ClaudeTmuxView {
       const cwd = workspaceFolder();
       const state = this.agentState[agent];
       if (!cwd || !state.gitBase) return;
+      if (state.gitDeltaAt && Date.now() - state.gitDeltaAt < GIT_DELTA_MIN_INTERVAL_MS) return;
+      state.gitDeltaAt = Date.now();
       const now = await this.gitNumstat(cwd);
       if (!now) return;
       const base = state.gitBase;
@@ -3563,35 +3648,29 @@ class ClaudeTmuxView {
     }
   }
 
-  updateActivity(agent, frame, changed) {
+  // `minor` marks a frame whose diff touched one or two rows — a spinner tick,
+  // a clock, a token counter. Running the full rule set on every one of those
+  // (8×/s on a busy agent) was the extension host's biggest CPU line item;
+  // such frames are now examined at most every DETECT_MIN_INTERVAL_MS, and the
+  // last one skipped is always examined by the next pass, so a dialog that
+  // appears in a "minor" frame is still seen within one tick.
+  updateActivity(agent, frame, changed, minor = false) {
     const state = this.agentState[agent];
     const now = Date.now();
     if (changed) {
-      const detected = detectState(agent, detectionContext(frame, state.paneTitle));
-      state.lastDetection = detected; // surfaced by the Explain command
-      // A viewer or picker is covering the pane: this frame describes the
-      // chrome, not the agent. Freeze — and keep freezing once the user stops
-      // scrolling, or the decay below would walk a working agent down to idle
-      // behind an open transcript.
-      if (detected.status === 'hold') {
-        state.detectionHold = true;
-        state.lastChange = now;
-        return;
-      }
-      state.detectionHold = false;
-      if (detected.status === 'needs-input') {
-        this.setAgentStatus(agent, 'needs-input');
-        return;
-      }
       state.lastChange = now;
-      if (detected.status === 'working') {
-        state.lastActivity = now;
-        this.setAgentStatus(agent, 'working');
+      if (minor && now - (state.detectedAt || 0) < DETECT_MIN_INTERVAL_MS) {
+        if (state.status === 'working') state.lastActivity = now;
+        state.pendingDetectFrame = frame;
         return;
       }
-      if (state.status === 'working') {
-        state.lastActivity = now;
-      }
+      this.applyFrameDetection(agent, frame, now);
+      return;
+    }
+    if (state.pendingDetectFrame != null) {
+      const pending = state.pendingDetectFrame;
+      state.pendingDetectFrame = null;
+      this.applyFrameDetection(agent, pending, now);
       return;
     }
     if (state.detectionHold) return; // frozen until the covering UI goes away
@@ -3599,6 +3678,35 @@ class ClaudeTmuxView {
       this.setAgentStatus(agent, 'done');
     } else if (state.status === 'done' && now - state.statusSince > 3500) {
       this.setAgentStatus(agent, 'idle');
+    }
+  }
+
+  applyFrameDetection(agent, frame, now) {
+    const state = this.agentState[agent];
+    state.detectedAt = now;
+    state.pendingDetectFrame = null;
+    const detected = detectState(agent, detectionContext(frame, state.paneTitle));
+    state.lastDetection = detected; // surfaced by the Explain command
+    // A viewer or picker is covering the pane: this frame describes the
+    // chrome, not the agent. Freeze — and keep freezing once the user stops
+    // scrolling, or the decay below would walk a working agent down to idle
+    // behind an open transcript.
+    if (detected.status === 'hold') {
+      state.detectionHold = true;
+      return;
+    }
+    state.detectionHold = false;
+    if (detected.status === 'needs-input') {
+      this.setAgentStatus(agent, 'needs-input');
+      return;
+    }
+    if (detected.status === 'working') {
+      state.lastActivity = now;
+      this.setAgentStatus(agent, 'working');
+      return;
+    }
+    if (state.status === 'working') {
+      state.lastActivity = now;
     }
   }
 
@@ -3631,33 +3739,34 @@ class ClaudeTmuxView {
         const info = await agentSessionInfo(agent, name);
         return { agent, name, info };
       }));
-      for (const { agent, name, info } of sessionInfos) {
+      const hostname = os.hostname();
+      const hooksOn = cfg().get('stateHooks') !== false;
+      const telemetryOn = cfg().get('telemetry') !== false;
+      const stopped = [];
+      // Per-agent follow-up (transcript tail, background capture) touches only
+      // that agent's state, so it runs concurrently: N agents used to mean N
+      // sequential tmux round-trips on top of the active tick, every 900ms.
+      await Promise.all(sessionInfos.map(async ({ agent, name, info }) => {
         const state = this.agentState[agent];
         // The server was too slow to answer: keep everything as it was and let
         // the next pass re-verify. Marking the session absent here is what used
         // to flash "no session" overlays and drop tabs under multi-window load.
-        if (info.transient) continue;
+        if (info.transient) return;
         this.rememberSession(agent, cwd, name, info.ready);
         const present = info.ready;
         // The pane title came free with the presence read. Hosts that never set
         // one leave it at the machine name, which is noise, not a summary.
-        const paneTitle = present && info.title && info.title !== os.hostname() ? info.title.slice(0, 120) : '';
+        const paneTitle = present && info.title && info.title !== hostname ? info.title.slice(0, 120) : '';
         if (paneTitle !== state.paneTitle) { state.paneTitle = paneTitle; changed = true; }
         const paneMode = present ? (info.paneMode || '') : '';
         if (paneMode !== state.paneMode) { state.paneMode = paneMode; changed = true; }
-        if (present && info.hookState && cfg().get('stateHooks') !== false) {
+        if (present && info.hookState && hooksOn) {
           this.applyHookState(agent, info.hookState, info.hookTool);
         } else if (present) {
           this.applyTitleState(agent);
         }
-        if (present && cfg().get('telemetry') !== false) {
-          const stats = await this.tails[agent].poll(cwd);
-          state.telemetry = stats;
-          const sig = stats ? `${stats.turns}|${stats.inTokens}|${stats.outTokens}|${stats.lastTool}|${stats.model}` : '';
-          if (sig !== state._telemetrySig) { state._telemetrySig = sig; changed = true; }
-        }
         if (state.present !== present) {
-          const stopped = state.present && !present;
+          const wasPresent = state.present;
           state.present = present;
           state.lastFrame = null;
           this.resetLiveFrame(agent);
@@ -3665,38 +3774,46 @@ class ClaudeTmuxView {
           state.historyPending = false;
           changed = true;
           if (!present) this.setAgentStatus(agent, 'idle');
-          if (stopped) {
+          if (wasPresent && !present) {
             this.eventLog.append({ type: 'session', agent, action: 'stopped' });
-            vscode.window.showInformationMessage(`${AGENTS[agent].label} stopped in this workspace.`, 'Start again')
-              .then((choice) => { if (choice === 'Start again') this.startSession(agent); });
+            stopped.push(agent);
           } else if (present) {
             this.eventLog.append({ type: 'session', agent, action: 'detected' });
           }
         }
+        if (!present) return;
         const now = Date.now();
         const backgroundDue = state.status === 'working' || now - state.backgroundPollAt >= 1800;
-        if (this.view.visible && present && agent !== this.activeAgent && backgroundDue) {
-          state.backgroundPollAt = now;
-          const tail = await tmux([
+        const captureBackground = this.view.visible && agent !== this.activeAgent && backgroundDue;
+        if (captureBackground) state.backgroundPollAt = now;
+        const [stats, tail] = await Promise.all([
+          telemetryOn ? this.tails[agent].poll(cwd) : null,
+          captureBackground ? tmux([
             'capture-pane', '-p', '-e', '-t', tmuxPaneTarget(name),
             ';', 'display-message', '-p', '-t', tmuxPaneTarget(name), META_SENTINEL + META_FORMAT,
-          ]);
-          if (tail.ok) {
-            const { frame: bgFrame, meta: bgMeta } = splitFusedCapture(tail.out);
-            const frameChanged = bgFrame !== state.backgroundFrame;
-            state.backgroundFrame = bgFrame;
-            this.updateActivity(agent, bgFrame, frameChanged);
-            // This capture is already paid for — ship it, with its cursor meta,
-            // to the webview's tab cache so switching paints an at-most-
-            // seconds-old frame with a correctly placed cursor instantly.
-            state.lastFrame = bgFrame;
-            if (bgMeta != null) state.lastMeta = bgMeta;
-            if (frameChanged && this.view?.visible) {
-              this.view.webview.postMessage({ type: 'bgFrame', agent, frame: bgFrame, meta: bgMeta });
-            }
+          ]) : null,
+        ]);
+        if (telemetryOn) {
+          state.telemetry = stats;
+          const sig = stats ? `${stats.turns}|${stats.inTokens}|${stats.outTokens}|${stats.lastTool}|${stats.model}` : '';
+          if (sig !== state._telemetrySig) { state._telemetrySig = sig; changed = true; }
+        }
+        if (tail && tail.ok && state.present) {
+          const { frame: bgFrame, meta: bgMeta } = splitFusedCapture(tail.out);
+          const frameChanged = bgFrame !== state.backgroundFrame;
+          state.backgroundFrame = bgFrame;
+          this.updateActivity(agent, bgFrame, frameChanged);
+          // This capture is already paid for — ship it, with its cursor meta,
+          // to the webview's tab cache so switching paints an at-most-
+          // seconds-old frame with a correctly placed cursor instantly.
+          state.lastFrame = bgFrame;
+          if (bgMeta != null) state.lastMeta = bgMeta;
+          if (frameChanged && this.view?.visible && agent !== this.activeAgent) {
+            this.view.webview.postMessage({ type: 'bgFrame', agent, frame: bgFrame, meta: bgMeta });
           }
         }
-      }
+      }));
+      if (stopped.length) this.notifyStopped(stopped);
 
       if (this.writerAgent && !this.agentState[this.writerAgent].present) {
         this.writerAgent = null;
@@ -3727,6 +3844,21 @@ class ClaudeTmuxView {
     } finally {
       this._presenceRunning = false;
     }
+  }
+
+  // One toast per presence pass, not one per agent: a tmux server going away
+  // takes every session with it, and seven "stopped" notifications stacked on
+  // top of each other say less than one line that names them all.
+  notifyStopped(agents) {
+    const labels = agents.map((agent) => AGENTS[agent]?.label || agent);
+    if (agents.length === 1) {
+      vscode.window.showInformationMessage(`${labels[0]} stopped in this workspace.`, 'Start again')
+        .then((choice) => { if (choice === 'Start again') this.startSession(agents[0]); });
+      return;
+    }
+    vscode.window.showInformationMessage(
+      `${labels.length} agents stopped in this workspace: ${labels.join(', ')}.`, 'Manage sessions…'
+    ).then((choice) => { if (choice) vscode.commands.executeCommand('claudeTmux.killPick'); });
   }
 
   // ---- push-driven refresh (control-mode subscriptions or pipe tap) ---------
@@ -4333,6 +4465,7 @@ class ClaudeTmuxView {
       return 'tmux';
     };
     const bytes = Buffer.from(data, 'utf8');
+    if (paste && bytes.length > PASTE_MAX_BYTES) return fail('too-large', data, false);
     if (paste && !data.includes('\0')) {
       const bufferName = `claude-tmux-${process.pid}-${crypto.randomBytes(6).toString('hex')}`;
       const loaded = await tmuxInput(['set-buffer', '-b', bufferName, '--', data]);
@@ -4797,7 +4930,7 @@ class ClaudeTmuxView {
       return;
     }
     const state = this.agentState[agent];
-    const cwdNorm = normalizedPath(cwd);
+    const cwdNorm = normalizedWorkspace();
     const cachedEntry = this.cachedSessionEntry(agent, cwdNorm);
     const s = cachedEntry ? cachedEntry.name : await sessionName(agent);
     const configuredScrollback = cfg().get('scrollbackLines');
@@ -4857,20 +4990,25 @@ class ClaudeTmuxView {
     if (captureHistory) {
       state.historyPending = false;
     } else {
+      let minorChange = false;
       if (frameChanged) {
         this._lastFrameChangeAt = Date.now();
         const newLines = frameOut.split('\n');
-        if (visible && !force && !historyMode && state.lastFrameLines) {
+        if (!historyMode && state.lastFrameLines) {
           const changes = diffFrameLines(state.lastFrameLines, newLines, frameOut.length);
-          if (changes) delta = { baseSeq: state.frameSeq, seq: state.frameSeq + 1, changes };
+          if (changes) {
+            minorChange = changes.length <= 2;
+            if (visible && !force) delta = { baseSeq: state.frameSeq, seq: state.frameSeq + 1, changes };
+          }
         }
         state.frameSeq++;
         state.lastFrameLines = newLines;
       }
       state.lastLiveFrame = frameOut;
       state.lastFrame = frameOut;
-      this.updateActivity(agent, frameOut, frameChanged);
+      this.updateActivity(agent, frameOut, frameChanged, minorChange);
     }
+    const metaChanged = fusedMeta != null && fusedMeta !== state.lastMeta;
     if (fusedMeta != null) state.lastMeta = fusedMeta; // keep the switch cache fresh even when hidden
 
     if (!visible) {
@@ -4893,10 +5031,18 @@ class ClaudeTmuxView {
       metaText = metaParts.join(',');
     }
 
-    // Always send a tiny status (keeps the live dot + cursor + footer fresh even
-    // on a static screen). Content travels as changed lines when the change is
-    // small, as the full frame otherwise; meta is always frame-fresh.
+    // Content travels as changed lines when the change is small, as the full
+    // frame otherwise. A static screen still gets a tiny status message (live
+    // dot, cursor, uptime) — but not on every tick: unless the frame, the
+    // meta or the pane mode moved, at most one heartbeat per META_HEARTBEAT_MS.
+    // That is the difference between ~10 and ~1 webview messages per second
+    // while you read an idle agent.
     const fullFrame = captureHistory ? frameOut : (!historyMode && changed && !delta ? frameOut : null);
+    const now = Date.now();
+    const heartbeatDue = now - (state.lastPostAt || 0) >= META_HEARTBEAT_MS;
+    if (fullFrame == null && !delta && !metaChanged && !heartbeatDue && state.lastPostedPaneMode === state.paneMode) return;
+    state.lastPostAt = now;
+    state.lastPostedPaneMode = state.paneMode;
     this.view.webview.postMessage({
       type: 'frame',
       agent,
@@ -6514,8 +6660,9 @@ class ClaudeTmuxView {
         ? `
         <button role="menuitem" data-action="removeCustomAgent"><i class="agent-swatch swatch-none" aria-hidden="true"></i>Remove a custom agent…</button>`
         : '');
-    const launcherHtml = roster.filter((a) => a.canStart).map((a) =>
-      `\n            <button data-launch-agent="${esc(a.id)}">${swatch(a)}Start ${esc(a.label)}</button>`).join('');
+    const launcherHtml = roster.filter((a) => a.canStart).map((a, i) =>
+      `\n            <button data-launch-agent="${esc(a.id)}">${swatch(a)}<span class="launch-label">Start ${esc(a.label)}</span>`
+      + (i < 9 ? `<kbd aria-hidden="true">${i + 1}</kbd>` : '') + '</button>').join('');
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
