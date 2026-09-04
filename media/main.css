@@ -14,8 +14,8 @@ html, body {
   width: 100vw;
   overflow: hidden;
   /* The active agent's product colour as "r, g, b" (set by the script on
-     every switch). Cursor, focus ring, state rail and active tab all derive
-     from this one value, so the whole chrome follows the agent you are in. */
+     every switch). The cursor and the footer chips derive from it, so a glance
+     says which agent you are typing into. */
   --agent-accent: 128, 128, 128;
   --c-working: #58c7d5;
   --c-done: var(--vscode-testing-iconPassed, #3fb950);
@@ -79,13 +79,13 @@ html, body {
 .agent-tab.active {
   color: var(--vscode-foreground, #ddd);
   border-bottom-color: rgb(var(--agent-accent, 14,99,156));
-  /* A wash of the agent's own colour rather than the generic selection tint:
-     the active tab and the rail below it read as one object. */
+  /* A wash of the agent's own colour rather than the generic selection tint. */
   background: rgba(var(--agent-accent, 128,128,128), .12);
 }
 .agent-tab:focus-visible { outline: 1px solid rgba(var(--agent-accent, 14,99,156), .8); outline-offset: -1px; }
-/* Attention on a narrow tab: the whole underline breathes, not only the dot. */
-.agent-tab.attention-needs-input { border-bottom-color: var(--c-input); animation: railBreath 2.2s ease-in-out infinite; }
+/* Attention on a narrow tab, where the label is already gone: the underline
+   takes the state colour too (steady — the dot is the only thing that moves). */
+.agent-tab.attention-needs-input { border-bottom-color: var(--c-input); }
 .agent-tab.attention-done { border-bottom-color: var(--c-done); }
 .agent-state {
   width: 6px;
@@ -189,32 +189,12 @@ html, body {
 #launcher-actions button { text-align: left; }
 
 /* ---- terminal mirror area ------------------------------------------------ */
-/* ---- state rail ---------------------------------------------------------
-   The mirror's left border is a 2px rail in the active agent's colour that
-   says what the agent is doing without looking for the dot: it breathes while
-   working, turns amber and holds while a question waits, and flashes green
-   once when a turn ends. A border on the scroll container never scrolls away
-   and costs nothing to paint; #app carries the state as a class. */
 #screen-wrap {
   position: relative;
   flex: 1 1 auto;
   overflow: auto;
   min-height: 0;
   scrollbar-color: var(--vscode-scrollbarSlider-background, #5558) transparent;
-  border-left: 2px solid rgba(var(--agent-accent, 128,128,128), .35);
-  transition: border-color .25s ease;
-}
-#app.st-working #screen-wrap { animation: railBreath 1.8s ease-in-out infinite; }
-#app.st-needs-input #screen-wrap { border-left-color: var(--c-input); }
-#app.st-done #screen-wrap { border-left-color: var(--c-done); }
-#app.turn-end #screen-wrap { animation: railFlash .8s ease-out 1; }
-@keyframes railBreath {
-  0%, 100% { border-left-color: rgba(var(--agent-accent, 128,128,128), .4); }
-  50% { border-left-color: rgba(var(--agent-accent, 128,128,128), 1); }
-}
-@keyframes railFlash {
-  0% { border-left-color: var(--c-done); box-shadow: inset 6px 0 12px -8px rgba(63,185,80,.9); }
-  100% { border-left-color: rgba(var(--agent-accent, 128,128,128), .35); box-shadow: inset 0 0 0 0 rgba(63,185,80,0); }
 }
 
 #terminal {
@@ -255,8 +235,8 @@ html, body {
   contain: layout inline-size;
 }
 
-/* subtle focus ring, in the agent's colour, so you know keystrokes are captured */
-#screen:focus { box-shadow: inset 0 0 0 1px rgba(var(--agent-accent, 14,99,156), .55); }
+/* No frame around the mirror: the blinking cursor (only drawn while focused)
+   is the one cue that keystrokes are captured. */
 #screen.input-locked { cursor: default; opacity: .88; }
 
 /* The cursor wears the active agent's colour: with several tabs open, a glance
@@ -803,5 +783,5 @@ kbd {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .agent-state, .dot, #cursor, #screen-wrap, .agent-tab { animation: none !important; }
+  .agent-state, .dot, #cursor, .agent-tab { animation: none !important; }
 }

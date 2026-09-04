@@ -740,8 +740,8 @@
     });
     screen.setAttribute('aria-label', `${cap(agent)} tmux terminal mirror`);
     screen.setAttribute('aria-labelledby', `tab-${agent}`);
-    // One variable, the whole chrome follows: cursor, focus ring, state rail
-    // and active tab all read --agent-accent from #app.
+    // One variable, the chrome follows: the cursor and the footer chips read
+    // --agent-accent from #app.
     const accent = TAB_EL[agent]?.style.getPropertyValue('--agent-accent');
     if (accent) app.style.setProperty('--agent-accent', accent);
     exitVirtual();
@@ -768,7 +768,6 @@
     }
     setScrollTop(scrollState[agent].top);
     applyPairLock();
-    applyAppState(agentPresence[agent]?.status || 'idle');
   }
 
   tabs.forEach((tab) => {
@@ -948,26 +947,6 @@
     }
     const activeStatus = agentPresence[activeAgent].status || 'idle';
     if (agentPresence[activeAgent].present) setStatus('', activeStatus, STATE_LABELS[activeStatus] || activeStatus);
-    applyAppState(activeStatus);
-  }
-
-  // #app carries the active agent's state as a class so pure CSS can paint the
-  // peripheral cues (left rail, cursor tint, turn-end flash). One className
-  // write, only when the state actually changes.
-  let appStateClass = '';
-  function applyAppState(status) {
-    const next = `st-${status || 'idle'}`;
-    if (next === appStateClass) return;
-    const finished = appStateClass === 'st-working' && next !== 'st-working';
-    if (appStateClass) app.classList.remove(appStateClass);
-    app.classList.add(next);
-    appStateClass = next;
-    if (finished) {
-      // Restart the one-shot flash even if the class is already there.
-      app.classList.remove('turn-end');
-      void app.offsetWidth;
-      app.classList.add('turn-end');
-    }
   }
 
   // The peer is only a real choice when more than one other agent exists;

@@ -25,7 +25,7 @@ then:
 2. **Type** — click the mirror, type a prompt, press Enter. Keys must land on
    the first try; the status dot goes `working` immediately, the tab pulses.
 3. **Second agent** — start another one. Switching tabs paints the cached
-   frame instantly; the accent colour of tabs, cursor and left rail follows
+   frame instantly; the accent colour of the active tab and the cursor follows
    the active agent.
 4. **Scrollback** — wheel up at the top of the live screen: history loads and
    the view stays where you scrolled; wheel back down returns to live mode.

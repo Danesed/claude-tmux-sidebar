@@ -25,7 +25,7 @@ Reliability, speed and a lighter look. No new dependencies, no extra tmux proces
 
 ### Look
 
-- **The chrome follows the agent.** One CSS variable, set on switch, drives the cursor, the focus ring, the active tab wash and a new **2 px state rail** on the mirror's left edge: it breathes in the agent's colour while working, holds amber while a question waits, and flashes green once when a turn ends — state in peripheral vision, without hunting for the dot.
+- **The cursor wears the agent's colour.** One CSS variable, set on switch, tints the cursor, the active tab wash and the footer chips: with several tabs open, a glance says which agent you are typing into. The mirror itself has no frame or focus ring any more — the blinking cursor is the one cue that keys are captured.
 - **Footer as chips.** `80×24`, `up 2h`, `↑12k ↓3k` are hairline pills instead of one dotted sentence; capture latency is an amber ring on the status dot with the figure in its tooltip.
 - **Peek at the question.** Hovering a background agent's amber tab shows the last lines of the dialog it is stuck on.
 - **Keyboard.** `Alt+1…9` switches tabs (by physical key, so it works with Option on macOS); on the launcher card the bare digit starts the Nth agent, with keycaps drawn on the buttons.
