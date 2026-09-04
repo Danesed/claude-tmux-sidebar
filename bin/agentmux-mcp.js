@@ -83,7 +83,7 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        agent: { type: 'string', description: 'Agent ID (claude, codex, opencode, hermes, pi, antigravity)' },
+        agent: { type: 'string', description: 'Agent ID (claude, codex, opencode, hermes, pi, antigravity, devin)' },
       },
       required: ['agent'],
     },
@@ -106,7 +106,7 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        agent: { type: 'string', description: 'Target agent ID (e.g. codex, pi, claude)' },
+        agent: { type: 'string', description: 'Target agent ID (e.g. codex, pi, claude, devin)' },
         prompt: { type: 'string', description: 'The prompt text to send' },
         wait: { type: 'boolean', description: 'Wait until the agent finishes processing (default: true)' },
         until: { type: 'string', description: "Target state to wait for ('done' or 'blocked'; default: 'done')" },
@@ -193,7 +193,7 @@ rl.on('line', async (line) => {
       result: {
         protocolVersion: '2024-11-05',
         capabilities: { tools: {} },
-        serverInfo: { name: 'agentmux-mcp', version: '0.14.1' },
+        serverInfo: { name: 'agentmux-mcp', version: '0.16.0' },
       },
     };
     process.stdout.write(JSON.stringify(res) + '\n');

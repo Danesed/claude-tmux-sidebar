@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.16.0
+
+Added **Devin** (Cognition `devin` CLI) as a first-class 7th built-in agent:
+
+- **Full Devin CLI Integration:**
+  - Dedicated tab (`DV`, `#06b6d4` cyan accent) controlling workspace session `tmux_devin_<folder>`.
+  - Native session list and resume overlay via `devin list --format json`.
+  - Supports continuing the latest conversation (`devin -c`) and resuming specific sessions (`devin -r <id>`).
+  - Session deletion directly from the resume overlay via `devin rm --force <id>`.
+  - Configurable launch arguments (`claudeTmux.devinArgs`) and session prefix (`claudeTmux.devinSessionPrefix`).
+  - Native state detection rules for Devin's TUI prompts, interrupt affordances, and thinking indicators.
+
 ## 0.15.1
 
 Bug-fix release: typing in the sidebar could silently stop reaching the agent, especially with many tmux clients and several AgentMux windows sharing one tmux server.

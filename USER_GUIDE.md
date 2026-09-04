@@ -10,11 +10,11 @@ npm run check
 npm run package
 ```
 
-Install `claude-tmux-sidebar-0.15.1.vsix` from **Extensions → … → Install from
+Install `claude-tmux-sidebar-0.16.0.vsix` from **Extensions → … → Install from
 VSIX…**, then reload VS Code. From a shell you can instead run:
 
 ```bash
-code --install-extension claude-tmux-sidebar-0.15.1.vsix --force
+code --install-extension claude-tmux-sidebar-0.16.0.vsix --force
 ```
 
 With Remote-SSH, perform the install from the connected VS Code window so the
@@ -73,6 +73,10 @@ agent.
   runs Google's `agy` CLI. Antigravity keeps its conversations in a local
   database rather than per-folder transcripts, so the side bar offers no
   conversation list for it; **Resume previous session** runs `agy --continue`.
+- **Start new Devin** creates `tmux_devin_<folder>` in the workspace root and runs
+  Cognition's `devin` CLI. The launcher lists this workspace's Devin sessions via
+  `devin list --format json`; picking one runs `devin -r <id>` in the workspace session,
+  and **Resume previous session** runs `devin -c`.
 - Start, resume and restart use Full Access by default. Disable
   `claudeTmux.codexFullAccess` if approvals and sandboxing are required.
 - The launcher card now lists this workspace's Codex conversations natively

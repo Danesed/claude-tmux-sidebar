@@ -1,8 +1,8 @@
 {
   "name": "claude-tmux-sidebar",
-  "displayName": "AgentMux — Claude, Codex, OpenCode, Hermes, Pi & Antigravity in tmux",
-  "description": "Six agents, one terminal flow — plus free mode, which mirrors any tmux session you already have: switch fast and hand off work intelligently between Claude Code, Codex, OpenCode, Hermes, Pi and Google Antigravity in tmux.",
-  "version": "0.15.1",
+  "displayName": "AgentMux — Claude, Codex, OpenCode, Hermes, Pi, Antigravity & Devin in tmux",
+  "description": "Seven agents, one terminal flow — plus free mode, which mirrors any tmux session you already have: switch fast and hand off work intelligently between Claude Code, Codex, OpenCode, Hermes, Pi, Google Antigravity and Devin in tmux.",
+  "version": "0.16.0",
   "publisher": "Danesed",
   "license": "MIT",
   "icon": "icon.png",
@@ -25,6 +25,8 @@
     "nous-research",
     "hermes",
     "pi",
+    "devin",
+    "cognition",
     "tmux",
     "terminal",
     "sidebar",
@@ -404,6 +406,16 @@
           "default": "tmux_agy_",
           "description": "Antigravity tmux session prefix. Session = <prefix><folder name> (e.g. tmux_agy_my-project)."
         },
+        "claudeTmux.devinArgs": {
+          "type": "string",
+          "default": "",
+          "description": "Arguments passed to `devin` (Cognition Devin CLI) when starting or resuming a session."
+        },
+        "claudeTmux.devinSessionPrefix": {
+          "type": "string",
+          "default": "tmux_devin_",
+          "description": "Devin tmux session prefix. Session = <prefix><folder name> (e.g. tmux_devin_my-project)."
+        },
         "claudeTmux.sessionPrefix": {
           "type": "string",
           "default": "tmux_claude_",
@@ -535,7 +547,7 @@
         "claudeTmux.detectionRules": {
           "type": "object",
           "default": {},
-          "markdownDescription": "Per-agent detection rules used when an agent reports no lifecycle state. Keys are agent ids (claude, codex, opencode, hermes, pi, antigravity, or the id of any `claudeTmux.customAgents` entry). Each agent may set `needsInput`, `working` and `hold`; the same keys nested under `title` are matched against the pane title instead and are evaluated first.\n\nAn entry is a case-insensitive regular expression, an array of expressions that must **all** match, or `{ \"region\": \"foot\", \"match\": \"...\" }` to match somewhere other than the list default. Regions: `body` (the last 12 lines minus the prompt box — the default for needsInput, and what stops your own typing from reading as the agent asking), `tail` (the last 12 lines, default for working and hold), `foot` (the last 5 lines, i.e. the mode/status line), `head` (the first 20 lines), `prompt` (the prompt box), `dialog` (below the last rule the TUI drew), `screen`, `title`.\n\nA `hold` rule freezes the status instead of setting one — that is how a transcript viewer or a settings picker stops the decay timer from walking a working agent down to idle. A provided array REPLACES the built-in list, so `[]` disables a noisy rule. Run **AgentMux: Explain the active agent's state** to see every loaded rule and which one matched.",
+          "markdownDescription": "Per-agent detection rules used when an agent reports no lifecycle state. Keys are agent ids (claude, codex, opencode, hermes, pi, antigravity, devin, or the id of any `claudeTmux.customAgents` entry). Each agent may set `needsInput`, `working` and `hold`; the same keys nested under `title` are matched against the pane title instead and are evaluated first.\n\nAn entry is a case-insensitive regular expression, an array of expressions that must **all** match, or `{ \"region\": \"foot\", \"match\": \"...\" }` to match somewhere other than the list default. Regions: `body` (the last 12 lines minus the prompt box — the default for needsInput, and what stops your own typing from reading as the agent asking), `tail` (the last 12 lines, default for working and hold), `foot` (the last 5 lines, i.e. the mode/status line), `head` (the first 20 lines), `prompt` (the prompt box), `dialog` (below the last rule the TUI drew), `screen`, `title`.\n\nA `hold` rule freezes the status instead of setting one — that is how a transcript viewer or a settings picker stops the decay timer from walking a working agent down to idle. A provided array REPLACES the built-in list, so `[]` disables a noisy rule. Run **AgentMux: Explain the active agent's state** to see every loaded rule and which one matched.",
           "additionalProperties": {
             "type": "object",
             "properties": {
@@ -583,7 +595,7 @@
               "id": {
                 "type": "string",
                 "pattern": "^[a-z][a-z0-9_-]{0,23}$",
-                "description": "Unique agent id: lower-case, starts with a letter, up to 24 characters. Must not be a built-in id (claude, codex, opencode, hermes, pi, antigravity)."
+                "description": "Unique agent id: lower-case, starts with a letter, up to 24 characters. Must not be a built-in id (claude, codex, opencode, hermes, pi, antigravity, devin)."
               },
               "label": {
                 "type": "string",

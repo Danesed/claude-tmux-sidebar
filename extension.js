@@ -588,6 +588,29 @@ const AGENTS = {
     resumeLatest: (args) => `agy --continue${args ? ' ' + args : ''}`,
     launchArgs: antigravityLaunchArgs,
   },
+  // Devin (Cognition). Uses JSON session indexing (`devin list --format json`),
+  // native resume options (`devin -c` / `devin -r <id>`) and deletion (`devin rm --force`).
+  devin: {
+    label: 'Devin',
+    accent: '#06b6d4',
+    mark: 'DV',
+    // Measured live in a tmux pane: Devin's chisel REPL reads CSI-u (\x1b[13;2u)
+    // for a multi-line newline; modifyOtherKeys is ignored without a newline.
+    modEnter: '\x1b[13;2u',
+    command: 'devin',
+    prefixSetting: 'devinSessionPrefix',
+    defaultPrefix: 'tmux_devin_',
+    argsSetting: 'devinArgs',
+    installCmd: 'curl -fsSL https://cli.devin.ai/install.sh | bash',
+    paneRe: /(?:^|-)devin(?:$|-)/i,
+    paneAliases: [],
+    paneTitleRe: /devin/i,
+    listSessions: (cwd) => listDevinSessions(cwd),
+    resumeById: (id, args) => `devin -r ${shellQuote(id)}${args ? ' ' + args : ''}`,
+    resumeLatest: (args) => `devin -c${args ? ' ' + args : ''}`,
+    launchArgs: devinLaunchArgs,
+    deleteConversation: async (id, cwd) => (await runFile('devin', ['rm', '--force', id], cwd, 15000)).ok,
+  },
 };
 
 const AGENT_IDS = Object.keys(AGENTS);
@@ -803,6 +826,25 @@ const AGENT_DETECTION = {
   pi: {
     needsInput: ['trust project folder', 'enter (?:to )?select'],
     working: ['working\\.\\.\\..{0,24}interrupt'],
+  },
+  // Measured in a live pane: a running turn animates "Thinking · Ns (esc twice to interrupt)"
+  // and changes the prompt placeholder to "Guide Devin while it works".
+  // Needs-input appears on first-run trust ("Do you trust the authors of this directory?"),
+  // tool execution approvals ("Approve once" / "Yes, allow..."), permission requests
+  // ("Permission to run the command..."), and interactive menus ("↑↓ select · ↵ confirm").
+  devin: {
+    needsInput: [
+      'Do you trust the authors\\b',
+      'Approve once',
+      'Permission to\\b',
+      '↑↓ select · ↵ confirm',
+      'allow\\s+.+\\?',
+    ],
+    working: [
+      'esc (?:twice )?to interrupt',
+      'Guide Devin while it works',
+      '\\bThinking ·',
+    ],
   },
 };
 
@@ -1990,6 +2032,10 @@ function antigravityLaunchArgs() {
   return (cfg().get('antigravityArgs') || '').trim();
 }
 
+function devinLaunchArgs() {
+  return (cfg().get('devinArgs') || '').trim();
+}
+
 // OpenCode takes no hook flag: its integration is a plugin file, installed
 // on demand right before launch.
 function opencodeLaunchArgs() {
@@ -2253,6 +2299,47 @@ async function listOpencodeSessions(cwd) {
     const lastTs = stamp(pick(
       row.time?.updated, row.updated, row.updatedAt, row.modified,
       row.time?.created, row.created, row.createdAt
+    ));
+    sessions.push({ id: String(id), name: String(name).slice(0, 80), lastTs });
+  }
+  sessions.sort((a, b) => (b.lastTs || '').localeCompare(a.lastTs || ''));
+  return sessions;
+}
+
+// Devin lists sessions via `devin list --format json`.
+async function listDevinSessions(cwd) {
+  if (!cwd) return [];
+  const result = await runFile(
+    AGENTS.devin.command, ['list', '--format', 'json'], cwd, 15000
+  );
+  if (!result.ok) return [];
+  let parsed;
+  try { parsed = JSON.parse(result.out); } catch { return []; }
+  const rows = Array.isArray(parsed) ? parsed
+    : (Array.isArray(parsed?.sessions) ? parsed.sessions : []);
+  const pick = (...values) => values.find((v) => v != null && v !== '');
+  const stamp = (value) => {
+    if (typeof value === 'number' && isFinite(value)) {
+      return new Date(value > 1e12 ? value : value * 1000).toISOString();
+    }
+    if (typeof value === 'string') {
+      const parsedTs = Date.parse(value);
+      if (!isNaN(parsedTs)) return new Date(parsedTs).toISOString();
+    }
+    return null;
+  };
+  const sessions = [];
+  for (const row of rows) {
+    if (!row || typeof row !== 'object') continue;
+    const id = pick(row.id, row.short_id, row.shortId, row.session_id, row.sessionId);
+    if (!id) continue;
+    const dir = pick(row.working_directory, row.workingDirectory, row.directory, row.cwd, row.path) || '';
+    if (dir && normalizedPath(dir) !== normalizedPath(cwd)) continue;
+    const name = pick(row.title, row.summary, row.description, row.name) || String(id);
+    const lastTs = stamp(pick(
+      row.last_activity_at, row.lastActivityAt,
+      row.updated_at, row.updatedAt, row.updated, row.modified,
+      row.created_at, row.createdAt, row.created
     ));
     sessions.push({ id: String(id), name: String(name).slice(0, 80), lastTs });
   }

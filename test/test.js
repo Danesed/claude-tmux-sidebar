@@ -17,6 +17,7 @@ let heldCaptureCallback = null;
 let captureOutput = 'terminal frame\n';
 let opencodeSessionsJson = null;
 let hermesSessionsTable = null;
+let devinSessionsJson = null;
 let warningAnswer;
 let quickPickAnswer;
 let quickPickItems = null;
@@ -34,6 +35,8 @@ const settings = new Map([
   ['opencodeSessionPrefix', 'tmux_opencode_'],
   ['antigravityArgs', '--dangerously-skip-permissions'],
   ['antigravitySessionPrefix', 'tmux_agy_'],
+  ['devinArgs', ''],
+  ['devinSessionPrefix', 'tmux_devin_'],
   ['scrollbackLines', 1000],
   // Keep tests hermetic: no ledger writes into the repo, no real transports,
   // no hook assets, no telemetry reads.
@@ -68,6 +71,16 @@ function execFile(command, args, options, callback) {
     }
     return callback(null, '', '');
   }
+  if (command === 'devin') {
+    if (args[0] === 'list') {
+      if (devinSessionsJson == null) return callback(new Error('devin not installed'), '', '');
+      return callback(null, devinSessionsJson, '');
+    }
+    if (args[0] === 'rm') {
+      return callback(null, 'Session deleted.\n', '');
+    }
+    return callback(null, '', '');
+  }
   if (command !== 'tmux') return callback(null, '', '');
   if (args[0] === 'display-message') {
     const format = args[args.length - 1];
@@ -95,7 +108,8 @@ function execFile(command, args, options, callback) {
       const agent = target.includes('tmux_hermes_') ? 'hermes'
         : target.includes('tmux_opencode_') ? 'opencode'
         : target.includes('tmux_agy_') ? 'antigravity'
-          : target.includes('codex_') ? 'codex' : 'claude';
+        : target.includes('tmux_devin_') ? 'devin'
+        : target.includes('codex_') ? 'codex' : 'claude';
       return callback(null, `${workspace}\t${agent}\t1\t${agent}\t1700000000\tgen-a\n`, '');
     }
     return callback(null, '2,3,80,24,1700000000,240,0\n', '');
@@ -173,7 +187,7 @@ const vscode = {
 };
 
 const source = fs.readFileSync(path.join(root, 'extension.js'), 'utf8')
-  + '\nmodule.exports.__test = { ClaudeTmuxView, sessionName, accentChannels, derivedAccent, derivedMark, decodeEscapes, AGENT_DETECTION, paneIdentity, identityMatches, STATE_HOOK_SCRIPT, setStateHookDir, codexHookArgs, tomlString, listPiSessions, piSessionDir, piExtensionPath, ensurePiExtension, removePiExtension, PI_EXTENSION, customAgentSpecs, registerCustomAgents, freeAgentId, mirroredSessionNames, baseSessionName, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions, AGENTS, AGENT_IDS, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, hermesProfileSlug, hermesProfileHome, ensureHermesProfile, launchEnvPrefix, detectionRules, detectState, detectionContext, isRuleLine, explainDetection, DETECTION_REGIONS, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath, AGENT_PRESETS, promptAddAgentPreset, setTmuxTimeouts };';
+  + '\nmodule.exports.__test = { ClaudeTmuxView, sessionName, accentChannels, derivedAccent, derivedMark, decodeEscapes, AGENT_DETECTION, paneIdentity, identityMatches, STATE_HOOK_SCRIPT, setStateHookDir, codexHookArgs, tomlString, listPiSessions, piSessionDir, piExtensionPath, ensurePiExtension, removePiExtension, PI_EXTENSION, customAgentSpecs, registerCustomAgents, freeAgentId, mirroredSessionNames, baseSessionName, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions, AGENTS, AGENT_IDS, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, listDevinSessions, devinLaunchArgs, hermesProfileSlug, hermesProfileHome, ensureHermesProfile, launchEnvPrefix, detectionRules, detectState, detectionContext, isRuleLine, explainDetection, DETECTION_REGIONS, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath, AGENT_PRESETS, promptAddAgentPreset, setTmuxTimeouts };';
 const moduleUnderTest = { exports: {} };
 const sandbox = {
   module: moduleUnderTest,
@@ -194,7 +208,7 @@ const sandbox = {
   clearInterval,
 };
 vm.runInNewContext(source, sandbox, { filename: 'extension.js' });
-const { ClaudeTmuxView, sessionName, accentChannels, derivedAccent, derivedMark, decodeEscapes, AGENT_DETECTION, paneIdentity, identityMatches, STATE_HOOK_SCRIPT, setStateHookDir, codexHookArgs, tomlString, listPiSessions, piSessionDir, piExtensionPath, ensurePiExtension, removePiExtension, PI_EXTENSION, customAgentSpecs, registerCustomAgents, freeAgentId, mirroredSessionNames, baseSessionName, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions, AGENTS, AGENT_IDS, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, hermesProfileSlug, hermesProfileHome, ensureHermesProfile, launchEnvPrefix, detectionRules, detectState, detectionContext, isRuleLine, explainDetection, DETECTION_REGIONS, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath, AGENT_PRESETS, promptAddAgentPreset, setTmuxTimeouts } = moduleUnderTest.exports.__test;
+const { ClaudeTmuxView, sessionName, accentChannels, derivedAccent, derivedMark, decodeEscapes, AGENT_DETECTION, paneIdentity, identityMatches, STATE_HOOK_SCRIPT, setStateHookDir, codexHookArgs, tomlString, listPiSessions, piSessionDir, piExtensionPath, ensurePiExtension, removePiExtension, PI_EXTENSION, customAgentSpecs, registerCustomAgents, freeAgentId, mirroredSessionNames, baseSessionName, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions, AGENTS, AGENT_IDS, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, listDevinSessions, devinLaunchArgs, hermesProfileSlug, hermesProfileHome, ensureHermesProfile, launchEnvPrefix, detectionRules, detectState, detectionContext, isRuleLine, explainDetection, DETECTION_REGIONS, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath, AGENT_PRESETS, promptAddAgentPreset, setTmuxTimeouts } = moduleUnderTest.exports.__test;
 
 function makeProvider() {
   const provider = new ClaudeTmuxView({
@@ -842,6 +856,32 @@ async function run() {
   assert.ok(paneLooksLikeAgent('antigravity', '/home/u/.local/bin/agy'));
   assert.ok(!paneLooksLikeAgent('claude', 'agy'), 'agy must never be mistaken for Claude');
   assert.ok(!paneLooksLikeAgent('antigravity', 'codex'));
+
+  // ---- Devin as a registered agent ----------------------------------------------------
+  assert.ok(AGENT_IDS.includes('devin'), 'Devin must be a registered agent');
+  assert.strictEqual(AGENTS.devin.command, 'devin', 'Devin is driven by the devin CLI');
+  assert.strictEqual(AGENTS.devin.defaultPrefix, 'tmux_devin_');
+  assert.strictEqual(launchArgs('devin'), '');
+  assert.strictEqual(AGENTS.devin.resumeById('abc-1', '--x'), "devin -r 'abc-1' --x");
+  assert.strictEqual(AGENTS.devin.resumeLatest('--x'), 'devin -c --x');
+  assert.ok(typeof AGENTS.devin.listSessions === 'function');
+  assert.ok(paneLooksLikeAgent('devin', '/Users/danilodanese/.local/bin/devin'));
+  assert.ok(!paneLooksLikeAgent('claude', 'devin'), 'devin must never be mistaken for Claude');
+  assert.ok(!paneLooksLikeAgent('devin', 'codex'));
+
+  devinSessionsJson = JSON.stringify([
+    { id: 'dev-1', short_id: 'dev-1', title: 'Refactor parser', working_directory: workspace, last_activity_at: 1788537374 },
+    { id: 'dev-2', short_id: 'dev-2', title: 'Other project', working_directory: '/tmp/other', last_activity_at: 1788530000 },
+  ]);
+  const devinSessions = await listDevinSessions(workspace);
+  assert.strictEqual(devinSessions.length, 1);
+  assert.strictEqual(devinSessions[0].id, 'dev-1');
+  assert.strictEqual(devinSessions[0].name, 'Refactor parser');
+  assert.ok(devinSessions[0].lastTs);
+  assert.strictEqual(AGENTS.devin.modEnter, '\x1b[13;2u', 'Devin REPL accepts CSI-u newline');
+  const deleteOk = await AGENTS.devin.deleteConversation('dev-1', workspace);
+  assert.strictEqual(deleteOk, true, 'Devin deleteConversation uses devin rm --force');
+  devinSessionsJson = null;
   // ---- pane identity: the command names an interpreter, not an agent --------------------
   // 'node' was a Claude alias until 0.13.0, which made every Node process in
   // the workspace read as Claude — `npm run dev` would have become an agent tab
@@ -1050,6 +1090,15 @@ async function run() {
   assert.strictEqual(detectState('claude', detectionContext('just some output')).status, null);
   assert.strictEqual(detectState('antigravity', detectionContext('Do you trust the contents of this project?')).status,
     'needs-input', 'Antigravity has its own observed prompt rules');
+  const devinWorkingScreen = fs.readFileSync(path.join(__dirname, 'screens', 'devin-working.txt'), 'utf8');
+  assert.strictEqual(detectState('devin', detectionContext(devinWorkingScreen)).status,
+    'working', 'Devin working detection against real captured screen');
+  const devinApprovalScreen = fs.readFileSync(path.join(__dirname, 'screens', 'devin-approval.txt'), 'utf8');
+  assert.strictEqual(detectState('devin', detectionContext(devinApprovalScreen)).status,
+    'needs-input', 'Devin tool approval detection against real captured screen');
+  const devinTrustScreen = fs.readFileSync(path.join(__dirname, 'screens', 'devin-trust.txt'), 'utf8');
+  assert.strictEqual(detectState('devin', detectionContext(devinTrustScreen)).status,
+    'needs-input', 'Devin trust prompt detection against real captured screen');
 
   settings.set('detectionRules', { claude: { needsInput: ['^ready to deploy'], working: [] } });
   assert.strictEqual(detectState('claude', detectionContext('ready to deploy?')).status, 'needs-input', 'an override adds rules');
@@ -1693,6 +1742,8 @@ async function run() {
   assert.strictEqual((markup.match(/class="agent-tab/g) || []).length, AGENT_IDS.length, 'one tab per registered agent');
   assert.match(markup, /data-agent="antigravity"/);
   assert.match(markup, /Start Antigravity/);
+  assert.match(markup, /data-agent="devin"/);
+  assert.match(markup, /Start Devin/);
   assert.match(markup, /data-agents="/, 'the webview receives the roster');
   assert.match(markup, /id="handoff-target"/);
   assert.match(markup, /data-palette="theme"/, 'the mirror is told which ANSI palette to use');

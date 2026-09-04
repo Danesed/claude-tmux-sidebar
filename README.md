@@ -1,11 +1,12 @@
 # AgentMux
 
-**Six agents. One terminal flow. Plus any tmux you already have.**
+**Seven agents. One terminal flow. Plus any tmux you already have.**
 
 Run **Claude Code**, **OpenAI Codex CLI**, **OpenCode**, **Hermes** (Nous
-Research), **pi** (Earendil) and **Google Antigravity** (`agy`) in persistent
-tmux sessions, switch between them instantly, and hand work from one agent to
-another from a single VS Code side-bar view.
+Research), **pi** (Earendil), **Google Antigravity** (`agy`) and **Devin**
+(Cognition `devin`) in persistent tmux sessions, switch between them
+instantly, and hand work from one agent to another from a single VS Code
+side-bar view.
 
 ![AgentMux in action: the Claude tab mirrored in the side bar with live state and telemetry footer](media/agentmux.0.10.0.png)
 
@@ -17,6 +18,7 @@ The extension is deliberately workspace-scoped:
 - the Hermes tab controls only `tmux_hermes_<folder>`;
 - the pi tab controls only `tmux_pi_<folder>`;
 - the Antigravity tab controls only `tmux_agy_<folder>`;
+- the Devin tab controls only `tmux_devin_<folder>`;
 - every existing session is accepted only when its tmux `session_path` matches
   the current VS Code workspace root;
 - projects with the same folder name receive a stable path hash when needed,
@@ -94,7 +96,7 @@ From this repository:
 ```bash
 npm run check
 npm run package
-code --install-extension claude-tmux-sidebar-0.15.1.vsix --force
+code --install-extension claude-tmux-sidebar-0.16.0.vsix --force
 ```
 
 Alternatively use VS Code: **Extensions → … → Install from VSIX…**, select the
@@ -386,7 +388,7 @@ this way by the test suite.
 
 ## Free mode: any tmux, any agent, no release
 
-The six built-in agents are the ones AgentMux knows how to install, resume and
+The seven built-in agents are the ones AgentMux knows how to install, resume and
 introspect. **Free mode** covers everything else, through
 `claudeTmux.customAgents`, so a new CLI never has to wait for a new version of
 this extension. Two shapes:
@@ -463,6 +465,8 @@ settings.
 | `claudeTmux.piArgs` | `""` | Arguments passed to `pi`. Empty on purpose: pi has no approval prompts to bypass. Add `-a` to auto-answer its project-trust question. |
 | `claudeTmux.antigravitySessionPrefix` | `tmux_agy_` | Antigravity session prefix. |
 | `claudeTmux.antigravityArgs` | `--dangerously-skip-permissions` | Arguments passed to `agy`. |
+| `claudeTmux.devinSessionPrefix` | `tmux_devin_` | Devin session prefix. |
+| `claudeTmux.devinArgs` | `""` | Arguments passed to `devin`. |
 | `claudeTmux.customAgents` | `[]` | Free mode: extra agents declared in settings — a new CLI to manage, or an existing tmux session to mirror. |
 | `claudeTmux.ansiPalette` | `theme` | `theme` remaps ANSI onto the VS Code terminal theme; `terminal` uses the classic xterm palette. |
 | `claudeTmux.detectionRules` | `{}` | Per-agent detection rules (`needsInput` / `working` / `hold`, and the same under `title`) used when an agent reports no lifecycle state. See [How AgentMux reads an agent's state](#how-agentmux-reads-an-agents-state). |
