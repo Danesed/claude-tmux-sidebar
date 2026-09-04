@@ -257,7 +257,9 @@ agentmux status codex
 # Read recent terminal output lines from an agent pane
 agentmux read claude --lines 50
 
-# Prompt an agent and atomically wait for completion
+# Prompt an agent and atomically wait for completion. The wait also returns as
+# soon as the agent stops to ask a question (reply carries "blocked": true);
+# --until blocked waits for that dialog state only.
 agentmux prompt codex "Run pytest and verify the test suite" --wait --until done
 ```
 

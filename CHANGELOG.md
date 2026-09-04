@@ -2,14 +2,35 @@
 
 ## 0.16.1
 
-Bug-fix and performance release:
+Reliability, speed and a lighter look. No new dependencies, no extra tmux processes on the live path.
 
-- **Hardened home-directory resolution.** Replaced all `process.env.HOME` uses with `os.homedir()` and guarded `getProjectDir()` against null/invalid workspace paths, preventing crashes in CI, Remote-SSH, or sandboxed launches.
-- **Faster, non-blocking session listing.** `listSessions`, `readFileChunk`, and `listCodexSessions` now use `fs.promises` with bounded concurrency, so the resume overlay no longer freezes the Extension Host on large transcript folders.
-- **Workspace realpath cache.** Added `normalizedWorkspace()` with a 30-second TTL and invalidation on workspace-folder changes, removing repeated synchronous `fs.realpathSync.native` calls from the typing, resize, and polling hot paths.
-- **MCP parity.** `prompt_agent` in `bin/agentmux-mcp.js` now passes the `raw` flag, matching the `agentmux` CLI behaviour.
-- **Repository hygiene.** Runtime `.claude/agentmux/` files and sockets are now ignored; missing `devin-*.txt` test fixtures are tracked.
-- **Light UI polish.** Firefox scrollbar support, visible `button:focus-visible`, and `overflow-wrap`/`tab-size` improvements in modals and arbiter text areas.
+### Fixed
+
+- **`agentmux prompt --wait --until blocked` never returned.** The CLI, the MCP tool and the skill all say `blocked` where the state machine says `needs-input`, so the wait always timed out. `blocked` now maps to `needs-input`, and `--until done` (the default) also returns *immediately* when the agent stops to ask a question — the reply carries `"blocked": true` and `status: "needs-input"` — instead of making an orchestrator sit out the whole timeout in front of an idle dialog. The wait listener is registered before the prompt goes out, so a fast transition can no longer slip past it. Regression tests included.
+- **Control-mode ignored caller timeouts.** Every command shared one fixed 10 s watchdog that, when it fired, killed the whole client and failed everything in flight. Commands now carry their caller's budget: a slow probe or history capture answers `timedOut` on its own, its late reply is swallowed in order, and the client keeps serving keystrokes and presence. The 10 s clock remains as the "client wedged" detector.
+- **Home-directory resolution.** All `process.env.HOME` uses became `os.homedir()`; `getProjectDir()` rejects a null workspace instead of throwing; conversation delete validates its id.
+- **Seven "stopped" toasts when a tmux server dies** are now one notification naming every agent, with a shortcut to session management.
+- **Bounds.** IPC request lines are capped at 1 MiB; pastes over 100 KiB are refused with a visible reason (Linux caps a single argv string at 128 KiB); per-turn git diffs are throttled per agent; every one-shot child process has a default timeout.
+- **MCP parity.** `prompt_agent` passes `raw`, like the CLI's `--raw`.
+- `TESTING.md` exists again (README, USER_GUIDE and PUBLISHING all linked it); the Devin screen fixtures used by the test suite are tracked; runtime `.claude/agentmux/` artifacts are ignored.
+
+### Faster
+
+- **Presence loop parallelised.** Transcript tails and background captures for N agents ran one after another every 900 ms, competing with the active tick on the same tmux server; they now run concurrently per agent.
+- **Detection throttled where it was noise.** A spinner redrawing one row 8×/s re-ran the full rule set each time. Frames whose diff touched one or two rows are examined at most every 150 ms, and the last skipped frame is always examined by the next pass, so a dialog appearing in such a frame is still seen within one tick.
+- **One heartbeat per second, not ten.** A static screen used to receive a `frame` message every 80–120 ms just to refresh cursor and uptime; now only when the frame, cursor meta or pane mode changed, or once a second.
+- **Resume overlay off the main thread.** Session listing (Claude, Codex) uses `fs.promises` with bounded concurrency instead of synchronous reads.
+- **Workspace realpath cached** for 30 s and invalidated on folder changes, removing `realpathSync` from the typing, resize and polling paths.
+- **Webview hot path.** `renderLine` copies slices instead of concatenating characters, finds CSI terminators by char code instead of a regex per byte, and emits no empty `<span>` for a reset style (a third of the row nodes on colourful TUIs). Selection state is a flag maintained by `selectionchange` instead of serialising the selection on every frame. A tab click paints once, not twice. The handoff editor syncs its text on a 200 ms debounce instead of per keystroke. Element lookups in the roster renderer are resolved once.
+
+### Look
+
+- **The chrome follows the agent.** One CSS variable, set on switch, drives the cursor, the focus ring, the active tab wash and a new **2 px state rail** on the mirror's left edge: it breathes in the agent's colour while working, holds amber while a question waits, and flashes green once when a turn ends — state in peripheral vision, without hunting for the dot.
+- **Footer as chips.** `80×24`, `up 2h`, `↑12k ↓3k` are hairline pills instead of one dotted sentence; capture latency is an amber ring on the status dot with the figure in its tooltip.
+- **Peek at the question.** Hovering a background agent's amber tab shows the last lines of the dialog it is stuck on.
+- **Keyboard.** `Alt+1…9` switches tabs (by physical key, so it works with Option on macOS); on the launcher card the bare digit starts the Nth agent, with keycaps drawn on the buttons.
+- **Dense mode.** Under 340 px of height the tabs and footer tighten and the chips hide; under 240 px of width the footer keeps only the state.
+- **Flat, not glass.** `backdrop-filter` blur is gone from menus, overlays and modals (it was repainted on every terminal frame while open), shadows are lighter, borders are hairlines; the handoff modal is more compact. Firefox scrollbars are styled; `button:focus-visible` is visible; long paths wrap in modal text areas.
 
 ## 0.16.0
 
