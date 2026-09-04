@@ -1,0 +1,22 @@
+⠀⣴⣾⣶⡄⠀⠀⠀⠀
+⠀⠛⠿⠟⠻⣶⣾⣶⡄  Devin CLI
+⠀⣤⣶⣦⣴⠿⢿⠿⠃  v3000.6.14
+⠀⠻⢿⠿⠃⠀⠀⠀⠀
+
+Max · 100% remaining (resets in 1d 16h)
+
+❭ run sleep 3 in bash
+
+
+ ⏺ Running command
+ │ $ sleep 3
+ └ Timeout: 10s
+
+❭ 1 Yes  (Approve once)
+· 2 Yes, allow `sleep` commands
+· 3 Yes, always allow `sleep` commands in `tmp`
+· 4 Yes, always allow `sleep` commands in all projects
+· 5 Edit command
+· 6 Describe change to command
+· 7 No
+↑↓ select · ↵ confirm · esc cancel

@@ -254,6 +254,7 @@ html, body {
 
 /* Cmd/Ctrl+click to open in the editor */
 .path-link {
+  color: var(--vscode-textLink-foreground, #4daafc);
   text-decoration: underline dotted 1px;
   text-underline-offset: 2px;
   border-radius: 2px;
@@ -305,6 +306,18 @@ html, body {
 #timeline-list pre::-webkit-scrollbar-thumb:hover,
 .arb-answer pre::-webkit-scrollbar-thumb:hover {
   background: var(--vscode-scrollbarSlider-hoverBackground, rgba(100, 100, 100, 0.65));
+}
+
+/* Firefox scrollbar support: thin slider, no track background. */
+#screen-wrap,
+#session-list,
+#recall-list,
+#timeline-list,
+#arbiter-body,
+#timeline-list pre,
+.arb-answer pre {
+  scrollbar-width: thin;
+  scrollbar-color: var(--vscode-scrollbarSlider-background, rgba(121, 121, 121, 0.35)) transparent;
 }
 
 /* Alt+Up prompt recall */
@@ -385,6 +398,8 @@ html, body {
   max-height: 180px;
   overflow: auto;
   white-space: pre-wrap;
+  overflow-wrap: break-word;
+  tab-size: 2;
   font: 10.5px/1.4 ui-monospace, monospace;
   background: var(--vscode-editor-background, #1e1e1e);
   border-radius: 4px;
@@ -536,6 +551,7 @@ button {
   transition: background-color .12s ease, transform .08s ease;
 }
 button:hover { background: var(--vscode-button-secondaryHoverBackground, #45494e); }
+button:focus-visible { outline: 1px solid var(--vscode-focusBorder, #0e639c); outline-offset: 2px; }
 button:active:not(:disabled) { transform: scale(0.98); }
 button:disabled { opacity: .4; cursor: default; }
 button.primary {
@@ -652,6 +668,8 @@ button.primary:hover { background: var(--vscode-button-hoverBackground, #1177bb)
   padding: 8px;
   font: 11px/1.35 ui-monospace, "SF Mono", Menlo, Monaco, Consolas, monospace;
   white-space: pre-wrap;
+  overflow-wrap: break-word;
+  tab-size: 2;
 }
 .modal.details-step .modal-card { height: auto; }
 .modal.details-step .modal-card textarea {
@@ -683,6 +701,8 @@ button.primary:hover { background: var(--vscode-button-hoverBackground, #1177bb)
   border: 1px solid var(--vscode-input-border, rgba(255,255,255,.14));
   border-radius: 4px;
   outline: none;
+  overflow-wrap: break-word;
+  tab-size: 2;
 }
 .arb-answer { border: 1px solid var(--vscode-widget-border, rgba(255,255,255,.12)); border-radius: 5px; padding: 6px 8px; }
 .arb-answer summary { cursor: pointer; font-weight: 600; font-size: 12px; }
@@ -691,6 +711,8 @@ button.primary:hover { background: var(--vscode-button-hoverBackground, #1177bb)
   max-height: 26vh;
   overflow: auto;
   white-space: pre-wrap;
+  overflow-wrap: break-word;
+  tab-size: 2;
   font: 10.5px/1.4 ui-monospace, monospace;
 }
 .arb-answer button { align-self: flex-start; }

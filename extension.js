@@ -455,7 +455,9 @@ const AGENTS = {
     resumeLatest: null, // the extension's own picker covers Claude
     launchArgs: claudeLaunchArgs,
     deleteConversation: async (id, cwd) => {
-      try { fs.unlinkSync(path.join(getProjectDir(cwd), `${id}.jsonl`)); return true; } catch { return false; }
+      const projectDir = getProjectDir(cwd);
+      if (!projectDir || !id || id.includes('/') || id.includes('\\')) return false;
+      try { fs.unlinkSync(path.join(projectDir, `${path.basename(id)}.jsonl`)); return true; } catch { return false; }
     },
   },
   codex: {
@@ -1350,6 +1352,29 @@ function normalizedPath(value) {
   return resolved;
 }
 
+// The workspace folder changes rarely; re-resolve it once on demand and keep it
+// for a much longer TTL than arbitrary paths, so the hot path never stalls on
+// realpathSync while typing, resizing, or polling.
+let _workspaceCwd = null;
+let _workspaceNorm = '';
+let _workspaceTs = 0;
+const WORKSPACE_NORM_TTL = 30000;
+
+function invalidateWorkspacePathCache() {
+  _workspaceCwd = null;
+  _workspaceTs = 0;
+}
+
+function normalizedWorkspace() {
+  const cwd = workspaceFolder();
+  const now = Date.now();
+  if (cwd === _workspaceCwd && now - _workspaceTs < WORKSPACE_NORM_TTL) return _workspaceNorm;
+  _workspaceCwd = cwd;
+  _workspaceNorm = cwd ? normalizedPath(cwd) : '';
+  _workspaceTs = now;
+  return _workspaceNorm;
+}
+
 // How long a verified (name, ready) session identity may be reused by the input
 // hot path before it must be re-verified against tmux. The presence loop
 // refreshes it every ~900ms, so entries are normally always fresh.
@@ -1781,7 +1806,7 @@ export const AgentMuxState = async () => ({
 `;
 
 function opencodePluginPath() {
-  const home = process.env.HOME || '';
+  const home = os.homedir();
   const xdg = (process.env.XDG_CONFIG_HOME || '').trim();
   const base = xdg || path.join(home, '.config');
   return path.join(base, 'opencode', 'plugins', 'agentmux-state.js');
@@ -1811,8 +1836,8 @@ function removeOpencodePlugin() {
 
 function expandHome(value) {
   const text = String(value || '');
-  if (text === '~') return process.env.HOME || '';
-  if (text.startsWith('~/')) return path.join(process.env.HOME || '', text.slice(2));
+  if (text === '~') return os.homedir();
+  if (text.startsWith('~/')) return path.join(os.homedir(), text.slice(2));
   return text;
 }
 
@@ -1820,7 +1845,7 @@ function expandHome(value) {
 // (verified in its config.js: getAgentDir()).
 function piAgentDir() {
   const env = (process.env.PI_CODING_AGENT_DIR || '').trim();
-  return env ? expandHome(env) : path.join(process.env.HOME || '', '.pi', 'agent');
+  return env ? expandHome(env) : path.join(os.homedir(), '.pi', 'agent');
 }
 
 // pi has no hook flag either, but it auto-discovers extensions from
@@ -2154,7 +2179,7 @@ async function agentSessionInfo(agent, name) {
   if (!sessionPath) return { exists: false, ready: false };
   if (AGENTS[agent]?.attachSession) return { exists: true, ready: true, ...base };
   const normSessionPath = normalizedPath(sessionPath);
-  const normWorkspace = normalizedPath(workspaceFolder());
+  const normWorkspace = normalizedWorkspace();
   const inWorkspace = normSessionPath === normWorkspace
     || !!(normSessionPath && normWorkspace && normSessionPath.startsWith(normWorkspace + '/.agentmux/worktrees/'));
   if (!inWorkspace) return { exists: false, ready: false };
@@ -2182,8 +2207,9 @@ async function agentSessionInfo(agent, name) {
 // Encoding: EVERY non-alphanumeric char becomes '-' (so '/', '_', '.', spaces all
 // collapse to '-'). Verified against real ~/.claude/projects names.
 function getProjectDir(cwd) {
+  if (!cwd || typeof cwd !== 'string') return null;
   const encoded = cwd.replace(/[^a-zA-Z0-9]/g, '-');
-  return path.join(process.env.HOME, '.claude', 'projects', encoded);
+  return path.join(os.homedir(), '.claude', 'projects', encoded);
 }
 
 // Parse the folder's JSONL transcripts into a resume list (most recent first).
@@ -2195,14 +2221,15 @@ function getProjectDir(cwd) {
 const SESSION_LIST_HEAD_BYTES = 128 * 1024;
 const SESSION_LIST_TAIL_BYTES = 64 * 1024;
 
-function readFileChunk(file, position, length) {
-  const fd = fs.openSync(file, 'r');
+async function readFileChunk(file, position, length) {
+  let handle;
   try {
+    handle = await fs.promises.open(file, 'r');
     const buf = Buffer.alloc(length);
-    const read = fs.readSync(fd, buf, 0, length, position);
-    return buf.toString('utf8', 0, read);
+    const { bytesRead } = await handle.read(buf, 0, length, position);
+    return buf.toString('utf8', 0, bytesRead);
   } finally {
-    fs.closeSync(fd);
+    if (handle) await handle.close();
   }
 }
 
@@ -2228,28 +2255,38 @@ function sessionFromTranscriptLines(lines) {
 }
 
 async function listSessions(projectDir) {
-  if (!fs.existsSync(projectDir)) return [];
-  const files = fs.readdirSync(projectDir).filter((f) => f.endsWith('.jsonl'));
+  if (!projectDir) return [];
+  try { await fs.promises.access(projectDir); } catch { return []; }
+  let files;
+  try { files = (await fs.promises.readdir(projectDir)).filter((f) => f.endsWith('.jsonl')); } catch { return []; }
+  // Avoid opening hundreds of handles at once; keep the overlay responsive.
   const sessions = [];
-  for (const file of files) {
-    const id = file.replace('.jsonl', '');
-    const full = path.join(projectDir, file);
-    let name = null, firstUserMsg = null, lastTs = null;
-    try {
-      const stat = fs.statSync(full);
-      lastTs = stat.mtime.toISOString();
-      let lines;
-      if (stat.size <= SESSION_LIST_HEAD_BYTES + SESSION_LIST_TAIL_BYTES) {
-        lines = fs.readFileSync(full, 'utf8').split('\n');
-      } else {
-        const head = readFileChunk(full, 0, SESSION_LIST_HEAD_BYTES);
-        const tail = readFileChunk(full, stat.size - SESSION_LIST_TAIL_BYTES, SESSION_LIST_TAIL_BYTES);
-        lines = head.slice(0, head.lastIndexOf('\n')).split('\n')
-          .concat(tail.slice(tail.indexOf('\n') + 1).split('\n'));
-      }
-      ({ name, firstUserMsg } = sessionFromTranscriptLines(lines));
-    } catch { /* skip unreadable file */ }
-    sessions.push({ id, name: name || firstUserMsg || id, lastTs });
+  const BATCH = 20;
+  for (let i = 0; i < files.length; i += BATCH) {
+    const batch = files.slice(i, i + BATCH);
+    const batchSessions = await Promise.all(batch.map(async (file) => {
+      const id = file.replace('.jsonl', '');
+      const full = path.join(projectDir, file);
+      try {
+        const stat = await fs.promises.stat(full);
+        const lastTs = stat.mtime.toISOString();
+        let lines;
+        if (stat.size <= SESSION_LIST_HEAD_BYTES + SESSION_LIST_TAIL_BYTES) {
+          const content = await fs.promises.readFile(full, 'utf8');
+          lines = content.split('\n');
+        } else {
+          const [head, tail] = await Promise.all([
+            readFileChunk(full, 0, SESSION_LIST_HEAD_BYTES),
+            readFileChunk(full, stat.size - SESSION_LIST_TAIL_BYTES, SESSION_LIST_TAIL_BYTES),
+          ]);
+          lines = head.slice(0, head.lastIndexOf('\n')).split('\n')
+            .concat(tail.slice(tail.indexOf('\n') + 1).split('\n'));
+        }
+        const { name, firstUserMsg } = sessionFromTranscriptLines(lines);
+        return { id, name: name || firstUserMsg || id, lastTs };
+      } catch { return null; }
+    }));
+    for (const s of batchSessions) if (s) sessions.push(s);
   }
   sessions.sort((a, b) => (b.lastTs || '').localeCompare(a.lastTs || ''));
   return sessions;
@@ -2491,7 +2528,7 @@ function hermesProfileSlug(cwd) {
 }
 
 function hermesProfileHome(slug) {
-  const root = process.env.HERMES_HOME || path.join(process.env.HOME || '', '.hermes');
+  const root = process.env.HERMES_HOME || path.join(os.homedir(), '.hermes');
   return path.join(root, 'profiles', slug);
 }
 
@@ -2522,21 +2559,26 @@ async function launchEnvPrefix(agent) {
 // first line's session_meta carries the conversation id and cwd. Best-effort
 // and version-tolerant: only the first lines of each candidate are read.
 async function listCodexSessions(cwd) {
-  const root = path.join(process.env.HOME || '', '.codex', 'sessions');
-  if (!cwd || !fs.existsSync(root)) return [];
+  const root = path.join(os.homedir(), '.codex', 'sessions');
+  try { await fs.promises.access(root); } catch { return []; }
+  if (!cwd) return [];
   const wanted = normalizedPath(cwd);
   const files = [];
   try {
-    for (const y of fs.readdirSync(root).sort().reverse().slice(0, 2)) {
+    const years = (await fs.promises.readdir(root)).sort().reverse().slice(0, 2);
+    for (const y of years) {
       const yDir = path.join(root, y);
-      for (const mo of fs.readdirSync(yDir).sort().reverse().slice(0, 3)) {
+      const months = (await fs.promises.readdir(yDir)).sort().reverse().slice(0, 3);
+      for (const mo of months) {
         const mDir = path.join(yDir, mo);
-        for (const d of fs.readdirSync(mDir).sort().reverse().slice(0, 12)) {
+        const days = (await fs.promises.readdir(mDir)).sort().reverse().slice(0, 12);
+        for (const d of days) {
           const dDir = path.join(mDir, d);
-          for (const f of fs.readdirSync(dDir)) {
+          const entries = await fs.promises.readdir(dDir);
+          for (const f of entries) {
             if (!f.startsWith('rollout-') || !f.endsWith('.jsonl')) continue;
             const full = path.join(dDir, f);
-            try { files.push([fs.statSync(full).mtimeMs, full]); } catch { /* raced */ }
+            try { files.push([(await fs.promises.stat(full)).mtimeMs, full]); } catch { /* raced */ }
           }
         }
       }
@@ -2547,11 +2589,11 @@ async function listCodexSessions(cwd) {
   for (const [mtime, full] of files.slice(0, 120)) {
     if (sessions.length >= 30) break;
     try {
-      const fd = fs.openSync(full, 'r');
+      const handle = await fs.promises.open(full, 'r');
       const buf = Buffer.alloc(16384);
-      const len = fs.readSync(fd, buf, 0, buf.length, 0);
-      fs.closeSync(fd);
-      const lines = buf.toString('utf8', 0, len).split('\n');
+      const { bytesRead } = await handle.read(buf, 0, buf.length, 0);
+      await handle.close();
+      const lines = buf.toString('utf8', 0, bytesRead).split('\n');
       const meta = JSON.parse(lines[0]);
       const payload = meta?.payload || meta || {};
       const id = payload.id || payload.session_id || null;
@@ -2654,7 +2696,7 @@ class TranscriptTail {
   }
 
   async newestCodex(cwd) {
-    const root = path.join(process.env.HOME || '', '.codex', 'sessions');
+    const root = path.join(os.homedir(), '.codex', 'sessions');
     const dayDirs = [];
     try {
       const years = (await fs.promises.readdir(root)).sort().reverse().slice(0, 1);
@@ -3455,7 +3497,7 @@ class ClaudeTmuxView {
         if (m) options.push({ digit: m[1], label: m[2].trim() });
         else if (line && !options.length) question = line;
       }
-      const cwd = normalizedPath(workspaceFolder());
+      const cwd = normalizedWorkspace();
       const pinnedName = this.sessionCache[agent]?.name || '';
       const pinned = pinnedName ? await agentSessionInfo(agent, pinnedName) : null;
       const label = AGENTS[agent].label;
@@ -3581,7 +3623,7 @@ class ClaudeTmuxView {
         this.postAgents();
         return;
       }
-      const cwd = normalizedPath(workspaceFolder());
+      const cwd = normalizedWorkspace();
       const agentList = Object.keys(AGENTS);
       const sessionInfos = await Promise.all(agentList.map(async (agent) => {
         const cached = this.sessionCache[agent];
@@ -3897,7 +3939,7 @@ class ClaudeTmuxView {
       if (this.view) this.view.webview.postMessage({ type: 'inputLocked', agent, writerAgent: this.writerAgent });
       return Promise.resolve(false);
     }
-    const cwd = normalizedPath(workspaceFolder());
+    const cwd = normalizedWorkspace();
     if (!cwd) return Promise.resolve(false);
     if (!system) {
       this._lastInputAt = Date.now();
@@ -4011,7 +4053,7 @@ class ClaudeTmuxView {
     const spec = AGENTS[agent];
     if (!spec) return;
     const state = this.agentState[agent];
-    const cwd = normalizedPath(workspaceFolder());
+    const cwd = normalizedWorkspace();
     const name = this.cachedReadySession(agent, cwd) || await sessionName(agent);
     const info = await agentSessionInfo(agent, name);
     const hooksOn = cfg().get('stateHooks') !== false;
@@ -4248,8 +4290,8 @@ class ClaudeTmuxView {
   // bytes may or may not have reached the pane" (timeout, dead transport);
   // unsent is the suffix that was definitely never handed to tmux, for the
   // report. Nothing is ever replayed either way (see flushInput).
-  async sendInputData(agent, data, cwd = normalizedPath(workspaceFolder()), paste = false) {
-    if (!cwd || normalizedPath(workspaceFolder()) !== cwd) return { ok: false, reason: 'workspace' };
+  async sendInputData(agent, data, cwd = normalizedWorkspace(), paste = false) {
+    if (!cwd || normalizedWorkspace() !== cwd) return { ok: false, reason: 'workspace' };
     // Hot path: reuse the session identity the presence loop verified moments
     // ago, so a keystroke flush costs one tmux process instead of four. When
     // the cache is cold, a recent presence-verified name is re-verified with a
@@ -4406,7 +4448,7 @@ class ClaudeTmuxView {
         const requestedCols = this.cols;
         const requestedRows = this.rows;
         const agent = this.activeAgent;
-        const cwd = normalizedPath(workspaceFolder());
+        const cwd = normalizedWorkspace();
         if (!cwd) break;
         let s = this.cachedReadySession(agent, cwd);
         if (!s) {
@@ -5106,7 +5148,7 @@ class ClaudeTmuxView {
   async currentStatus(agent) {
     const state = this.agentState[agent];
     if (this.view) return { present: !!state?.present, status: state?.status || 'idle' };
-    const cwd = normalizedPath(workspaceFolder());
+    const cwd = normalizedWorkspace();
     if (!cwd) return { present: false, status: 'idle' };
     const name = this.cachedReadySession(agent, cwd) || await sessionName(agent);
     const info = await agentSessionInfo(agent, name);
@@ -5143,7 +5185,7 @@ class ClaudeTmuxView {
 
   async captureAgent(args = {}) {
     const agent = this.agentFromArgs(args);
-    const cwd = normalizedPath(workspaceFolder());
+    const cwd = normalizedWorkspace();
     if (!cwd) return { ok: false, agent, reason: 'no-workspace' };
     const name = this.cachedReadySession(agent, cwd) || await sessionName(agent);
     const info = await agentSessionInfo(agent, name);
@@ -5756,7 +5798,7 @@ class ClaudeTmuxView {
       return this.returnHandoffToDetails(transaction, `${AGENTS[target].label} must be back at its prompt before creating the handoff.`);
     }
 
-    const cwd = normalizedPath(workspaceFolder());
+    const cwd = normalizedWorkspace();
     const sourceName = this.cachedReadySession(source, cwd) || await sessionName(source);
     transaction.phase = 'drafting';
     this.postAgents();
@@ -5951,7 +5993,7 @@ class ClaudeTmuxView {
     transaction.texts[mode] = text;
     transaction.previewMode = mode;
     this.postAgents();
-    const cwd = normalizedPath(workspaceFolder());
+    const cwd = normalizedWorkspace();
     const targetName = this.cachedReadySession(target, cwd) || await sessionName(target);
     // Preferred delivery: the briefing goes into the .claude/agentmux channel
     // and only a short pointer is pasted into the TUI — no capture-window or
@@ -6064,7 +6106,7 @@ class ClaudeTmuxView {
   async acceptHandoff(id) {
     const transaction = this.handoff;
     if (!transaction || transaction.id !== id || transaction.phase !== 'ackTimeout') return;
-    const cwd = normalizedPath(workspaceFolder());
+    const cwd = normalizedWorkspace();
     const targetName = transaction.targetName || this.cachedReadySession(transaction.target, cwd) || await sessionName(transaction.target);
     const info = await agentSessionInfo(transaction.target, targetName);
     if (this.handoff !== transaction || transaction.phase !== 'ackTimeout') return;
@@ -6298,7 +6340,7 @@ class ClaudeTmuxView {
     arb.question = question;
     arb.phase = 'delivering';
     this.postAgents();
-    const cwd = normalizedPath(workspaceFolder());
+    const cwd = normalizedWorkspace();
     const deliver = async (agent) => {
       const name = this.cachedReadySession(agent, cwd) || await sessionName(agent);
       const prompt = this.arbiterPrompt(agent, arb.id, question);
@@ -6598,6 +6640,7 @@ let activeProvider = null;
 
 function activate(context) {
   try { setStateHookDir(context.globalStorageUri?.fsPath); } catch { setStateHookDir(null); }
+  invalidateWorkspacePathCache();
   // Free-mode agents join the registry BEFORE anything reads the roster, so
   // every per-agent structure (state, queues, tabs, subscriptions) is built for
   // the full roster exactly once.
@@ -6666,6 +6709,7 @@ function activate(context) {
       }
     }),
     vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      invalidateWorkspacePathCache();
       if (provider.handoff && provider.view) {
         provider.view.webview.postMessage({ type: 'handoffCancelled' });
       }

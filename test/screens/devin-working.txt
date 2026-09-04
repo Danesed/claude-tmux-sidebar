@@ -1,0 +1,16 @@
+⠀⣴⣾⣶⡄⠀⠀⠀⠀
+⠀⠛⠿⠟⠻⣶⣾⣶⡄  Devin CLI
+⠀⣤⣶⣦⣴⠿⢿⠿⠃  v3000.6.14
+⠀⠻⢿⠿⠃⠀⠀⠀⠀
+
+Max · 100% remaining (resets in 1d 16h)
+
+❭ run sleep 3 in bash
+
+
+⠀⠙ Thinking · 1s (esc twice to interrupt) · (158c · ctrl+o for details · opt+t to toggle)
+────────────────────────────────────────────────────────────────────────────────
+❭ Guide Devin while it works
+────────────────────────────────────────────────────────────────────────────────
+SWE-1.7     Use Shift+Tab to cycle permission modes, and /plan and /ask to
+Medium      switch profiles
