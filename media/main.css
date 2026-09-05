@@ -103,27 +103,9 @@ html, body {
 .agent-tab.active {
   color: var(--vscode-foreground, #ddd);
   font-weight: 600;
-  /* The active underline is drawn by #tab-ink so it can slide instead of
-     jumping; this tab's own border steps out of the way. */
-  border-bottom-color: transparent;
+  border-bottom-color: rgb(var(--agent-accent, 14,99,156));
   /* A wash of the agent's own colour rather than the generic selection tint. */
   background: rgba(var(--agent-accent, 128,128,128), .12);
-}
-/* One 2px line under the active tab, sliding on the compositor (a transform,
-   no layout) when the selection moves. Its colour is #app's --agent-accent,
-   i.e. always the active agent's own colour. */
-#tab-ink {
-  position: absolute;
-  left: 0;
-  bottom: 0;
-  width: 1px;
-  height: 2px;
-  border-radius: 1px;
-  background: rgb(var(--agent-accent, 128,128,128));
-  transform-origin: 0 50%;
-  opacity: 0;
-  pointer-events: none;
-  transition: transform .16s cubic-bezier(.32,.72,.24,1), opacity .12s ease;
 }
 .agent-tab:focus-visible { outline: 1px solid rgba(var(--agent-accent, 14,99,156), .8); outline-offset: -1px; }
 /* Attention on a narrow tab, where the label is already gone: the underline
@@ -297,14 +279,6 @@ html, body {
 /* No frame around the mirror: the blinking cursor (only drawn while focused)
    is the one cue that keystrokes are captured. */
 #screen.input-locked { cursor: default; opacity: .88; }
-
-/* On a tab switch the mirror arrives with a 140ms rise-and-fade: motion that
-   says "new content" instead of a hard cut. It runs once per switch, never on
-   the live frame stream. */
-#screen.screen-in { animation: screenIn .14s ease-out; }
-@keyframes screenIn {
-  from { opacity: 0; transform: translateY(2px); }
-}
 
 /* The cursor wears the active agent's colour: with several tabs open, a glance
    at it says which agent you are typing into. A translucent block beats the
@@ -888,10 +862,10 @@ kbd {
   }
   .agent-tab { border-bottom-color: rgba(var(--agent-accent, 128,128,128), .6); }
 }
-/* In forced-colors mode the state dots and the sliding ink keep their
-   semantic colours, and the active tab also gets a real outline. */
+/* In forced-colors mode the state dots keep their semantic colours, and the
+   active tab also gets a real outline. */
 @media (forced-colors: active) {
-  #tab-ink, .agent-state, .dot { forced-color-adjust: none; }
+  .agent-state, .dot { forced-color-adjust: none; }
   .agent-tab.active { outline: 1px solid Highlight; }
 }
 /* Motion is feedback, not decoration: when the user asks for less, every

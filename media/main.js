@@ -36,8 +36,6 @@
   const recallFilter = document.getElementById('recall-filter');
   const recallList = document.getElementById('recall-list');
   const preflightEl = document.getElementById('preflight');
-  const tabStrip = document.getElementById('agent-tabs');
-  const tabInk = document.getElementById('tab-ink');
   const tabs = [...document.querySelectorAll('.agent-tab')];
   const cursorStyle = (app && app.dataset.cursor) || 'block';
   const FLAGS = {
@@ -735,21 +733,6 @@
   btnStart.addEventListener('click', () => vscode.postMessage({ type: 'start', agent: activeAgent }));
   btnResume.addEventListener('click', () => vscode.postMessage({ type: 'attach', agent: activeAgent }));
 
-  // The underline under the active tab is a single element that slides on the
-  // compositor (transform only, no layout) instead of repainting per-tab
-  // borders; its colour follows #app's --agent-accent, i.e. the active agent.
-  let inkFrame = null;
-  function positionInk() {
-    if (inkFrame !== null || !tabInk) return;
-    inkFrame = requestAnimationFrame(() => {
-      inkFrame = null;
-      const tab = tabStrip?.querySelector('.agent-tab.active:not(.hidden)');
-      if (!tab) { tabInk.style.opacity = '0'; return; }
-      tabInk.style.opacity = '1';
-      tabInk.style.transform = `translateX(${tab.offsetLeft}px) scaleX(${tab.offsetWidth})`;
-    });
-  }
-
   function setActiveAgent(agent) {
     if (!scrollState[agent]) return;
     const changed = agent !== activeAgent;
@@ -795,14 +778,6 @@
     }
     setScrollTop(scrollState[agent].top);
     applyPairLock();
-    positionInk();
-    if (changed) {
-      // One 140ms rise-and-fade marks the new content; retriggered by
-      // removing and re-adding the class within the same frame.
-      screen.classList.remove('screen-in');
-      void screen.offsetWidth;
-      screen.classList.add('screen-in');
-    }
   }
 
   tabs.forEach((tab) => {
@@ -938,7 +913,6 @@
       if (tab.getAttribute('aria-label') !== label) tab.setAttribute('aria-label', label);
       for (const button of LAUNCH_BTN[agent]) button.classList.toggle('hidden', present);
     }
-    positionInk();
     const presentAgents = AGENT_IDS.filter((agent) => agentPresence[agent].present);
     const hasWorkspace = message.hasWorkspace !== false;
     // Free-mode agents have nothing to launch, so they never keep the launch
@@ -1657,14 +1631,9 @@
   // ---- boot ----------------------------------------------------------------
   measure();
   reportSize();
-  positionInk();
-  if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { scheduleReportSize(true); positionInk(); });
-  if (window.ResizeObserver) {
-    new ResizeObserver(() => scheduleReportSize()).observe(wrap);
-    // The ink tracks the active tab's box, so any strip relayout re-anchors it.
-    if (tabStrip) new ResizeObserver(positionInk).observe(tabStrip);
-  }
-  window.addEventListener('resize', () => { scheduleReportSize(); positionInk(); });
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => scheduleReportSize(true));
+  if (window.ResizeObserver) new ResizeObserver(() => scheduleReportSize()).observe(wrap);
+  window.addEventListener('resize', () => scheduleReportSize());
   vscode.postMessage({ type: 'ready' });
   setTimeout(() => screen.focus(), 200);
 })();

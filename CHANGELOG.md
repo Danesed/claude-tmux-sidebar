@@ -6,12 +6,11 @@ A visual polish pass — still no new dependencies, still a flat stylesheet and 
 
 ### Look
 
-- **A single sliding ink underline** marks the active tab and travels with it on a compositor transform (no layout, no per-tab border repaints) when the selection moves — the Linear/Vercel pattern, in 2 px.
 - **Layered surfaces, not shadows.** Menus, overlays, cards and chips sit on two translucent steps mixed from the theme's own foreground (`color-mix`), so every elevation stays correct in light themes too; the only real shadow left is the modal's.
-- **Motion answers state, never decorates.** A tab switch paints with one 140 ms rise-and-fade; a background agent that finishes or needs input pops its dot once, then holds a steady coloured ring; the launcher card and the session list deal their rows in with a sub-300 ms stagger; `prefers-reduced-motion` collapses all of it.
+- **Motion answers state, never decorates.** A background agent that finishes or needs input pops its dot once, then holds a steady coloured ring; the launcher card and the session list deal their rows in with a sub-300 ms stagger; `prefers-reduced-motion` collapses all of it. (A sliding underline and a switch fade were tried and cut: the slide streaks between tabs and the fade delayed the cached frame — switching stays a hard cut.)
 - **Chrome steps back.** Footer actions and the timeline header dim until hovered, the mirror's scrollbar only exists while you scroll or hover the pane, and below ~46 px a tab keeps only its mark and state dot.
 - **Tabular numerals** on every metric — uptime, sizes, timestamps — so ticking counters never shift; the chip row flashes once through the accent when the numbers change.
-- **Accessible by default.** `prefers-contrast: more` strengthens hairlines and underlines; `forced-colors` keeps the semantic dots and ink readable and adds a real outline to the active tab.
+- **Accessible by default.** `prefers-contrast: more` strengthens hairlines and underlines; `forced-colors` keeps the semantic dots readable and adds a real outline to the active tab.
 
 ## 0.16.1
 

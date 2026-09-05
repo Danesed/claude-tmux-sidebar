@@ -1984,14 +1984,13 @@ async function run() {
       'the mark replaces the label once a tab is too narrow to say anything');
     assert.match(css, /border-bottom: 2px solid rgba\(var\(--agent-accent/,
       'the colour rides the underline the tab already had — no new horizontal space');
-    // The polish pass: sliding ink, layered surfaces, tabular numerals, and
-    // motion that answers state changes instead of decorating.
-    assert.match(markup, /id="tab-ink"/, 'the active underline is one sliding element');
+    // The polish pass: layered surfaces, tabular numerals, and motion that
+    // answers state changes instead of decorating.
     assert.match(markup, /style="--i:\d+"/, 'launcher rows carry their stagger index');
-    assert.match(webviewSource, /function positionInk\(\)/, 'the ink is re-anchored in script');
-    assert.match(webviewSource, /translateX\(\$\{tab\.offsetLeft\}px\) scaleX/,
-      'the ink moves with a compositor transform, not layout');
-    assert.match(webviewSource, /classList\.add\('screen-in'\)/, 'a switch paints with a rise-and-fade');
+    assert.doesNotMatch(markup, /tab-ink/,
+      'no sliding ink: a shared underline streaks between tabs during the slide');
+    assert.doesNotMatch(webviewSource, /positionInk|screen-in/,
+      'no per-switch ink layout reads or screen repaint animation');
     assert.match(webviewSource, /classList\.add\('scrolling'\)/, 'the mirror scrollbar only shows while scrolling');
     assert.match(webviewSource, /classList\.add\('tick'\)/, 'chips flash once when the counters move');
     assert.match(css, /--surface-1: color-mix/, 'surfaces are layered from the theme, not hardcoded');
