@@ -70,7 +70,10 @@
   const scrollState = byAgent(() => ({ top: 0, follow: true, historyMode: false, historyAvailable: 0, pendingHistory: false }));
   const frameCache = byAgent(() => ({ frame: null, meta: '', name: '', latencyMs: 0 }));
   let renderedLineCount = 0;
-  let programmaticScroll = false;
+  // Programmatic scrolls are recognised by the position they wrote, not by a
+  // consume-once flag: a user scroll coalesced with our write used to be
+  // swallowed whole, leaving `follow` stale and the view snapping back.
+  let expectedScrollTop = null;
   let scrollFadeTimer = null;
   // Line cache for the delta frame transport: raw '\n' split (including the
   // trailing '' element) of the active agent's current live frame, plus the
@@ -344,6 +347,15 @@
       screen.appendChild(virt.spacerTop);
       screen.appendChild(virt.spacerBottom);
       renderedLineCount = lines.length;
+      const st = scrollState[activeAgent];
+      if (st.pendingHistory) {
+        // Land at the history/pane seam BEFORE the window is computed, so the
+        // first paint already shows the right rows instead of flashing the
+        // top of a thousand-line capture and jumping a frame later.
+        st.pendingHistory = false;
+        st.follow = false;
+        setScrollTop(wrap.scrollHeight - wrap.clientHeight * 1.8);
+      }
       updateVirtualWindow(true);
     } else {
       exitVirtual();
@@ -371,9 +383,13 @@
           state.pendingHistory = false;
           state.follow = false;
           setScrollTop(wrap.scrollHeight - wrap.clientHeight * 1.8);
-        } else {
-          setScrollTop(state.follow ? wrap.scrollHeight : state.top);
+        } else if (state.follow) {
+          setScrollTop(wrap.scrollHeight);
         }
+        // Not following: never write the saved position back. The browser
+        // already keeps scrollTop stable across content changes, and
+        // re-writing the last saved value here was what yanked the view away
+        // from an in-flight scroll gesture while output streamed in.
         state.top = wrap.scrollTop;
       }
       updateCursorVisibility();
@@ -420,14 +436,13 @@
     state.top = wrap.scrollTop;
     state.follow = nearBottom();
   }
-  // Programmatic scrolls set a consume-once flag that the resulting scroll
-  // event clears, so scroll-position bookkeeping never depends on event timing.
-  // The flag is only set when the write will actually move the viewport (and
-  // therefore fire an event) — otherwise it would swallow a later user scroll.
+  // A programmatic write remembers where it put the viewport; the resulting
+  // scroll event is consumed only if it reports that exact position, so a
+  // user scroll landing on top of ours is always treated as the user's.
   function setScrollTop(value) {
     const target = Math.max(0, Math.min(value, wrap.scrollHeight - wrap.clientHeight));
     if (Math.abs(wrap.scrollTop - target) < 1) return;
-    programmaticScroll = true;
+    expectedScrollTop = target;
     wrap.scrollTop = target;
   }
   wrap.addEventListener('scroll', () => {
@@ -442,13 +457,14 @@
         updateVirtualWindow(false);
       });
     }
-    if (programmaticScroll) { programmaticScroll = false; return; }
-    saveScroll();
-    const state = scrollState[activeAgent];
-    if (state.historyMode && state.follow) {
-      state.historyMode = false;
-      vscode.postMessage({ type: 'historyMode', agent: activeAgent, enabled: false });
+    if (expectedScrollTop !== null) {
+      const ours = Math.abs(wrap.scrollTop - expectedScrollTop) < 2;
+      expectedScrollTop = null;
+      if (ours) return;
+      // A user scroll landed while our write was in flight: fall through and
+      // record it instead of swallowing it.
     }
+    saveScroll();
     updateCursorVisibility();
   });
   function requestHistory() {
@@ -458,12 +474,33 @@
     state.pendingHistory = true;
     state.follow = false;
     vscode.postMessage({ type: 'historyMode', agent: activeAgent, enabled: true });
+    applyPairLock(); // the hint line advertises scrollback mode
     return true;
   }
   let lastForwardedWheel = 0;
   wrap.addEventListener('wheel', (e) => {
     if (!overlay.classList.contains('hidden')) return;
-    if (wrap.scrollHeight > wrap.clientHeight + charH) return;
+    const state = scrollState[activeAgent];
+    if (wrap.scrollHeight > wrap.clientHeight + charH) {
+      // Scrollable: the browser scrolls natively, but the intent must be
+      // recorded NOW — the scroll event lands a task later, and a frame
+      // arriving in between would read a stale `follow` and snap the view to
+      // the bottom while the gesture is still mid-flight.
+      if (e.deltaY < 0) {
+        state.follow = false;
+        // At the top edge, wheeling further up asks for scrollback history.
+        if (wrap.scrollTop <= 1) requestHistory();
+      } else if (state.historyMode && nearBottom()) {
+        // Wheeling down PAST the end of the scrollback is a deliberate "back
+        // to live". Merely arriving at the bottom (e.g. momentum overshoot)
+        // does not eject you from history any more.
+        state.historyMode = false;
+        state.follow = true;
+        vscode.postMessage({ type: 'historyMode', agent: activeAgent, enabled: false });
+        applyPairLock();
+      }
+      return;
+    }
     const now = Date.now();
     if (Math.abs(e.deltaY) < 4 || now - lastForwardedWheel < 80) return;
     e.preventDefault();
@@ -692,9 +729,20 @@
     }
     if (e.shiftKey && (e.key === 'PageUp' || e.key === 'PageDown')) {
       e.preventDefault();
-      if (e.key === 'PageUp' && wrap.scrollHeight <= wrap.clientHeight + charH && requestHistory()) return;
-      scrollState[activeAgent].follow = false;
+      const state = scrollState[activeAgent];
+      // PageUp against the top edge pages in scrollback history; PageDown
+      // that lands on the bottom edge re-engages follow and leaves history.
+      if (e.key === 'PageUp' && wrap.scrollTop <= 1 && requestHistory()) return;
+      if (e.key === 'PageUp') state.follow = false;
       wrap.scrollBy({ top: (e.key === 'PageUp' ? -1 : 1) * wrap.clientHeight * 0.85 });
+      if (e.key === 'PageDown' && nearBottom()) {
+        state.follow = true;
+        if (state.historyMode) {
+          state.historyMode = false;
+          vscode.postMessage({ type: 'historyMode', agent: activeAgent, enabled: false });
+        }
+        applyPairLock();
+      }
       return;
     }
     const bytes = keyToBytes(e);
@@ -841,11 +889,13 @@
     const locked = isInputLocked();
     screen.classList.toggle('input-locked', locked);
     screen.setAttribute('aria-readonly', locked ? 'true' : 'false');
+    const inHistory = scrollState[activeAgent].historyMode;
     document.getElementById('hint').textContent = transactionLocked
       ? 'handoff in progress'
       : locked ? `Pair Mode · ${cap(writerAgent)} is writer`
-        : paneMode ? `pane is in tmux ${paneMode} · typing here leaves it`
-          : (tabs.filter((t) => !t.classList.contains('hidden')).length > 1 ? 'click to type · Alt+1…9 switch agent' : 'click to type');
+        : inHistory ? 'scrollback — wheel down at the end returns to live'
+          : paneMode ? `pane is in tmux ${paneMode} · typing here leaves it`
+            : (tabs.filter((t) => !t.classList.contains('hidden')).length > 1 ? 'click to type · Alt+1…9 switch agent' : 'click to type');
     btnUnlock.classList.toggle('hidden', !writerAgent);
   }
 
@@ -1482,6 +1532,7 @@
       lastSeen = Date.now();
       overlay.classList.add('hidden');
       const state = scrollState[activeAgent];
+      const histChanged = state.historyMode !== !!m.historyMode;
       state.historyMode = !!m.historyMode;
       state.historyAvailable = parseInt(m.historyAvailable, 10) || 0;
       if (m.frame != null) {
@@ -1509,7 +1560,7 @@
       frameCache[m.agent].latencyMs = parseInt(m.latencyMs, 10) || 0;
       applyFrameMeta(frameCache[m.agent].meta, frameCache[m.agent].name, frameCache[m.agent].latencyMs);
       const mode = typeof m.paneMode === 'string' ? m.paneMode : '';
-      if (mode !== paneMode) { paneMode = mode; applyPairLock(); }
+      if (mode !== paneMode || histChanged) { paneMode = mode; applyPairLock(); }
     } else if (m.type === 'bgFrame') {
       // Background agent captures keep the inactive tab's cache warm so a
       // switch paints an at-most-seconds-old frame (and cursor) instantly.

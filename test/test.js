@@ -1801,6 +1801,21 @@ async function run() {
   assert.match(webviewSource, /isAltDigit\(e\)/, 'Alt+1..9 switches tabs and is never typed into tmux');
   assert.match(webviewSource, /app\.style\.setProperty\('--agent-accent'/, 'the chrome follows the active agent colour');
   assert.match(webviewSource, /state-history|historyMode/);
+  // Scroll must not fight the user: intent is recorded on the wheel event
+  // itself, programmatic writes are recognised by position, and nothing
+  // rewrites the saved position over an in-flight gesture.
+  assert.match(webviewSource, /if \(e\.deltaY < 0\) \{\s*state\.follow = false/,
+    'wheel-up drops follow synchronously — before the scroll event lands');
+  assert.doesNotMatch(webviewSource, /programmaticScroll/,
+    'no consume-once flag: it swallowed user scrolls and left follow stale');
+  assert.match(webviewSource, /expectedScrollTop/,
+    'programmatic writes are consumed only when they report their own position');
+  assert.doesNotMatch(webviewSource, /wrap\.scrollHeight : state\.top/,
+    'no stale-position restore: that is what yanked the view mid-gesture');
+  assert.match(webviewSource, /wrap\.scrollTop <= 1\) requestHistory\(\)/,
+    'wheel up against the top edge pages in scrollback');
+  assert.match(webviewSource, /state\.historyMode = false;\s*state\.follow = true/,
+    'wheeling past the end of scrollback is the deliberate way back to live');
   assert.match(source, /value="continue">Continue task/);
   assert.match(webviewSource, /compositionend/);
   assert.match(webviewSource, /scheduleReportSize/);

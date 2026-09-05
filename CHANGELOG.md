@@ -4,6 +4,10 @@
 
 A visual polish pass — still no new dependencies, still a flat stylesheet and one script file.
 
+### Fixed
+
+- **Scrolling no longer "escapes".** While output streamed in, a wheel gesture could be yanked back to the bottom (or to a stale position) mid-flight: `follow` only cleared when the async scroll event landed, and every frame re-wrote the saved position over the live one. Intent is now recorded on the wheel event itself; a frame never rewrites a position the user owns; programmatic scroll writes are recognised by the position they set instead of a consume-once flag that could swallow a real scroll; and reaching the bottom of the scrollback by momentum no longer ejects you from history — wheeling *past* the end (or `Shift+PageDown` at the edge) is the deliberate way back to live. Wheeling up against the top edge now also pages scrollback in even when the pane is taller than the view.
+
 ### Look
 
 - **Layered surfaces, not shadows.** Menus, overlays, cards and chips sit on two translucent steps mixed from the theme's own foreground (`color-mix`), so every elevation stays correct in light themes too; the only real shadow left is the modal's.

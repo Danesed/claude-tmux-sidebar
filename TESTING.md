@@ -25,11 +25,13 @@ then:
 2. **Type** — click the mirror, type a prompt, press Enter. Keys must land on
    the first try; the status dot goes `working` immediately, the tab pulses.
 3. **Second agent** — start another one. Switching tabs paints the cached
-   frame instantly; the accent colour of the active tab, the sliding ink
-   underline and the cursor follows the active agent, and the mirror arrives
-   with a single quick rise-and-fade.
+   frame instantly; the accent colour of the active tab's underline and the
+   cursor follows the active agent.
 4. **Scrollback** — wheel up at the top of the live screen: history loads and
-   the view stays where you scrolled; wheel back down returns to live mode.
+   the view stays where you scrolled — including while the agent is still
+   streaming (no snap back to the bottom, no mid-gesture jumps). Wheeling
+   *past* the bottom edge (or `Shift+PageDown` there) returns to live mode;
+   merely arriving at the bottom does not.
 5. **Needs input** — trigger an approval dialog on a *background* agent: its
    tab turns amber, the VS Code badge counts it, hovering the tab previews the
    question, the notification offers the numbered answers.
