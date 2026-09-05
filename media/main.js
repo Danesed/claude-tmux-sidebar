@@ -36,6 +36,8 @@
   const recallFilter = document.getElementById('recall-filter');
   const recallList = document.getElementById('recall-list');
   const preflightEl = document.getElementById('preflight');
+  const tabStrip = document.getElementById('agent-tabs');
+  const tabInk = document.getElementById('tab-ink');
   const tabs = [...document.querySelectorAll('.agent-tab')];
   const cursorStyle = (app && app.dataset.cursor) || 'block';
   const FLAGS = {
@@ -71,6 +73,7 @@
   const frameCache = byAgent(() => ({ frame: null, meta: '', name: '', latencyMs: 0 }));
   let renderedLineCount = 0;
   let programmaticScroll = false;
+  let scrollFadeTimer = null;
   // Line cache for the delta frame transport: raw '\n' split (including the
   // trailing '' element) of the active agent's current live frame, plus the
   // sequence number it corresponds to. Deltas only apply to an unbroken chain.
@@ -430,6 +433,11 @@
     wrap.scrollTop = target;
   }
   wrap.addEventListener('scroll', () => {
+    // The mirror's scrollbar only shows while a scroll is in flight (or the
+    // pointer hovers, handled in CSS) — a static screen keeps no stray track.
+    wrap.classList.add('scrolling');
+    clearTimeout(scrollFadeTimer);
+    scrollFadeTimer = setTimeout(() => wrap.classList.remove('scrolling'), 700);
     if (virt && virtScrollFrame === null) {
       virtScrollFrame = requestAnimationFrame(() => {
         virtScrollFrame = null;
@@ -544,6 +552,10 @@
     if (statusMeta.dataset.text !== nextMetaText) {
       statusMeta.dataset.text = nextMetaText;
       statusMeta.innerHTML = chips.map((c) => `<span class="chip">${esc(c)}</span>`).join('');
+      // One soft accent flash through the row when the numbers move.
+      statusMeta.classList.remove('tick');
+      void statusMeta.offsetWidth;
+      statusMeta.classList.add('tick');
       statusMeta.title = nextMetaText
         + (tel && tel.model ? `\nmodel ${tel.model}` : '')
         + (delta && delta.names ? `\nlast turn: ${delta.names.join(', ')}` : '');
@@ -723,6 +735,21 @@
   btnStart.addEventListener('click', () => vscode.postMessage({ type: 'start', agent: activeAgent }));
   btnResume.addEventListener('click', () => vscode.postMessage({ type: 'attach', agent: activeAgent }));
 
+  // The underline under the active tab is a single element that slides on the
+  // compositor (transform only, no layout) instead of repainting per-tab
+  // borders; its colour follows #app's --agent-accent, i.e. the active agent.
+  let inkFrame = null;
+  function positionInk() {
+    if (inkFrame !== null || !tabInk) return;
+    inkFrame = requestAnimationFrame(() => {
+      inkFrame = null;
+      const tab = tabStrip?.querySelector('.agent-tab.active:not(.hidden)');
+      if (!tab) { tabInk.style.opacity = '0'; return; }
+      tabInk.style.opacity = '1';
+      tabInk.style.transform = `translateX(${tab.offsetLeft}px) scaleX(${tab.offsetWidth})`;
+    });
+  }
+
   function setActiveAgent(agent) {
     if (!scrollState[agent]) return;
     const changed = agent !== activeAgent;
@@ -768,6 +795,14 @@
     }
     setScrollTop(scrollState[agent].top);
     applyPairLock();
+    positionInk();
+    if (changed) {
+      // One 140ms rise-and-fade marks the new content; retriggered by
+      // removing and re-adding the class within the same frame.
+      screen.classList.remove('screen-in');
+      void screen.offsetWidth;
+      screen.classList.add('screen-in');
+    }
   }
 
   tabs.forEach((tab) => {
@@ -903,6 +938,7 @@
       if (tab.getAttribute('aria-label') !== label) tab.setAttribute('aria-label', label);
       for (const button of LAUNCH_BTN[agent]) button.classList.toggle('hidden', present);
     }
+    positionInk();
     const presentAgents = AGENT_IDS.filter((agent) => agentPresence[agent].present);
     const hasWorkspace = message.hasWorkspace !== false;
     // Free-mode agents have nothing to launch, so they never keep the launch
@@ -1214,17 +1250,19 @@
     if (d < 604800) return Math.floor(d / 86400) + 'd ago';
     try { return new Date(ts).toLocaleDateString(); } catch { return ''; }
   }
-  function renderSessions() {
+  function renderSessions(animate = false) {
     const q = (sessionFilter.value || '').toLowerCase().trim();
     const list = q ? allSessions.filter((s) => (s.name || s.id || '').toLowerCase().includes(q)) : allSessions;
+    sessionList.classList.toggle('stagger', animate);
     if (!allSessions.length) {
       sessionList.innerHTML = '<div class="sess-empty">No past conversations in this folder.</div>';
       return;
     }
     if (!list.length) { sessionList.innerHTML = '<div class="sess-empty">No match.</div>'; return; }
     let html = '';
+    let i = 0;
     for (const s of list) {
-      html += `<div class="sess-row">`
+      html += `<div class="sess-row" style="--i:${Math.min(i++, 9)}">`
             + `<button class="sess-item" data-id="${esc(s.id)}" title="${esc(s.id)}">`
             + `<span class="sess-name">${esc(s.name || s.id)}</span>`
             + `<span class="sess-date">${esc(relTime(s.lastTs))} · ${esc((s.id || '').slice(0, 8))}</span>`
@@ -1237,9 +1275,9 @@
   function setSessions(list) {
     allSessions = list || [];
     sessionFilter.classList.toggle('hidden', allSessions.length < 6);
-    renderSessions();
+    renderSessions(true);
   }
-  sessionFilter.addEventListener('input', renderSessions);
+  sessionFilter.addEventListener('input', () => renderSessions());
   sessionList.addEventListener('click', (e) => {
     const del = e.target.closest('.sess-del');
     if (del && del.dataset.del) {
@@ -1619,9 +1657,14 @@
   // ---- boot ----------------------------------------------------------------
   measure();
   reportSize();
-  if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => scheduleReportSize(true));
-  if (window.ResizeObserver) new ResizeObserver(() => scheduleReportSize()).observe(wrap);
-  window.addEventListener('resize', () => scheduleReportSize());
+  positionInk();
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { scheduleReportSize(true); positionInk(); });
+  if (window.ResizeObserver) {
+    new ResizeObserver(() => scheduleReportSize()).observe(wrap);
+    // The ink tracks the active tab's box, so any strip relayout re-anchors it.
+    if (tabStrip) new ResizeObserver(positionInk).observe(tabStrip);
+  }
+  window.addEventListener('resize', () => { scheduleReportSize(); positionInk(); });
   vscode.postMessage({ type: 'ready' });
   setTimeout(() => screen.focus(), 200);
 })();

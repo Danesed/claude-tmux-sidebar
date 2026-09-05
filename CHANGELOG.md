@@ -26,11 +26,16 @@ Reliability, speed and a lighter look. No new dependencies, no extra tmux proces
 ### Look
 
 - **The cursor wears the agent's colour.** One CSS variable, set on switch, tints the cursor, the active tab wash and the footer chips: with several tabs open, a glance says which agent you are typing into. The mirror itself has no frame or focus ring any more — the blinking cursor is the one cue that keys are captured.
-- **Footer as chips.** `80×24`, `up 2h`, `↑12k ↓3k` are hairline pills instead of one dotted sentence; capture latency is an amber ring on the status dot with the figure in its tooltip.
+- **A single sliding ink underline** marks the active tab and travels with it on a compositor transform (no layout, no per-tab border repaints) when the selection moves — the Linear/Vercel pattern, in 2 px.
+- **Footer as chips.** `80×24`, `up 2h`, `↑12k ↓3k` are hairline pills instead of one dotted sentence, with tabular numerals so ticking counters never shift; the row flashes once through the accent when the numbers change. Capture latency is an amber ring on the status dot with the figure in its tooltip.
+- **Layered surfaces, not shadows.** Menus, overlays, cards and chips sit on two translucent steps mixed from the theme's own foreground (`color-mix`), so every elevation stays correct in light themes too; the only real shadow left is the modal's.
+- **Motion answers state, never decorates.** A tab switch paints with one 140 ms rise-and-fade; a background agent that finishes or needs input pops its dot once, then holds a steady coloured ring; the launcher card and the session list deal their rows in with a sub-300 ms stagger; `prefers-reduced-motion` collapses all of it.
+- **Chrome steps back.** Footer actions and the timeline header dim until hovered, the mirror's scrollbar only exists while you scroll or hover the pane, and below ~46 px a tab keeps only its mark and state dot.
 - **Peek at the question.** Hovering a background agent's amber tab shows the last lines of the dialog it is stuck on.
 - **Keyboard.** `Alt+1…9` switches tabs (by physical key, so it works with Option on macOS); on the launcher card the bare digit starts the Nth agent, with keycaps drawn on the buttons.
 - **Dense mode.** Under 340 px of height the tabs and footer tighten and the chips hide; under 240 px of width the footer keeps only the state.
-- **Flat, not glass.** `backdrop-filter` blur is gone from menus, overlays and modals (it was repainted on every terminal frame while open), shadows are lighter, borders are hairlines; the handoff modal is more compact. Firefox scrollbars are styled; `button:focus-visible` is visible; long paths wrap in modal text areas.
+- **Accessible by default.** `prefers-contrast: more` strengthens hairlines and underlines, `forced-colors` keeps the semantic dots and ink readable and adds a real outline to the active tab.
+- **Flat, not glass.** `backdrop-filter` blur is gone from menus, overlays and modals (it was repainted on every terminal frame while open), borders are hairlines; the handoff modal is more compact. Firefox scrollbars are styled; `button:focus-visible` is visible; long paths wrap in modal text areas.
 
 ## 0.16.0
 

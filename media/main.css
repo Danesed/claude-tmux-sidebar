@@ -22,6 +22,24 @@ html, body {
   --c-input: var(--vscode-charts-yellow, #d7a838);
   --c-dead: var(--vscode-testing-iconFailed, #f14c4c);
   --hairline: var(--vscode-widget-border, rgba(128,128,128,.28));
+  /* Elevation is layered surfaces, not shadows: two translucent steps mixed
+     from the theme's own foreground, plus a solid step for floating chrome
+     (menus, overlays) that must not let the mirror bleed through. Mixing
+     theme colours keeps every step correct in light themes too. */
+  --surface-1: color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 5%, transparent);
+  --surface-2: color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 10%, transparent);
+  --surface-solid: color-mix(in srgb, var(--vscode-editor-background, #1e1e1e), var(--vscode-editor-foreground, #ccc) 6%);
+  --border-sub: color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 14%, transparent);
+  --scroll-thumb: color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 28%, transparent);
+}
+@supports not (background: color-mix(in srgb, red, blue)) {
+  #app {
+    --surface-1: rgba(128, 128, 128, .12);
+    --surface-2: rgba(128, 128, 128, .2);
+    --surface-solid: #2a2d2e;
+    --border-sub: rgba(128, 128, 128, .3);
+    --scroll-thumb: rgba(121, 121, 121, .35);
+  }
 }
 
 /* ---- agent tabs ---------------------------------------------------------- */
@@ -33,7 +51,7 @@ html, body {
   padding: 5px 6px 0;
   gap: 4px;
   background: var(--vscode-sideBar-background, var(--vscode-editor-background));
-  border-bottom: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.08));
+  border-bottom: 1px solid var(--vscode-panel-border, var(--border-sub));
 }
 .agent-tab {
   flex: 1 1 0;
@@ -48,11 +66,12 @@ html, body {
      already ellipsized to "Cl…". --agent-accent is set per tab by the host as
      "r, g, b" so any alpha can be built from it. */
   border-bottom: 2px solid rgba(var(--agent-accent, 128,128,128), .34);
-  border-radius: 3px 3px 0 0;
+  border-radius: 4px 4px 0 0;
   color: var(--vscode-descriptionForeground, #999);
   background: transparent;
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 500;
+  letter-spacing: .01em;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -72,15 +91,39 @@ html, body {
   .agent-label { display: none; }
   .agent-mark { display: inline; }
 }
+/* Below ~46px there is room for the mark and the state dot only. */
+@container (max-width: 46px) {
+  .agent-mark { font-size: 10px; }
+  .agent-tab.writer .writer-mark { display: none; }
+}
 .agent-tab {
   transition: background-color .12s ease, color .12s ease, border-color .12s ease;
 }
-.agent-tab:hover { background: var(--vscode-list-hoverBackground, rgba(255,255,255,0.06)); }
+.agent-tab:hover { background: var(--vscode-list-hoverBackground, var(--surface-1)); }
 .agent-tab.active {
   color: var(--vscode-foreground, #ddd);
-  border-bottom-color: rgb(var(--agent-accent, 14,99,156));
+  font-weight: 600;
+  /* The active underline is drawn by #tab-ink so it can slide instead of
+     jumping; this tab's own border steps out of the way. */
+  border-bottom-color: transparent;
   /* A wash of the agent's own colour rather than the generic selection tint. */
   background: rgba(var(--agent-accent, 128,128,128), .12);
+}
+/* One 2px line under the active tab, sliding on the compositor (a transform,
+   no layout) when the selection moves. Its colour is #app's --agent-accent,
+   i.e. always the active agent's own colour. */
+#tab-ink {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 1px;
+  height: 2px;
+  border-radius: 1px;
+  background: rgb(var(--agent-accent, 128,128,128));
+  transform-origin: 0 50%;
+  opacity: 0;
+  pointer-events: none;
+  transition: transform .16s cubic-bezier(.32,.72,.24,1), opacity .12s ease;
 }
 .agent-tab:focus-visible { outline: 1px solid rgba(var(--agent-accent, 14,99,156), .8); outline-offset: -1px; }
 /* Attention on a narrow tab, where the label is already gone: the underline
@@ -113,13 +156,25 @@ html, body {
   opacity: 1;
   animation: inputBreath 2.2s ease-in-out infinite;
 }
+/* Attention is the "tab alert" pattern: one pop when the flag lands, then a
+   steady dot with a soft ring. Motion must not loop on a background tab — it
+   is exactly the tab you are not looking at. */
 .agent-tab.attention-done .agent-state {
   background: var(--vscode-testing-iconPassed, #3fb950);
   opacity: 1;
+  animation: statePop .3s cubic-bezier(.2,.9,.3,1.4) 1;
+  box-shadow: 0 0 0 2.5px color-mix(in srgb, var(--c-done) 32%, transparent);
 }
 .agent-tab.attention-needs-input .agent-state {
   background: var(--vscode-charts-yellow, #d7a838);
   opacity: 1;
+  animation: statePop .3s cubic-bezier(.2,.9,.3,1.4) 1;
+  box-shadow: 0 0 0 2.5px color-mix(in srgb, var(--c-input) 32%, transparent);
+}
+@keyframes statePop {
+  0% { transform: scale(.4); }
+  60% { transform: scale(1.5); }
+  100% { transform: scale(1); }
 }
 @keyframes workingGlow {
   0%, 100% { transform: scale(0.9); opacity: 0.75; }
@@ -145,7 +200,7 @@ html, body {
   line-height: 1;
   transition: background-color .12s ease, color .12s ease;
 }
-.tab-add:hover { background: var(--vscode-list-hoverBackground, rgba(255,255,255,.06)); color: var(--vscode-foreground, #ddd); }
+.tab-add:hover { background: var(--vscode-list-hoverBackground, var(--surface-1)); color: var(--vscode-foreground, #ddd); }
 .launch-menu {
   position: absolute;
   z-index: 20;
@@ -162,16 +217,16 @@ html, body {
   border-radius: 6px;
   /* Solid, not glass: a blur over a terminal that repaints 8×/s is paid on
      every frame while the menu is open, and VS Code's own menus are flat. */
-  background: var(--vscode-menu-background, #252526);
-  box-shadow: 0 2px 8px rgba(0,0,0,.22);
+  background: var(--vscode-menu-background, var(--surface-solid));
+  box-shadow: 0 8px 24px rgba(0,0,0,.3);
 }
-.launch-menu button { text-align: left; padding: 6px 8px; border: 0; background: transparent; white-space: nowrap; }
-.launch-menu button:hover { background: var(--vscode-menu-selectionBackground, #094771); }
+.launch-menu button { text-align: left; padding: 6px 8px; border: 0; border-radius: 4px; background: transparent; white-space: nowrap; }
+.launch-menu button:hover { background: var(--vscode-menu-selectionBackground, var(--surface-2)); }
 /* Agents above, the free-mode entries below: two different kinds of "add". */
 .launch-sep {
   height: 1px;
   margin: 3px 2px;
-  background: var(--vscode-widget-border, rgba(255,255,255,.15));
+  background: var(--vscode-widget-border, var(--border-sub));
 }
 /* The agent's colour, ahead of its name, wherever the name appears. */
 .agent-swatch {
@@ -194,8 +249,12 @@ html, body {
   flex: 1 1 auto;
   overflow: auto;
   min-height: 0;
-  scrollbar-color: var(--vscode-scrollbarSlider-background, #5558) transparent;
+  scrollbar-color: var(--vscode-scrollbarSlider-background, var(--scroll-thumb)) transparent;
 }
+/* The mirror's own scrollbar is chrome, not content: it only exists while the
+   pointer is over the pane or a scroll is in flight (.scrolling, set by the
+   script), so a static screen shows no stray track. */
+#screen-wrap:not(:hover):not(.scrolling) { scrollbar-color: transparent transparent; }
 
 #terminal {
   position: relative;
@@ -238,6 +297,14 @@ html, body {
 /* No frame around the mirror: the blinking cursor (only drawn while focused)
    is the one cue that keystrokes are captured. */
 #screen.input-locked { cursor: default; opacity: .88; }
+
+/* On a tab switch the mirror arrives with a 140ms rise-and-fade: motion that
+   says "new content" instead of a hard cut. It runs once per switch, never on
+   the live frame stream. */
+#screen.screen-in { animation: screenIn .14s ease-out; }
+@keyframes screenIn {
+  from { opacity: 0; transform: translateY(2px); }
+}
 
 /* The cursor wears the active agent's colour: with several tabs open, a glance
    at it says which agent you are typing into. A translucent block beats the
@@ -286,6 +353,7 @@ html, body {
 }
 
 /* thin, modern themed scrollbars */
+#screen-wrap:not(:hover):not(.scrolling)::-webkit-scrollbar-thumb { background: transparent; }
 #screen-wrap::-webkit-scrollbar,
 #session-list::-webkit-scrollbar,
 #recall-list::-webkit-scrollbar,
@@ -312,7 +380,7 @@ html, body {
 #arbiter-body::-webkit-scrollbar-thumb,
 #timeline-list pre::-webkit-scrollbar-thumb,
 .arb-answer pre::-webkit-scrollbar-thumb {
-  background: var(--vscode-scrollbarSlider-background, rgba(121, 121, 121, 0.35));
+  background: var(--vscode-scrollbarSlider-background, var(--scroll-thumb));
   border-radius: 3px;
 }
 #screen-wrap::-webkit-scrollbar-thumb:hover,
@@ -322,7 +390,7 @@ html, body {
 #arbiter-body::-webkit-scrollbar-thumb:hover,
 #timeline-list pre::-webkit-scrollbar-thumb:hover,
 .arb-answer pre::-webkit-scrollbar-thumb:hover {
-  background: var(--vscode-scrollbarSlider-hoverBackground, rgba(100, 100, 100, 0.65));
+  background: var(--vscode-scrollbarSlider-hoverBackground, var(--surface-2));
 }
 
 /* Firefox scrollbar support: thin slider, no track background. */
@@ -334,7 +402,7 @@ html, body {
 #timeline-list pre,
 .arb-answer pre {
   scrollbar-width: thin;
-  scrollbar-color: var(--vscode-scrollbarSlider-background, rgba(121, 121, 121, 0.35)) transparent;
+  scrollbar-color: var(--vscode-scrollbarSlider-background, var(--scroll-thumb)) transparent;
 }
 
 /* Alt+Up prompt recall */
@@ -350,16 +418,16 @@ html, body {
   padding: 7px;
   border: 1px solid var(--hairline);
   border-radius: 8px;
-  background: var(--vscode-menu-background, #252526);
-  box-shadow: 0 2px 10px rgba(0,0,0,.24);
+  background: var(--vscode-menu-background, var(--surface-solid));
+  box-shadow: 0 8px 24px rgba(0,0,0,.3);
   font-family: var(--vscode-font-family);
 }
 #recall-filter {
   padding: 5px 9px;
   font-size: 12px;
   color: var(--vscode-input-foreground, #ddd);
-  background: var(--vscode-input-background, #2a2d2e);
-  border: 1px solid var(--vscode-input-border, rgba(255,255,255,0.12));
+  background: var(--vscode-input-background, var(--surface-solid));
+  border: 1px solid var(--vscode-input-border, var(--border-sub));
   border-radius: 4px;
   outline: none;
   transition: border-color .12s ease;
@@ -378,7 +446,7 @@ html, body {
   text-overflow: ellipsis;
   transition: background-color .08s ease;
 }
-.recall-item:hover, .recall-item.sel { background: var(--vscode-list-hoverBackground, rgba(255,255,255,.08)); }
+.recall-item:hover, .recall-item.sel { background: var(--vscode-list-hoverBackground, var(--surface-2)); }
 
 /* session timeline overlay */
 #timeline {
@@ -391,18 +459,21 @@ html, body {
   padding: 10px;
   border: 1px solid var(--hairline);
   border-radius: 8px;
-  background: var(--vscode-editorWidget-background, #252526);
-  box-shadow: 0 2px 10px rgba(0,0,0,.24);
+  background: var(--vscode-editorWidget-background, var(--surface-solid));
+  box-shadow: 0 8px 24px rgba(0,0,0,.3);
   font-family: var(--vscode-font-family);
   font-size: 11.5px;
 }
 #timeline-head { display: flex; align-items: center; justify-content: space-between; }
 .tl-title { font-weight: 600; font-size: 12px; }
-.tl-actions { display: flex; gap: 6px; }
+/* Overlay controls dim until the overlay is being used: chrome that is always
+   full-opacity in a sidebar reads as clutter. */
+.tl-actions { display: flex; gap: 6px; opacity: .45; transition: opacity .12s ease; }
+#timeline:hover .tl-actions, .tl-actions:focus-within { opacity: 1; }
 .tl-actions button { padding: 2px 8px; font-size: 10.5px; }
 #timeline-list { flex: 1 1 auto; overflow-y: auto; display: flex; flex-direction: column; gap: 3px; }
 .tl-row { display: flex; gap: 8px; align-items: baseline; }
-.tl-time { flex: 0 0 auto; opacity: .55; font-family: ui-monospace, monospace; font-size: 10.5px; }
+.tl-time { flex: 0 0 auto; opacity: .55; font-family: ui-monospace, monospace; font-size: 10.5px; font-variant-numeric: tabular-nums; }
 #timeline-list details { border-left: 2px solid var(--vscode-focusBorder, #0e639c); padding-left: 6px; }
 #timeline-list summary { cursor: pointer; }
 #timeline-list pre {
@@ -443,10 +514,10 @@ html, body {
   max-height: 100%;
   padding: 22px 18px;
   box-sizing: border-box;
-  border: 1px solid var(--vscode-widget-border, rgba(255,255,255,0.08));
-  border-radius: 9px;
-  background: var(--vscode-sideBar-background, rgba(255,255,255,0.02));
-  box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+  border: 1px solid var(--vscode-widget-border, var(--border-sub));
+  border-radius: 8px;
+  background: var(--vscode-sideBar-background, var(--surface-1));
+  box-shadow: 0 4px 16px rgba(0,0,0,0.16);
   font-family: var(--vscode-font-family);
 }
 .card-logo svg { width: 40px; height: 40px; opacity: 0.85; color: var(--vscode-textLink-foreground, #4daafc); }
@@ -458,6 +529,19 @@ html, body {
   font-family: ui-monospace, monospace;
 }
 .card-actions { display: flex; flex-direction: column; gap: 8px; width: 100%; margin-top: 4px; }
+/* The launcher card deals its rows in with a 45ms stagger — enough to read as
+   designed, far too fast to wait on. --i is set inline per button. */
+#launcher-actions button {
+  animation: cardIn .22s cubic-bezier(.2,.7,.3,1) backwards;
+  animation-delay: calc(var(--i, 0) * 45ms);
+}
+#session-list.stagger .sess-row {
+  animation: cardIn .18s ease-out backwards;
+  animation-delay: calc(var(--i, 0) * 28ms);
+}
+@keyframes cardIn {
+  from { opacity: 0; transform: translateY(4px); }
+}
 
 /* first-run environment checklist */
 #preflight {
@@ -467,7 +551,7 @@ html, body {
   gap: 4px;
   padding: 8px;
   box-sizing: border-box;
-  border: 1px solid var(--vscode-widget-border, rgba(255,255,255,.1));
+  border: 1px solid var(--vscode-widget-border, var(--border-sub));
   border-radius: 6px;
   font-size: 11.5px;
   text-align: left;
@@ -489,8 +573,8 @@ html, body {
   font-size: 12px;
   font-family: var(--vscode-font-family);
   color: var(--vscode-input-foreground, #ddd);
-  background: var(--vscode-input-background, #2a2d2e);
-  border: 1px solid var(--vscode-input-border, rgba(255,255,255,0.12));
+  background: var(--vscode-input-background, var(--surface-solid));
+  border: 1px solid var(--vscode-input-border, var(--border-sub));
   border-radius: 4px;
   outline: none;
 }
@@ -520,7 +604,7 @@ html, body {
 .sess-row:hover .sess-del, .sess-del:focus-visible { opacity: 1; }
 .sess-del:hover {
   color: var(--vscode-errorForeground, #f48771);
-  background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,.08));
+  background: var(--vscode-toolbar-hoverBackground, var(--surface-2));
 }
 .sess-item {
   display: flex;
@@ -530,14 +614,14 @@ html, body {
   width: 100%;
   text-align: left;
   padding: 7px 10px;
-  border: 1px solid var(--vscode-widget-border, rgba(255,255,255,0.08));
-  border-radius: 5px;
-  background: var(--vscode-list-inactiveSelectionBackground, rgba(255,255,255,0.04));
+  border: 1px solid var(--vscode-widget-border, var(--border-sub));
+  border-radius: 6px;
+  background: var(--vscode-list-inactiveSelectionBackground, var(--surface-1));
   color: var(--vscode-foreground, #ddd);
   cursor: pointer;
 }
 .sess-item:hover {
-  background: var(--vscode-list-hoverBackground, rgba(255,255,255,0.09));
+  background: var(--vscode-list-hoverBackground, var(--surface-2));
   border-color: var(--vscode-focusBorder, #0e639c);
 }
 .sess-name {
@@ -548,7 +632,7 @@ html, body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.sess-date { font-size: 10.5px; opacity: 0.55; font-family: var(--vscode-font-family); }
+.sess-date { font-size: 10.5px; opacity: 0.55; font-family: var(--vscode-font-family); font-variant-numeric: tabular-nums; }
 .sess-empty { font-size: 11px; opacity: 0.55; padding: 6px 0; }
 
 button {
@@ -586,8 +670,9 @@ button.primary:hover { background: var(--vscode-button-hoverBackground, #1177bb)
   font-family: var(--vscode-font-family);
   color: var(--vscode-descriptionForeground, #9aa0a6);
   background: var(--vscode-sideBar-background, var(--vscode-editor-background));
-  border-top: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.08));
+  border-top: 1px solid var(--vscode-panel-border, var(--border-sub));
   user-select: none;
+  font-variant-numeric: tabular-nums;
 }
 #status-name {
   overflow: hidden;
@@ -617,9 +702,16 @@ button.primary:hover { background: var(--vscode-button-hoverBackground, #1177bb)
   padding: 0 5px;
   line-height: 14px;
   border: 1px solid var(--hairline);
-  border-radius: 7px;
+  border-radius: 999px;
   color: var(--vscode-descriptionForeground, #9aa0a6);
-  background: rgba(var(--agent-accent, 128,128,128), .06);
+  background: rgba(var(--agent-accent, 128,128,128), .08);
+  transition: background-color .15s ease;
+}
+/* The whole chip row flashes once through the accent when the numbers change
+   — the signal that the counters are live, at zero per-frame cost. */
+#status-meta.tick .chip { animation: chipTick .5s ease-out; }
+@keyframes chipTick {
+  0% { background-color: rgba(var(--agent-accent, 128,128,128), .3); }
 }
 #status-state { display: flex; align-items: center; gap: 5px; flex: 0 0 auto; }
 .dot {
@@ -651,12 +743,16 @@ button.primary:hover { background: var(--vscode-button-hoverBackground, #1177bb)
   height: 18px;
   padding: 0;
   border: 0;
+  border-radius: 3px;
   background: transparent;
   color: var(--vscode-descriptionForeground, #999);
   font-size: 13px;
   line-height: 18px;
+  opacity: .55;
+  transition: opacity .12s ease, background-color .12s ease, color .12s ease;
 }
-.footer-action:hover { color: var(--vscode-foreground, #ddd); background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,.08)); }
+.footer-action:hover, .footer-action:focus-visible { opacity: 1; }
+.footer-action:hover { color: var(--vscode-foreground, #ddd); background: var(--vscode-toolbar-hoverBackground, var(--surface-2)); }
 
 /* ---- editable Pair Mode handoff ----------------------------------------- */
 .modal {
@@ -680,8 +776,9 @@ button.primary:hover { background: var(--vscode-button-hoverBackground, #1177bb)
   box-sizing: border-box;
   border: 1px solid var(--hairline);
   border-radius: 8px;
-  background: var(--vscode-editorWidget-background, #252526);
-  box-shadow: 0 6px 24px rgba(0,0,0,.3);
+  background: var(--vscode-editorWidget-background, var(--surface-solid));
+  /* The one real shadow in the UI: modals sit above everything else. */
+  box-shadow: 0 16px 44px rgba(0,0,0,.45);
 }
 .modal-title { font-weight: 600; font-size: 13px; margin-bottom: 2px; }
 .modal-meta { color: var(--vscode-descriptionForeground, #999); font-size: 11px; line-height: 1.35; }
@@ -689,8 +786,8 @@ button.primary:hover { background: var(--vscode-button-hoverBackground, #1177bb)
 .modal-card select,
 .modal-card textarea {
   color: var(--vscode-input-foreground, #ddd);
-  background: var(--vscode-input-background, #2a2d2e);
-  border: 1px solid var(--vscode-input-border, rgba(255,255,255,.14));
+  background: var(--vscode-input-background, var(--surface-solid));
+  border: 1px solid var(--vscode-input-border, var(--border-sub));
   border-radius: 4px;
   outline: none;
 }
@@ -731,14 +828,14 @@ button.primary:hover { background: var(--vscode-button-hoverBackground, #1177bb)
   padding: 8px;
   font: 11px/1.35 ui-monospace, "SF Mono", Menlo, Monaco, Consolas, monospace;
   color: var(--vscode-input-foreground, #ddd);
-  background: var(--vscode-input-background, #2a2d2e);
-  border: 1px solid var(--vscode-input-border, rgba(255,255,255,.14));
+  background: var(--vscode-input-background, var(--surface-solid));
+  border: 1px solid var(--vscode-input-border, var(--border-sub));
   border-radius: 4px;
   outline: none;
   overflow-wrap: break-word;
   tab-size: 2;
 }
-.arb-answer { border: 1px solid var(--vscode-widget-border, rgba(255,255,255,.12)); border-radius: 5px; padding: 6px 8px; }
+.arb-answer { border: 1px solid var(--vscode-widget-border, var(--border-sub)); border-radius: 6px; padding: 6px 8px; }
 .arb-answer summary { cursor: pointer; font-weight: 600; font-size: 12px; }
 .arb-answer pre {
   margin: 6px 0;
@@ -760,11 +857,12 @@ kbd {
   padding: 0 4px;
   margin-left: 8px;
   font: 10px/15px ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
   color: var(--vscode-descriptionForeground, #999);
   border: 1px solid var(--hairline);
   border-bottom-width: 2px;
   border-radius: 4px;
-  background: var(--vscode-keybindingLabel-background, rgba(128,128,128,.17));
+  background: var(--vscode-keybindingLabel-background, var(--surface-1));
 }
 
 /* ---- dense mode ------------------------------------------------------------
@@ -782,6 +880,26 @@ kbd {
   #status-name { display: none; }
 }
 
+/* More contrast on request: hairlines and the per-tab underline step up. */
+@media (prefers-contrast: more) {
+  #app {
+    --hairline: color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 50%, transparent);
+    --border-sub: color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 40%, transparent);
+  }
+  .agent-tab { border-bottom-color: rgba(var(--agent-accent, 128,128,128), .6); }
+}
+/* In forced-colors mode the state dots and the sliding ink keep their
+   semantic colours, and the active tab also gets a real outline. */
+@media (forced-colors: active) {
+  #tab-ink, .agent-state, .dot { forced-color-adjust: none; }
+  .agent-tab.active { outline: 1px solid Highlight; }
+}
+/* Motion is feedback, not decoration: when the user asks for less, every
+   animation and transition in the view collapses to instant. */
 @media (prefers-reduced-motion: reduce) {
-  .agent-state, .dot, #cursor, .agent-tab { animation: none !important; }
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
 }

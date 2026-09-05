@@ -6661,7 +6661,7 @@ class ClaudeTmuxView {
         <button role="menuitem" data-action="removeCustomAgent"><i class="agent-swatch swatch-none" aria-hidden="true"></i>Remove a custom agent…</button>`
         : '');
     const launcherHtml = roster.filter((a) => a.canStart).map((a, i) =>
-      `\n            <button data-launch-agent="${esc(a.id)}">${swatch(a)}<span class="launch-label">Start ${esc(a.label)}</span>`
+      `\n            <button data-launch-agent="${esc(a.id)}" style="--i:${i}">${swatch(a)}<span class="launch-label">Start ${esc(a.label)}</span>`
       + (i < 9 ? `<kbd aria-hidden="true">${i + 1}</kbd>` : '') + '</button>').join('');
     return `<!DOCTYPE html>
 <html lang="en">
@@ -6678,6 +6678,7 @@ class ClaudeTmuxView {
 <body>
   <div id="app" data-cursor="${cursorStyle}" data-links="${flag('fileLinks')}" data-palette="${palette}" data-agents="${esc(JSON.stringify(roster))}">
     <div id="agent-tabs" role="tablist" aria-label="Tmux agent">${tabsHtml}
+      <div id="tab-ink" aria-hidden="true"></div>
       <button id="tab-add" class="tab-add" type="button" aria-label="Start an agent, or mirror a tmux session" title="Start an agent, or mirror a tmux session" aria-expanded="false" aria-controls="agent-launch-menu">＋</button>
       <div id="agent-launch-menu" class="launch-menu hidden" role="menu">${launchMenuHtml}${freeMenuHtml}
       </div>

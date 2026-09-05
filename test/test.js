@@ -1984,6 +1984,24 @@ async function run() {
       'the mark replaces the label once a tab is too narrow to say anything');
     assert.match(css, /border-bottom: 2px solid rgba\(var\(--agent-accent/,
       'the colour rides the underline the tab already had — no new horizontal space');
+    // The polish pass: sliding ink, layered surfaces, tabular numerals, and
+    // motion that answers state changes instead of decorating.
+    assert.match(markup, /id="tab-ink"/, 'the active underline is one sliding element');
+    assert.match(markup, /style="--i:\d+"/, 'launcher rows carry their stagger index');
+    assert.match(webviewSource, /function positionInk\(\)/, 'the ink is re-anchored in script');
+    assert.match(webviewSource, /translateX\(\$\{tab\.offsetLeft\}px\) scaleX/,
+      'the ink moves with a compositor transform, not layout');
+    assert.match(webviewSource, /classList\.add\('screen-in'\)/, 'a switch paints with a rise-and-fade');
+    assert.match(webviewSource, /classList\.add\('scrolling'\)/, 'the mirror scrollbar only shows while scrolling');
+    assert.match(webviewSource, /classList\.add\('tick'\)/, 'chips flash once when the counters move');
+    assert.match(css, /--surface-1: color-mix/, 'surfaces are layered from the theme, not hardcoded');
+    assert.match(css, /font-variant-numeric: tabular-nums/, 'metrics keep tabular numerals');
+    assert.match(css, /@media \(prefers-contrast: more\)/, 'more contrast on request');
+    assert.match(css, /@media \(forced-colors: active\)/, 'state colours survive forced colours');
+    assert.match(css, /animation-iteration-count: 1 !important/,
+      'reduced motion collapses every animation, not just the listed ones');
+    assert.doesNotMatch(css, /#screen-wrap \{[^}]*border-left/,
+      'the state rail stays gone');
   }
 
   // ---- a failed launch names the real cause ----------------------------------------------
