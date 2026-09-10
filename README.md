@@ -432,13 +432,21 @@ never offers it in bulk kill, and never lists it as a leftover to clean up.
 Killing it is possible from the single **Kill** command, which states plainly
 that AgentMux did not create it.
 
+Where a mirror lives depends on how you add it. One added from the UI is
+remembered **in this window only** (workspace state, not settings) — it cannot
+show up in your other windows, nor be committed to a shared
+`.vscode/settings.json`. A `session` entry you write into `customAgents`
+yourself follows the setting's scope instead: in user settings it appears in
+every window, which is exactly what you want for a machine-wide mirror.
+
 The easy path is the **＋** button at the end of the tab strip. Its menu lists
 the agents you can start or resume, then below a rule:
 
 - **Mirror a tmux session…** — pick from your running tmux sessions and AgentMux
-  writes the settings entry for you.
-- **Remove a custom agent…** — shown only once you have one; removes the entry
-  and leaves the tmux session running.
+  remembers it for this window.
+- **Remove a custom agent…** — shown only once you have one; lists every scope
+  (this window, workspace, user settings), removes the entry and leaves the
+  tmux session running.
 
 Both are in the command palette too, as **AgentMux: Mirror an existing tmux
 session (free mode)…** and **AgentMux: Remove a custom agent…**. The roster is
@@ -505,6 +513,9 @@ settings.
 - In a multi-root workspace, the first root is used.
 - A free-mode **mirror** tab is the one exception to workspace scoping, by
   design; it is also the one tab AgentMux will not create, restart or clean up.
+  Mirrors added from the UI are window-local (workspace state); only a
+  `session` entry written by hand into `customAgents` is shared — by the
+  setting's own scope.
 - The agent roster is assembled at activation, so an `enabledAgents` or
   `customAgents` edit takes effect after a window reload.
 - With `stateHooks` off (or unmanaged launches), `working`, `finished` and

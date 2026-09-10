@@ -211,9 +211,13 @@ never listed by **Clean up this project's leftover tmux sessions…**. The singl
 **Kill active agent session** command can still stop it, and says so explicitly.
 Add one from the **＋** at the end of the tab strip: under the list of agents
 there is **Mirror a tmux session…**, which shows every running tmux session with
-its path and writes the settings entry for you. **Remove a custom agent…**
-appears next to it once you have one. Both are also in the palette, as
-**AgentMux: Mirror an existing tmux session (free mode)…**.
+its path and remembers the mirror **for this window only** — it is stored in
+workspace state, so it cannot appear in your other windows or leak into a
+shared settings file. Writing a `session` entry into `claudeTmux.customAgents`
+by hand is the deliberate way to share a mirror: it then follows the setting's
+scope (user settings = every window). **Remove a custom agent…** appears next
+to it once you have one, and lists each entry with its scope. Both are also in
+the palette, as **AgentMux: Mirror an existing tmux session (free mode)…**.
 
 If that list is empty, nothing is broken — sessions AgentMux already drives are
 filtered out of it, so if the only tmux session on the machine is already an

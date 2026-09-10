@@ -187,7 +187,7 @@ const vscode = {
 };
 
 const source = fs.readFileSync(path.join(root, 'extension.js'), 'utf8')
-  + '\nmodule.exports.__test = { ClaudeTmuxView, sessionName, accentChannels, derivedAccent, derivedMark, decodeEscapes, AGENT_DETECTION, paneIdentity, identityMatches, STATE_HOOK_SCRIPT, setStateHookDir, codexHookArgs, tomlString, listPiSessions, piSessionDir, piExtensionPath, ensurePiExtension, removePiExtension, PI_EXTENSION, customAgentSpecs, registerCustomAgents, freeAgentId, mirroredSessionNames, baseSessionName, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions, AGENTS, AGENT_IDS, BUILTIN_AGENTS, BUILTIN_AGENT_IDS, DEFAULT_ENABLED_AGENTS, normalizedEnabledAgents, rebuildAgentRegistry, enabledAgentsChanged, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, listDevinSessions, devinLaunchArgs, hermesProfileSlug, hermesProfileHome, ensureHermesProfile, launchEnvPrefix, detectionRules, detectState, detectionContext, isRuleLine, explainDetection, DETECTION_REGIONS, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath, AGENT_PRESETS, promptAddAgentPreset, setTmuxTimeouts };';
+  + '\nmodule.exports.__test = { ClaudeTmuxView, sessionName, accentChannels, derivedAccent, derivedMark, decodeEscapes, AGENT_DETECTION, paneIdentity, identityMatches, STATE_HOOK_SCRIPT, setStateHookDir, codexHookArgs, tomlString, listPiSessions, piSessionDir, piExtensionPath, ensurePiExtension, removePiExtension, PI_EXTENSION, customAgentSpecs, registerCustomAgents, freeAgentId, mirroredSessionNames, baseSessionName, setMirrorStore, mirroredAgentEntries, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions, AGENTS, AGENT_IDS, BUILTIN_AGENTS, BUILTIN_AGENT_IDS, DEFAULT_ENABLED_AGENTS, normalizedEnabledAgents, rebuildAgentRegistry, enabledAgentsChanged, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, listDevinSessions, devinLaunchArgs, hermesProfileSlug, hermesProfileHome, ensureHermesProfile, launchEnvPrefix, detectionRules, detectState, detectionContext, isRuleLine, explainDetection, DETECTION_REGIONS, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath, AGENT_PRESETS, promptAddAgentPreset, setTmuxTimeouts };';
 const moduleUnderTest = { exports: {} };
 const sandbox = {
   module: moduleUnderTest,
@@ -208,7 +208,7 @@ const sandbox = {
   clearInterval,
 };
 vm.runInNewContext(source, sandbox, { filename: 'extension.js' });
-const { ClaudeTmuxView, sessionName, accentChannels, derivedAccent, derivedMark, decodeEscapes, AGENT_DETECTION, paneIdentity, identityMatches, STATE_HOOK_SCRIPT, setStateHookDir, codexHookArgs, tomlString, listPiSessions, piSessionDir, piExtensionPath, ensurePiExtension, removePiExtension, PI_EXTENSION, customAgentSpecs, registerCustomAgents, freeAgentId, mirroredSessionNames, baseSessionName, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions, AGENTS, AGENT_IDS, BUILTIN_AGENTS, BUILTIN_AGENT_IDS, DEFAULT_ENABLED_AGENTS, normalizedEnabledAgents, rebuildAgentRegistry, enabledAgentsChanged, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, listDevinSessions, devinLaunchArgs, hermesProfileSlug, hermesProfileHome, ensureHermesProfile, launchEnvPrefix, detectionRules, detectState, detectionContext, isRuleLine, explainDetection, DETECTION_REGIONS, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath, AGENT_PRESETS, promptAddAgentPreset, setTmuxTimeouts } = moduleUnderTest.exports.__test;
+const { ClaudeTmuxView, sessionName, accentChannels, derivedAccent, derivedMark, decodeEscapes, AGENT_DETECTION, paneIdentity, identityMatches, STATE_HOOK_SCRIPT, setStateHookDir, codexHookArgs, tomlString, listPiSessions, piSessionDir, piExtensionPath, ensurePiExtension, removePiExtension, PI_EXTENSION, customAgentSpecs, registerCustomAgents, freeAgentId, mirroredSessionNames, baseSessionName, setMirrorStore, mirroredAgentEntries, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions, AGENTS, AGENT_IDS, BUILTIN_AGENTS, BUILTIN_AGENT_IDS, DEFAULT_ENABLED_AGENTS, normalizedEnabledAgents, rebuildAgentRegistry, enabledAgentsChanged, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, listDevinSessions, devinLaunchArgs, hermesProfileSlug, hermesProfileHome, ensureHermesProfile, launchEnvPrefix, detectionRules, detectState, detectionContext, isRuleLine, explainDetection, DETECTION_REGIONS, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath, AGENT_PRESETS, promptAddAgentPreset, setTmuxTimeouts } = moduleUnderTest.exports.__test;
 
 function makeProvider() {
   const provider = new ClaudeTmuxView({
@@ -1781,6 +1781,74 @@ async function run() {
   const sourceOfHtml = fs.readFileSync(path.join(root, 'extension.js'), 'utf8');
   assert.match(sourceOfHtml, /roster\.some\(\(a\) => a\.custom\)/,
     'Remove is conditional: with nothing to remove the entry is not rendered');
+
+  // ---- a UI mirror is window-local state, never settings ---------------------------
+  // A mirror is a pointer at a tmux session on this machine: written into user
+  // settings it surfaced in every AgentMux window, and in .vscode/settings.json
+  // it could even be committed and leak onto other machines. The + menu flow
+  // therefore stores it in workspaceState; a hand-written `session` entry in
+  // customAgents stays the deliberate way to share one.
+  {
+    const memento = { get: (k) => state.get(k), update: async (k, v) => { state.set(k, v); } };
+    setMirrorStore(memento);
+    const mirrorProvider = makeProvider();
+    try {
+      sessionListOutput = `ci-tail\t${workspace}\t1\tdetached\n`;
+      // The pick mock returns whatever answer was preset, so the first call is
+      // only there to capture the offered items.
+      quickPickAnswer = undefined; quickPickItems = null;
+      await mirrorProvider.addTmuxSession();
+      const offered = (quickPickItems || []).find((item) => item.session === 'ci-tail');
+      assert.ok(offered, 'an unknown tmux session is offered for mirroring');
+      quickPickAnswer = offered;
+      inputBoxAnswer = 'CI tail';
+      await mirrorProvider.addTmuxSession();
+      const stored = state.get('claudeTmux.mirrorAgents');
+      assert.ok(Array.isArray(stored) && stored.some((e) => e.session === 'ci-tail'),
+        'a UI-added mirror is stored in workspaceState');
+      assert.ok(!(settings.get('customAgents') || []).some((e) => e.session === 'ci-tail'),
+        'and never written to settings, where every other window would see it');
+
+      rebuildAgentRegistry();
+      assert.ok(AGENT_IDS.includes('ci-tail'), 'the window-local mirror joins this roster');
+      assert.strictEqual(AGENTS['ci-tail'].attachSession, 'ci-tail');
+      assert.strictEqual(AGENTS['ci-tail'].custom, true);
+      assert.ok(mirroredSessionNames().has('ci-tail'),
+        'and cleanup treats it as mirrored like any other');
+
+      // Removal lists every place a custom agent can live — this window's store
+      // plus each settings scope — and writes back only where the pick came from.
+      settings.set('customAgents', [{ id: 'solo', label: 'Solo', command: 'solo' }]);
+      quickPickAnswer = undefined; quickPickItems = null;
+      await mirrorProvider.removeCustomAgent();
+      const mirrorPick = (quickPickItems || []).find((item) => item.label === 'CI tail');
+      const settingsPick = (quickPickItems || []).find((item) => item.label === 'Solo');
+      assert.ok(mirrorPick && /this window/.test(mirrorPick.description),
+        'window-local mirrors are listed with their scope labelled');
+      assert.ok(settingsPick && /user settings/.test(settingsPick.description),
+        'a user-settings entry can still be removed from here');
+      quickPickAnswer = [mirrorPick, settingsPick];
+      await mirrorProvider.removeCustomAgent();
+      assert.ok(!(state.get('claudeTmux.mirrorAgents') || []).some((e) => e.session === 'ci-tail'),
+        'the mirror store loses the removed mirror');
+      assert.strictEqual((settings.get('customAgents') || []).length, 0,
+        'and the settings list loses its entry too');
+    } finally {
+      mirrorProvider.closeIpcServer();
+      setMirrorStore(null);
+      state.delete('claudeTmux.mirrorAgents');
+      settings.set('customAgents', []);
+      // The registry is one shared object for the whole file: leave it the way
+      // these tests found it, with every built-in present.
+      settings.set('enabledAgents', [...BUILTIN_AGENT_IDS]);
+      rebuildAgentRegistry();
+      settings.delete('enabledAgents');
+      sessionListOutput = null;
+      quickPickItems = null;
+      quickPickAnswer = undefined;
+      inputBoxAnswer = undefined;
+    }
+  }
 
   const webviewSource = fs.readFileSync(path.join(root, 'media/main.js'), 'utf8');
   assert.match(webviewSource, /tab\.classList\.toggle\('hidden', !present\)/);

@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- **A tmux session mirrored from the UI no longer appears in every window.** *Mirror a tmux session…* used to write the entry into user settings, so the tab — and anything typed into it — surfaced in every AgentMux window on the machine. Mirrors added from the UI are now remembered in workspace state, local to the window that created them and impossible to leak into a shared settings file; a `session` entry written into `customAgents` by hand remains the deliberate way to share a mirror by the setting's scope. *Remove a custom agent…* now lists every place an entry can live — this window, folder, workspace and user settings — so a mirror an older version wrote into user settings can still be removed from here.
 - **MCP `prompt_agent` submits by default again.** The `raw` flag reached the extension with an inverted default, so every MCP prompt was typed into the pane without pressing Enter and a default `wait` timed out in front of an unsubmitted prompt. `raw` now defaults to false, matching `agentmux prompt` and its `--raw` flag (which is now documented in `agentmux help`), and is declared in the tool schema.
 - **The MCP server reports the extension's real version**, read from `package.json`, instead of a hardcoded 0.16.0.
 - **Commands that name an agent refuse unknown or disabled ids** (`send`, `capture`, `wait`, `status`) instead of falling back silently to the active tab — a script asking for hermes while hermes is off would have typed into whatever tab was focused.

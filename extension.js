@@ -1231,7 +1231,9 @@ const AGENT_PRESETS = [
 
 async function promptAddAgentPreset() {
   const current = cfg().get('customAgents') || [];
-  const existingIds = new Set([...BUILTIN_AGENT_IDS, ...current.map((c) => c && c.id).filter(Boolean)]);
+  const existingIds = new Set([...BUILTIN_AGENT_IDS,
+    ...current.map((c) => c && c.id).filter(Boolean),
+    ...mirroredAgentEntries().map((c) => c && c.id).filter(Boolean)]);
   const available = AGENT_PRESETS.filter((p) => !existingIds.has(p.id));
 
   if (!available.length) {
@@ -1262,9 +1264,26 @@ async function promptAddAgentPreset() {
   }
 }
 
+// Mirrors added through the UI live in workspaceState, not settings: a mirror
+// is a pointer at a tmux session on THIS machine. A user-level customAgents
+// entry would surface the tab in every AgentMux window, and a workspace-level
+// entry can still be committed with .vscode/settings.json and leak onto other
+// machines. A `session` entry written by hand into settings remains the
+// deliberate way to share a mirror beyond this window.
+let mirrorStore = null;
+const MIRROR_STORE_KEY = 'claudeTmux.mirrorAgents';
+function setMirrorStore(memento) { mirrorStore = memento || null; }
+function mirroredAgentEntries() {
+  try {
+    const list = mirrorStore ? mirrorStore.get(MIRROR_STORE_KEY) : null;
+    return Array.isArray(list) ? list : [];
+  } catch { return []; }
+}
+
 function customAgentSpecs() {
-  const raw = cfg().get('customAgents');
-  if (!Array.isArray(raw)) return [];
+  const fromSettings = cfg().get('customAgents');
+  const raw = [...(Array.isArray(fromSettings) ? fromSettings : []), ...mirroredAgentEntries()];
+  if (!raw.length) return [];
   const specs = [];
   const seen = new Set();
   for (const entry of raw.slice(0, CUSTOM_AGENT_LIMIT)) {
@@ -1369,23 +1388,6 @@ function registerCustomAgents() {
 
 function customAgentsChanged() {
   return JSON.stringify(cfg().get('customAgents') || []) !== registeredCustomAgents;
-}
-
-// Edit the roster in whichever scope already defines it, so a workspace-level
-// list is not silently shadowed by a user-level one (and vice versa).
-function customAgentsTarget() {
-  const inspected = cfg().inspect ? cfg().inspect('customAgents') : null;
-  if (inspected?.workspaceFolderValue) return vscode.ConfigurationTarget.WorkspaceFolder;
-  if (inspected?.workspaceValue) return vscode.ConfigurationTarget.Workspace;
-  return vscode.ConfigurationTarget.Global;
-}
-
-function customAgentsAt(target) {
-  const inspected = (cfg().inspect ? cfg().inspect('customAgents') : null) || {};
-  const value = target === vscode.ConfigurationTarget.WorkspaceFolder ? inspected.workspaceFolderValue
-    : target === vscode.ConfigurationTarget.Workspace ? inspected.workspaceValue
-      : inspected.globalValue;
-  return Array.isArray(value) ? value : [];
 }
 
 // A stable, valid id derived from the session name, unique against both the
@@ -5522,33 +5524,69 @@ class ClaudeTmuxView {
       validateInput: (value) => (value.trim() ? null : 'Enter a label.'),
     });
     if (label === undefined) return;
-    const target = customAgentsTarget();
-    const list = [...customAgentsAt(target)];
-    list.push({ id: freeAgentId(picked.session, list), label: label.trim().slice(0, 24), session: picked.session });
-    await cfg().update('customAgents', list, target);
+    // A mirror is a pointer at a tmux session on this machine: it goes into
+    // workspaceState so no other window ever picks it up — and it can never be
+    // committed to a shared settings file. The id only has to stay unique
+    // against the roster this window already knows.
+    const settingsAgents = cfg().get('customAgents');
+    const existing = [...(Array.isArray(settingsAgents) ? settingsAgents : []), ...mirroredAgentEntries()];
+    const mirrors = [...mirroredAgentEntries(),
+      { id: freeAgentId(picked.session, existing), label: label.trim().slice(0, 24), session: picked.session }];
+    if (mirrorStore) await mirrorStore.update(MIRROR_STORE_KEY, mirrors);
     this.offerReload(`"${picked.session}" is now a free-mode agent.`);
   }
 
+  // Custom agents can live in three places: this window's mirror store, and
+  // the settings scopes customAgents can be defined in. Listing all of them —
+  // with the scope labelled — is also the only way a user can remove a mirror
+  // an older version leaked into user settings, where it surfaced in every
+  // window on the machine.
   async removeCustomAgent() {
-    const target = customAgentsTarget();
-    const list = customAgentsAt(target);
-    if (!list.length) {
+    const buckets = [];
+    const mirrors = mirroredAgentEntries();
+    if (mirrors.length) {
+      buckets.push({
+        scope: 'this window', value: mirrors,
+        write: (next) => (mirrorStore ? mirrorStore.update(MIRROR_STORE_KEY, next) : Promise.resolve()),
+      });
+    }
+    const inspected = (cfg().inspect ? cfg().inspect('customAgents') : null) || {};
+    const folderUri = vscode.workspace.workspaceFolders?.[0]?.uri;
+    for (const [target, value, scope] of [
+      [vscode.ConfigurationTarget.WorkspaceFolder, inspected.workspaceFolderValue, 'folder settings'],
+      [vscode.ConfigurationTarget.Workspace, inspected.workspaceValue, 'workspace settings'],
+      [vscode.ConfigurationTarget.Global, inspected.globalValue, 'user settings'],
+    ]) {
+      if (!Array.isArray(value) || !value.length) continue;
+      const conf = target === vscode.ConfigurationTarget.WorkspaceFolder && folderUri
+        ? vscode.workspace.getConfiguration('claudeTmux', folderUri) : cfg();
+      buckets.push({
+        scope, value,
+        write: (next) => conf.update('customAgents', next, target),
+      });
+    }
+    const items = [];
+    buckets.forEach((bucket, bi) => bucket.value.forEach((entry, index) => items.push({
+      label: String(entry?.label || entry?.id || '(unnamed)'),
+      description: `${bucket.scope} · ${entry?.session ? `mirrors tmux "${entry.session}"` : `runs ${entry?.command || '?'}`}`,
+      index,
+      bi,
+    })));
+    if (!items.length) {
       vscode.window.showInformationMessage('No custom agents are configured.');
       return;
     }
-    const items = list.map((entry, index) => ({
-      label: String(entry?.label || entry?.id || '(unnamed)'),
-      description: entry?.session ? `mirrors tmux "${entry.session}"` : `runs ${entry?.command || '?'}`,
-      index,
-    }));
     const picked = await vscode.window.showQuickPick(items, {
       canPickMany: true,
       placeHolder: 'Remove which custom agents? Their tmux sessions keep running.',
       matchOnDescription: true,
     });
     if (!picked || !picked.length) return;
-    const drop = new Set(picked.map((item) => item.index));
-    await cfg().update('customAgents', list.filter((_, index) => !drop.has(index)), target);
+    for (const [bi, bucket] of buckets.entries()) {
+      const drop = new Set(picked.filter((item) => item.bi === bi).map((item) => item.index));
+      if (!drop.size) continue;
+      await bucket.write(bucket.value.filter((_, index) => !drop.has(index)));
+    }
     this.offerReload(`Removed ${picked.length} custom agent(s).`);
   }
 
@@ -6878,6 +6916,7 @@ let activeProvider = null;
 
 function activate(context) {
   try { setStateHookDir(context.globalStorageUri?.fsPath); } catch { setStateHookDir(null); }
+  setMirrorStore(context.workspaceState);
   invalidateWorkspacePathCache();
   // The enabled built-ins and free-mode agents join the runtime registry BEFORE
   // anything reads the roster, so every per-agent structure (state, queues,
