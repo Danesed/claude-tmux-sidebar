@@ -455,7 +455,7 @@ function workspaceFolder() {
 //     occupies, and the mark replaces the label once the tab is too narrow for
 //     one. Vendor colours where the product publishes one, otherwise a hue
 //     picked to stay distinct from the other five.
-const AGENTS = {
+const BUILTIN_AGENTS = {
   claude: {
     label: 'Claude',
     accent: '#d97757',
@@ -638,7 +638,30 @@ const AGENTS = {
   },
 };
 
-const AGENT_IDS = Object.keys(AGENTS);
+// Every agent shipped in a release, in tab order. This list is never filtered:
+// reserved-id checks and cleanup still need to name an agent the user turned
+// off, so that its id can never be reused and its old tmux sessions can still
+// be found.
+const BUILTIN_AGENT_IDS = Object.keys(BUILTIN_AGENTS);
+
+// The runtime roster: the built-ins the user enabled through
+// claudeTmux.enabledAgents, followed by the free-mode agents from
+// claudeTmux.customAgents. Every per-agent structure is keyed to this object,
+// so a disabled agent is absent everywhere at once: no tab, no presence probe,
+// no status bar entry. Seeded with every built-in so the module is coherent
+// before activate() runs; rebuildAgentRegistry() narrows it.
+const AGENTS = {};
+const AGENT_IDS = [];
+function resetAgentRegistry(ids) {
+  for (const id of Object.keys(AGENTS)) delete AGENTS[id];
+  AGENT_IDS.length = 0;
+  for (const id of ids) {
+    if (!BUILTIN_AGENTS[id]) continue;
+    AGENTS[id] = BUILTIN_AGENTS[id];
+    AGENT_IDS.push(id);
+  }
+}
+resetAgentRegistry(BUILTIN_AGENT_IDS);
 
 // ---- screen detection rules --------------------------------------------------
 // Hook-reported state is always authoritative; these patterns are the fallback
@@ -1208,7 +1231,7 @@ const AGENT_PRESETS = [
 
 async function promptAddAgentPreset() {
   const current = cfg().get('customAgents') || [];
-  const existingIds = new Set([...Object.keys(AGENTS), ...current.map((c) => c && c.id).filter(Boolean)]);
+  const existingIds = new Set([...BUILTIN_AGENT_IDS, ...current.map((c) => c && c.id).filter(Boolean)]);
   const available = AGENT_PRESETS.filter((p) => !existingIds.has(p.id));
 
   if (!available.length) {
@@ -1247,7 +1270,7 @@ function customAgentSpecs() {
   for (const entry of raw.slice(0, CUSTOM_AGENT_LIMIT)) {
     if (!entry || typeof entry !== 'object') continue;
     const id = String(entry.id || '').trim();
-    if (!CUSTOM_ID_RE.test(id) || seen.has(id) || AGENTS[id]) continue;
+    if (!CUSTOM_ID_RE.test(id) || seen.has(id) || BUILTIN_AGENTS[id]) continue;
     const command = String(entry.command || '').trim();
     const attachSession = validSessionName(entry.session);
     if (!command && !attachSession) continue; // nothing to launch, nothing to mirror
@@ -1292,16 +1315,52 @@ function customAgentSpecs() {
   return specs;
 }
 
-// Registered once, at activation, so every roster-driven path sees free-mode
-// agents with no special case. Editing the setting needs a window reload, which
-// activate() offers when it notices the value changed.
+// Built-in agents enabled when claudeTmux.enabledAgents is unset or unusable,
+// matching package.json's default. Hermes and pi are opt-in: they are the two
+// integrations most likely to be absent from PATH, and a permanent tab that
+// cannot start is noise. Add them (or any other shipped agent) back through
+// settings to show their tab again.
+const DEFAULT_ENABLED_AGENTS = ['claude', 'codex', 'opencode', 'antigravity', 'devin'];
+
+// Keep only ids that name a built-in agent, in the registry's own order: the
+// tab order must not follow the order the user happened to type. An empty or
+// wholly unknown list falls back to the default — a roster with no agent would
+// leave every per-agent structure (state, queues, tabs) with nothing to key on.
+function normalizedEnabledAgents(raw) {
+  const wanted = new Set((Array.isArray(raw) ? raw : DEFAULT_ENABLED_AGENTS)
+    .map((id) => String(id || '').trim().toLowerCase())
+    .filter((id) => BUILTIN_AGENT_IDS.includes(id)));
+  const chosen = BUILTIN_AGENT_IDS.filter((id) => wanted.has(id));
+  return chosen.length ? chosen : [...DEFAULT_ENABLED_AGENTS];
+}
+
+let registeredEnabledAgents = null;
+
+function enabledAgentsChanged() {
+  const raw = cfg().get('enabledAgents');
+  return JSON.stringify(Array.isArray(raw) ? raw : null) !== registeredEnabledAgents;
+}
+
+// Registered once, at activation, so every roster-driven path sees the chosen
+// built-ins plus the free-mode agents with no special case. Editing either
+// setting needs a window reload, which activate() offers when it notices the
+// value changed. Custom agents are never filtered: adding one to
+// claudeTmux.customAgents is already an explicit choice.
 let registeredCustomAgents = '[]';
+
+function rebuildAgentRegistry() {
+  resetAgentRegistry(normalizedEnabledAgents(cfg().get('enabledAgents')));
+  const raw = cfg().get('enabledAgents');
+  registeredEnabledAgents = JSON.stringify(Array.isArray(raw) ? raw : null);
+  registerCustomAgents();
+  return AGENT_IDS;
+}
 
 function registerCustomAgents() {
   registeredCustomAgents = JSON.stringify(cfg().get('customAgents') || []);
   const specs = customAgentSpecs();
   for (const spec of specs) {
-    if (AGENTS[spec.id]) continue; // never shadow a built-in agent
+    if (BUILTIN_AGENTS[spec.id] || AGENTS[spec.id]) continue; // never shadow a built-in agent
     AGENTS[spec.id] = spec;
     AGENT_IDS.push(spec.id);
   }
@@ -1335,7 +1394,7 @@ function freeAgentId(session, existing = []) {
   const base = String(session).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 20);
   let candidate = /^[a-z]/.test(base) ? base : `s-${base}`;
   candidate = candidate.slice(0, 24);
-  const taken = new Set([...Object.keys(AGENTS), ...existing.map((entry) => String(entry?.id || ''))]);
+  const taken = new Set([...BUILTIN_AGENT_IDS, ...AGENT_IDS, ...existing.map((entry) => String(entry?.id || ''))]);
   if (!taken.has(candidate) && CUSTOM_ID_RE.test(candidate)) return candidate;
   for (let n = 2; n < 100; n++) {
     const next = `${candidate.slice(0, 21)}-${n}`;
@@ -1421,7 +1480,9 @@ const GIT_DELTA_MIN_INTERVAL_MS = 5000;
 const SESSION_CACHE_TTL_MS = 3000;
 
 function baseSessionName(agent, cwd = workspaceFolder()) {
-  const spec = AGENTS[agent];
+  // A disabled built-in has no tab, but cleanup still needs its session name
+  // to tell a live session from a leftover.
+  const spec = AGENTS[agent] || BUILTIN_AGENTS[agent];
   if (!spec) return '';
   // A free-mode agent mirrors one existing session, under its real name.
   if (spec.attachSession) return spec.attachSession;
@@ -2241,8 +2302,10 @@ async function agentSessionInfo(agent, name) {
     }
     return { exists: true, ready: running === '1', ...base };
   }
-  // A pane already claimed by another agent must never read as this one.
-  const claimedByOther = marker && AGENTS[marker] && marker !== agent;
+  // A pane already claimed by another agent must never read as this one. A
+  // disabled built-in still owns its marked panes, or turning an agent off
+  // would hand its session to whichever other pane pattern happens to match.
+  const claimedByOther = marker && (AGENTS[marker] || BUILTIN_AGENTS[marker]) && marker !== agent;
   const identityKey = [serverPid, name, created, panePid].join(":");
   if (shell) paneIdentityCache.delete(identityKey); // the agent exited
   let direct = false;
@@ -2351,7 +2414,7 @@ async function listSessions(projectDir) {
 async function listOpencodeSessions(cwd) {
   if (!cwd) return [];
   const result = await runFile(
-    AGENTS.opencode.command, ['session', 'list', '--format', 'json', '-n', '40'], cwd, 15000
+    BUILTIN_AGENTS.opencode.command, ['session', 'list', '--format', 'json', '-n', '40'], cwd, 15000
   );
   if (!result.ok) return [];
   let parsed;
@@ -2398,7 +2461,7 @@ async function listOpencodeSessions(cwd) {
 async function listDevinSessions(cwd) {
   if (!cwd) return [];
   const result = await runFile(
-    AGENTS.devin.command, ['list', '--format', 'json'], cwd, 15000
+    BUILTIN_AGENTS.devin.command, ['list', '--format', 'json'], cwd, 15000
   );
   if (!result.ok) return [];
   let parsed;
@@ -2965,7 +3028,7 @@ class ClaudeTmuxView {
     this.cols = 80;
     this.rows = 24;
     const savedAgent = context.workspaceState.get('claudeTmux.activeAgent');
-    this.activeAgent = AGENTS[savedAgent] ? savedAgent : 'claude';
+    this.activeAgent = AGENTS[savedAgent] ? savedAgent : (AGENT_IDS[0] || 'claude');
     const savedWriter = context.workspaceState.get('claudeTmux.pairWriter');
     this.writerAgent = AGENTS[savedWriter] ? savedWriter : null;
     this.agentState = byAgent(() => this.newAgentState());
@@ -3809,7 +3872,7 @@ class ClaudeTmuxView {
           state.lastFrame = bgFrame;
           if (bgMeta != null) state.lastMeta = bgMeta;
           if (frameChanged && this.view?.visible && agent !== this.activeAgent) {
-            this.view.webview.postMessage({ type: 'bgFrame', agent, frame: bgFrame, meta: bgMeta });
+            this.view.webview.postMessage({ type: 'bgFrame', agent, frame: bgFrame, meta: bgMeta, name });
           }
         }
       }));
@@ -3954,12 +4017,19 @@ class ClaudeTmuxView {
 
   onMessage(m) {
     switch (m.type) {
-      case 'ready':
+      case 'ready': {
+        // A fresh webview has no scrollback to show. If the active agent is
+        // still in history mode, re-arm its capture so the next tick re-sends
+        // the full frame instead of leaving the mirror frozen on the cached
+        // live frame (historyPending was consumed by the previous webview).
+        const state = this.agentState[this.activeAgent];
+        if (state?.historyMode) state.historyPending = true;
         this.postActiveAgent();
         this.postAgents();
         this.postHandoffState();
         this.pollPresence(true);
         return this.tick(true);
+      }
       case 'switchAgent': return this.switchAgent(m.agent);
       case 'input':   return this.queueInput(m.agent, m.data, !!m.immediate);
       case 'resize':  return this.setSize(m.cols, m.rows);
@@ -5134,11 +5204,17 @@ class ClaudeTmuxView {
       return;
     }
     // Current prefixes plus the pre-0.10.2 defaults, so this project's sessions
-    // from an older AgentMux are still recognizable as ours.
+    // from an older AgentMux are still recognizable as ours. Built-ins, not the
+    // enabled roster: a session left behind by an agent the user has since
+    // disabled is exactly the kind of leftover this command exists to find.
+    // Free-mode launch agents join in too, since their prefix is inline.
+    const cleanupAgents = [...new Set([...BUILTIN_AGENT_IDS, ...AGENT_IDS])];
     const prefixes = [
-      ...AGENT_IDS.map((agent) => (AGENTS[agent].prefixSetting ? cfg().get(AGENTS[agent].prefixSetting) : '')
-        || AGENTS[agent].defaultPrefix),
-      ...AGENT_IDS.map((agent) => AGENTS[agent].defaultPrefix),
+      ...cleanupAgents.map((agent) => {
+        const spec = AGENTS[agent] || BUILTIN_AGENTS[agent];
+        return (spec.prefixSetting ? cfg().get(spec.prefixSetting) : '') || spec.defaultPrefix;
+      }),
+      ...BUILTIN_AGENT_IDS.map((agent) => BUILTIN_AGENTS[agent].defaultPrefix),
       'tmux_', 'codex_',
     ].filter(Boolean);
     // Free-mode sessions are the user's own; AgentMux never created them, so
@@ -5147,7 +5223,7 @@ class ClaudeTmuxView {
     const here = normalizedPath(cwd);
     // Names currently in use, so a live agent is never mistaken for a leftover.
     const live = new Set();
-    for (const agent of AGENT_IDS) {
+    for (const agent of cleanupAgents) {
       if (this.agentState[agent]?.present) live.add(await sessionName(agent));
     }
     const items = [];
@@ -5286,7 +5362,11 @@ class ClaudeTmuxView {
 
   agentFromArgs(args, fallback = this.activeAgent) {
     const id = typeof args === 'string' ? args : args?.agent;
-    return AGENTS[id] ? id : fallback;
+    if (!id) return fallback;
+    // A named agent that is unknown or disabled must never fall back silently
+    // to whatever tab is active: an orchestrator asking for hermes while
+    // hermes is off would type its prompt into the wrong agent.
+    return AGENTS[id] ? id : null;
   }
 
   // Live status without depending on the side bar being open: the presence loop
@@ -5305,6 +5385,7 @@ class ClaudeTmuxView {
 
   async sendToAgent(args = {}) {
     const agent = this.agentFromArgs(args);
+    if (!agent) return { ok: false, agent: null, reason: 'unknown-agent' };
     let text = typeof args === 'string' ? undefined : args?.text;
     if (typeof text !== 'string') {
       text = await vscode.window.showInputBox({
@@ -5331,6 +5412,7 @@ class ClaudeTmuxView {
 
   async captureAgent(args = {}) {
     const agent = this.agentFromArgs(args);
+    if (!agent) return { ok: false, agent: null, reason: 'unknown-agent' };
     const cwd = normalizedWorkspace();
     if (!cwd) return { ok: false, agent, reason: 'no-workspace' };
     const name = this.cachedReadySession(agent, cwd) || await sessionName(agent);
@@ -5352,7 +5434,8 @@ class ClaudeTmuxView {
 
   agentStatus(args = {}) {
     const wanted = typeof args === 'string' ? args : args?.agent;
-    const ids = AGENTS[wanted] ? [wanted] : AGENT_IDS;
+    if (wanted && !AGENTS[wanted]) return { error: 'unknown-agent', agent: wanted };
+    const ids = wanted ? [wanted] : AGENT_IDS;
     const report = {};
     for (const agent of ids) {
       const state = this.agentState[agent] || {};
@@ -5377,6 +5460,7 @@ class ClaudeTmuxView {
   // do "send, wait for done, capture" without polling the pane itself.
   async waitForAgent(args = {}) {
     const agent = this.agentFromArgs(args);
+    if (!agent) return { ok: false, agent: null, reason: 'unknown-agent' };
     const wanted = new Set([].concat(args?.status || ['done', 'needs-input']).filter(Boolean));
     const timeoutMs = Math.max(1000, Math.min(3600000, Number(args?.timeoutMs) || 300000));
     const deadline = Date.now() + timeoutMs;
@@ -5495,6 +5579,7 @@ class ClaudeTmuxView {
       },
       {
         id: 'claude-settings',
+        agent: 'claude',
         label: 'Claude Code hook settings',
         detail: 'Passed per launch with --settings; your own ~/.claude/settings.json is never touched.',
         file: hookPaths?.settings || null,
@@ -5503,6 +5588,7 @@ class ClaudeTmuxView {
       },
       {
         id: 'opencode-plugin',
+        agent: 'opencode',
         label: 'OpenCode plugin',
         detail: 'Reports OpenCode lifecycle state. Inert unless AGENTMUX=1 is set on the pane.',
         file: opencodePluginPath(),
@@ -5512,6 +5598,7 @@ class ClaudeTmuxView {
       },
       {
         id: 'pi-extension',
+        agent: 'pi',
         label: 'pi extension',
         detail: 'Reports pi lifecycle state. Inert unless AGENTMUX=1 is set on the pane.',
         file: piExtensionPath(),
@@ -5532,19 +5619,23 @@ class ClaudeTmuxView {
     }
     // Codex's hooks are not a file at all — they are -c overrides on the launch
     // command line — so they are listed for honesty, not for management.
+    const codexHooksOn = !!AGENTS.codex && cfg().get('codexHooks') !== false && cfg().get('stateHooks') !== false;
     entries.push({
       id: 'codex-hooks',
+      agent: 'codex',
       label: 'Codex lifecycle hooks',
       detail: cfg().get('codexHooks') === false
         ? 'Disabled by claudeTmux.codexHooks.'
         : 'Passed per launch with -c, never written to your config.toml. Codex asks once to trust them.',
       file: null,
-      exists: cfg().get('codexHooks') !== false && cfg().get('stateHooks') !== false,
+      exists: codexHooksOn,
       current: true,
-      state: cfg().get('codexHooks') !== false && cfg().get('stateHooks') !== false
-        ? 'passed at launch' : 'off',
+      state: codexHooksOn ? 'passed at launch' : 'off',
     });
-    return entries;
+    // An integration that serves a disabled agent is hidden unless it is
+    // already on disk: its only remaining job would be removal, and a menu that
+    // offers to install a plugin for a tab you cannot open is noise.
+    return entries.filter((entry) => !entry.agent || AGENTS[entry.agent] || entry.exists);
   }
 
   async manageIntegrations() {
@@ -6131,7 +6222,7 @@ class ClaudeTmuxView {
     }
     if (['working', 'needs-input'].includes(this.agentState[source].status)
       || ['working', 'needs-input'].includes(this.agentState[target].status)) {
-      return this.postHandoffResult(false, 'An agent is no longer ready. Return both agents to their prompts, then send again.');
+      return this.postHandoffResult(false, 'An agent is no longer ready. Return every participant to its prompt, then send again.');
     }
     transaction.phase = 'delivering';
     transaction.mode = mode;
@@ -6684,7 +6775,7 @@ class ClaudeTmuxView {
     </div>
     <div id="screen-wrap">
       <div id="terminal">
-        <div id="screen" tabindex="0" role="tabpanel" aria-label="Tmux terminal mirror"></div>
+        <div id="screen" tabindex="0" role="tabpanel" aria-label="Tmux terminal mirror" title="F6 moves focus out of the mirror"></div>
         <div id="cursor"></div>
       </div>
       <div id="hint">click to type</div>
@@ -6729,18 +6820,18 @@ class ClaudeTmuxView {
       <span id="status-name" title="tmux session"></span>
       <span id="status-right">
         <button id="btn-timeline" class="footer-action" title="Session timeline" aria-label="Session timeline">◷</button>
-        <button id="btn-arbiter" class="footer-action" title="Ask both agents (arbiter)" aria-label="Ask both agents">⚖</button>
+        <button id="btn-arbiter" class="footer-action" title="Ask the agents (arbiter)" aria-label="Ask the agents">⚖</button>
         <button id="btn-findings" class="footer-action hidden" title="Request findings and hand back" aria-label="Request findings and hand back">↩</button>
         <button id="btn-pair" class="footer-action" title="Hand off to the other agent" aria-label="Hand off to the other agent">⇄</button>
         <button id="btn-unlock" class="footer-action hidden" title="Release Pair Mode lock" aria-label="Release Pair Mode lock">◇</button>
         <span id="status-meta"></span>
-        <span id="status-state" role="status" aria-live="polite"><span class="dot" id="status-dot"></span><span id="status-label">connecting…</span></span>
+        <span id="status-state"><span class="dot" id="status-dot"></span><span id="status-label">connecting…</span><span id="status-live" class="sr-only" role="status" aria-live="polite"></span></span>
       </span>
     </div>
 
     <div id="arbiter-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="arbiter-title">
       <div class="modal-card">
-        <div class="modal-title" id="arbiter-title">Ask both agents</div>
+        <div class="modal-title" id="arbiter-title">Ask the agents</div>
         <div class="modal-meta" id="arbiter-meta">One question, two independent answers, no file changes. The winner becomes Pair Mode writer.</div>
         <div id="arbiter-body">
           <textarea id="arbiter-text" spellcheck="false" placeholder="Design question, bug diagnosis, 'which approach is right'…"></textarea>
@@ -6748,7 +6839,7 @@ class ClaudeTmuxView {
         <div id="arbiter-error" class="modal-error hidden" role="alert"></div>
         <div class="modal-actions">
           <button id="arbiter-cancel">Cancel</button>
-          <button id="arbiter-send" class="primary">Ask both</button>
+          <button id="arbiter-send" class="primary">Ask the agents</button>
         </div>
       </div>
     </div>
@@ -6788,10 +6879,10 @@ let activeProvider = null;
 function activate(context) {
   try { setStateHookDir(context.globalStorageUri?.fsPath); } catch { setStateHookDir(null); }
   invalidateWorkspacePathCache();
-  // Free-mode agents join the registry BEFORE anything reads the roster, so
-  // every per-agent structure (state, queues, tabs, subscriptions) is built for
-  // the full roster exactly once.
-  registerCustomAgents();
+  // The enabled built-ins and free-mode agents join the runtime registry BEFORE
+  // anything reads the roster, so every per-agent structure (state, queues,
+  // tabs, subscriptions) is built for the final roster exactly once.
+  rebuildAgentRegistry();
   const provider = new ClaudeTmuxView(context);
   activeProvider = provider;
 
@@ -6844,6 +6935,9 @@ function activate(context) {
       // The roster is fixed at activation; a hand-edited list needs a reload.
       if (e.affectsConfiguration('claudeTmux.customAgents') && customAgentsChanged()) {
         provider.offerReload('The AgentMux custom agent list changed.');
+      }
+      if (e.affectsConfiguration('claudeTmux.enabledAgents') && enabledAgentsChanged()) {
+        provider.offerReload('The AgentMux enabled agents list changed.');
       }
       if (e.affectsConfiguration('claudeTmux.transport')) {
         if (!['auto', 'control'].includes(transportMode())) controlClient.destroy(false);

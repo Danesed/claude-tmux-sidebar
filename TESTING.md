@@ -27,19 +27,24 @@ then:
 3. **Second agent** — start another one. Switching tabs paints the cached
    frame instantly; the accent colour of the active tab's underline and the
    cursor follows the active agent.
-4. **Scrollback** — wheel up at the top of the live screen: history loads and
-   the view stays where you scrolled — including while the agent is still
-   streaming (no snap back to the bottom, no mid-gesture jumps). Wheeling
-   *past* the bottom edge (or `Shift+PageDown` there) returns to live mode;
-   merely arriving at the bottom does not.
-5. **Needs input** — trigger an approval dialog on a *background* agent: its
+4. **Scrollback** — wheel up at the top of the live screen: history loads
+   landing near the seam (the recent rows just above the pane, not the oldest
+   lines of the capture), and the view stays where you scrolled — including
+   while the agent is still streaming (no snap back to the bottom, no
+   mid-gesture jumps). Wheeling *past* the bottom edge (or `Shift+PageDown`
+   there) returns to live mode; merely arriving at the bottom does not.
+5. **Agent roster** — `claudeTmux.enabledAgents` defaults hide Hermes and pi:
+   their tabs, presence dots and `agentmux` statuses are absent. Add one to the
+   list, reload the window: its tab appears. `agentmux prompt hermes …` while
+   hermes is off must answer `unknown-agent`, not type into the active tab.
+6. **Needs input** — trigger an approval dialog on a *background* agent: its
    tab turns amber, the VS Code badge counts it, hovering the tab previews the
    question, the notification offers the numbered answers.
-6. **CLI** — in a terminal inside the workspace:
+7. **CLI** — in a terminal inside the workspace:
    `agentmux list`, `agentmux read claude --lines 20`,
    `agentmux prompt codex "say hi" --wait --until done`. The wait returns on
    `done`, or immediately with `blocked: true` if the agent stops to ask.
-7. **Resilience** — `tmux kill-server`. One notification lists every stopped
+8. **Resilience** — `tmux kill-server`. One notification lists every stopped
    agent; the sidebar shows the launcher, nothing hangs, no tab flickers back.
-8. **Remote** — repeat 1–3 over Remote-SSH: typing must stay responsive and
+9. **Remote** — repeat 1–3 over Remote-SSH: typing must stay responsive and
    the footer `lag` chip should stay under a few hundred ms.

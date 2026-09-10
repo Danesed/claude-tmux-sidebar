@@ -10,17 +10,21 @@ npm run check
 npm run package
 ```
 
-Install `claude-tmux-sidebar-0.16.0.vsix` from **Extensions → … → Install from
+Install `claude-tmux-sidebar-0.16.3.vsix` from **Extensions → … → Install from
 VSIX…**, then reload VS Code. From a shell you can instead run:
 
 ```bash
-code --install-extension claude-tmux-sidebar-0.16.0.vsix --force
+code --install-extension claude-tmux-sidebar-0.16.3.vsix --force
 ```
 
 With Remote-SSH, perform the install from the connected VS Code window so the
-extension runs beside the remote `tmux`, `claude` and `codex` binaries.
+extension runs beside the remote `tmux` and the CLIs of the agents you enable.
 
-## Use both agents
+Hermes and pi are hidden by default; add them (or any other built-in) to
+`claudeTmux.enabledAgents` and reload to show their tabs. Free-mode agents from
+`claudeTmux.customAgents` are always shown.
+
+## Use the agents
 
 Open a folder, then open the **AgentMux** Activity Bar view. Tabs are not
 placeholders: each one appears only after the matching tmux session has been
@@ -115,15 +119,15 @@ or restart either agent. The last selected tab is restored after reload.
    deltas, discarded input, and every handoff/arbiter transition, all recorded
    in `.claude/agentmux/ledger.jsonl`.
 
-## Arbiter: ask both agents
+## Arbiter: ask the agents
 
-Press `⚖` (both agents must be running and idle), type one question, and
-AgentMux delivers it to Claude and Codex in parallel with an answers-only,
-no-file-changes instruction. Both marked answers are collected through
-`.claude/agentmux/answer-<id>-<agent>.md` (pane markers as fallback) and shown
-stacked for comparison. Picking a winner makes that agent the Pair Mode writer
-and tells it to proceed; input to both panes stays paused while answers are
-being gathered (up to 3 minutes, cancellable).
+Press `⚖` (at least two agents must be running and back at their prompt), type
+one question, and AgentMux delivers it to every running agent in parallel with
+an answers-only, no-file-changes instruction. All marked answers are collected
+through `.claude/agentmux/answer-<id>-<agent>.md` (pane markers as fallback)
+and shown stacked for comparison. Picking a winner makes that agent the Pair
+Mode writer and tells it to proceed; input to the participating panes stays
+paused while answers are being gathered (up to 3 minutes, cancellable).
 
 Pair Mode never commits, resets or reverts the working tree. Its lock applies to
 this VS Code view only; another tmux client can still type into either session.
@@ -135,7 +139,7 @@ stays open on validation or delivery errors. Because activity is inferred from
 terminal output, stop any turn started from another tmux client before handing
 off.
 
-## Project rules for both agents
+## Project rules for Claude and Codex
 
 Claude continues to use its normal project-instruction behavior. For Codex, the
 default `claudeTmux.codexReadClaudeRules` option adds a launch instruction to
@@ -152,8 +156,8 @@ project constraints in `.claude`, or disable the bridge and merge them manually.
 
 `Shift+Enter` breaks the line instead of submitting. There is no single byte
 sequence every agent understands for this, so each one's was measured in a live
-pane: Claude, Codex and OpenCode read CSI-u; Hermes, pi and Antigravity read
-xterm modifyOtherKeys. Plain `Enter` still submits.
+pane: Claude, Codex, OpenCode and Devin read CSI-u; Hermes, pi and Antigravity
+read xterm modifyOtherKeys. Plain `Enter` still submits.
 
 You do **not** need `set -g extended-keys on` in `~/.tmux.conf` for this, even
 though pi's own documentation asks for it. That setting controls how tmux
@@ -190,7 +194,8 @@ workspace root. Tmux targets also use exact-name syntax.
 
 If another project with the same basename already owns `tmux_claude_<folder>`,
 `tmux_codex_<folder>`, `tmux_opencode_<folder>`, `tmux_hermes_<folder>`,
-`tmux_pi_<folder>` or `tmux_agy_<folder>`, this project uses
+`tmux_pi_<folder>`, `tmux_agy_<folder>` or `tmux_devin_<folder>`, this project
+uses
 `<name>-<path-hash>`. Unrelated sessions are never shown by **Manage this
 workspace's tmux sessions…**.
 
@@ -258,13 +263,15 @@ The same compact footer shows pane size and tmux uptime. When available it adds
 capture takes at least 200 ms, token/turn chips tailed from the CLI's local
 transcript, the current tool while working, and the last turn's git delta.
 These fields reuse existing snapshots and local file reads and do not add
-another tmux process. Per-agent status bar items mirror the same state across
-all of VS Code (click one to focus that agent), and a hidden agent asking a
-numbered question raises a notification whose buttons answer it — after
+another tmux process. A single status bar item mirrors the same state across
+all of VS Code: all present agents are listed in its tooltip, and clicking it
+jumps to whichever needs you, otherwise it cycles focus. A hidden agent asking
+a numbered question raises a notification whose buttons answer it — after
 re-verifying the exact pane identity, and only when you click.
 
-Toolbar actions are scoped to the active tab. The manage action shows zero, one
-or two entries and rechecks the workspace path immediately before killing.
+Toolbar actions are scoped to the active tab. The manage action lists every
+running session for this workspace and rechecks the workspace path immediately
+before killing.
 
 Agents that write a summary into the tmux pane title — Claude Code does — show
 it as the second line of the tab tooltip, so you can tell two tabs apart without
@@ -304,7 +311,7 @@ regions, priorities and guards.
 
 ## Getting to the right agent
 
-With six or more tabs, "next agent" is rarely what you want. Press
+With several tabs, "next agent" is rarely what you want. Press
 `Ctrl/Cmd+Shift+Alt+A` (**AgentMux: Go to the agent that needs you**) to jump to
 whichever agent is blocked on you, or failing that the most recent completion.
 **Go back to the previous agent** toggles between the last two you used, and
@@ -353,7 +360,7 @@ AgentMux will not be adopted; one AgentMux starts is unaffected.
 - **The agent can't write the ACK file**: sandboxed agents fall back to printing
   the marker line automatically; nothing to configure.
 - **Too many chips or badges**: each surface has its own toggle —
-  `telemetry`, `showSparklines`, `statusBarItems`, `notifyPrompts`,
-  `tmuxStatusBar`, `eventLog`, `predictiveEcho`, `fileLinks`.
+  `telemetry`, `statusBarItems`, `notifyPrompts`, `notifyDone`, `tmuxStatusBar`,
+  `eventLog`, `fileLinks`.
 
 For a clean end-to-end check after installing, follow [TESTING.md](TESTING.md).

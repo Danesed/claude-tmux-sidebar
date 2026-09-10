@@ -189,6 +189,7 @@ function main() {
       console.log('    --wait                              Wait until the agent finishes processing');
       console.log('    --until <status>                    Target state (done, blocked, idle; default: done)');
       console.log('    --timeout <ms>                      Timeout in ms (default: 60000)');
+      console.log('    --raw                               Type the prompt without submitting it');
       console.log('    --json                              Output raw JSON response');
       break;
   }

@@ -53,7 +53,7 @@ It mirrors the selected tmux pane instead of opening another VS Code terminal:
   only for agents whose CLI is installed; tabs carry live state dots with zero-cost
   GPU compositor animations;
 - the `+` menu starts or resumes an absent agent (past conversations are listed
-  per workspace for Claude, Codex, OpenCode, Hermes and pi);
+  per workspace for Claude, Codex, OpenCode, Hermes, pi and Devin);
 - each tab carries its agent's colour on the underline it already had, and swaps
   its label for a two-glyph mark once the side bar is too narrow to show one;
 - `Shift+Enter` breaks the line instead of submitting (each agent's encoding was
@@ -79,15 +79,18 @@ codex --version
 opencode --version
 hermes --version
 pi --version
+agy --version
+devin --version
 ```
 
 - tmux 2.9 or newer;
 - at least one agent CLI on `PATH` — Claude Code, OpenAI Codex, OpenCode,
-  Hermes (Nous Research), pi (Earendil) or Google Antigravity (`agy`) — for its
-  tab.
+  Hermes (Nous Research), pi (Earendil), Google Antigravity (`agy`) or Cognition
+  Devin (`devin`) — for its tab.
 
 You may use any tab when only one agent CLI is installed. A **free mode** tab
-needs no CLI at all: it mirrors a tmux session you already have.
+needs no CLI at all: it mirrors a tmux session you already have. Hermes and pi
+are hidden by default: add them to `claudeTmux.enabledAgents` to show their tabs.
 
 ## Build and install
 
@@ -96,14 +99,15 @@ From this repository:
 ```bash
 npm run check
 npm run package
-code --install-extension claude-tmux-sidebar-0.16.0.vsix --force
+code --install-extension claude-tmux-sidebar-0.16.3.vsix --force
 ```
 
 Alternatively use VS Code: **Extensions → … → Install from VSIX…**, select the
 generated file, then run **Developer: Reload Window**.
 
 For Remote-SSH, install the VSIX in the remote extension host from the connected
-window. `tmux`, `claude` and `codex` must be available on that same remote host.
+window. `tmux` and the CLI of every agent you enable must be available on that
+same remote host.
 
 The **AgentMux** icon appears in the Activity Bar. You can drag its view to the
 Secondary Side Bar; VS Code remembers the layout.
@@ -115,9 +119,9 @@ Secondary Side Bar; VS Code remembers the layout.
    launcher. Use `+` later to add the others.
 3. Start or resume:
    - each agent lists its own past conversations for this folder, when its CLI
-     exposes them (Claude, Codex, OpenCode, Hermes, pi);
-4. Click the mirror and type. Switch visible tabs whenever you want; both tmux
-   sessions continue running independently.
+     exposes them (Claude, Codex, OpenCode, Hermes, pi, Devin);
+4. Click the mirror and type. Switch visible tabs whenever you want; every tmux
+   session continues running independently.
 5. Scroll with the wheel or scrollbar. Use `Shift+PageUp/PageDown` from the
    keyboard. Plain `PageUp/PageDown` are still forwarded to the agent TUI.
 
@@ -161,10 +165,11 @@ either side is detected as working:
 
 ### Arbiter mode
 
-`⚖` (or **AgentMux: Ask both agents**) sends one question to two running
-agents in parallel — answers only, no file changes. Both replies are gathered
+`⚖` (or **AgentMux: Ask the agents**) sends one question to every running
+agent in parallel — answers only, no file changes. All replies are gathered
 through the `.claude/agentmux` channel and shown side by side; the answer you
-pick makes that agent the Pair Mode writer and tells it to proceed.
+pick makes that agent the Pair Mode writer and tells it to proceed. At least
+two agents must be running and back at their prompt.
 
 The briefing capsule now includes recent commits, capped real diff hunks, your
 task file (`claudeTmux.handoffTodoFile`), optional verify-command output
@@ -469,6 +474,7 @@ settings.
 | `claudeTmux.antigravityArgs` | `--dangerously-skip-permissions` | Arguments passed to `agy`. |
 | `claudeTmux.devinSessionPrefix` | `tmux_devin_` | Devin session prefix. |
 | `claudeTmux.devinArgs` | `""` | Arguments passed to `devin`. |
+| `claudeTmux.enabledAgents` | `["claude","codex","opencode","antigravity","devin"]` | Built-in agents that get a tab. Hermes and pi are off by default; add them to bring their tabs back. Free-mode agents are always shown. A window reload applies the change. |
 | `claudeTmux.customAgents` | `[]` | Free mode: extra agents declared in settings — a new CLI to manage, or an existing tmux session to mirror. |
 | `claudeTmux.ansiPalette` | `theme` | `theme` remaps ANSI onto the VS Code terminal theme; `terminal` uses the classic xterm palette. |
 | `claudeTmux.detectionRules` | `{}` | Per-agent detection rules (`needsInput` / `working` / `hold`, and the same under `title`) used when an agent reports no lifecycle state. See [How AgentMux reads an agent's state](#how-agentmux-reads-an-agents-state). |
@@ -490,6 +496,8 @@ settings.
 | `claudeTmux.handoffDiffChars` | `6000` | Diff-hunk budget in briefings (0 disables). |
 | `claudeTmux.handoffTodoFile` | `tasks/todo.md` | Task file included in briefings (empty disables). |
 | `claudeTmux.handoffVerifyCommand` | `""` | Optional trust-gated verify command run once at draft time. |
+| `claudeTmux.worktrees` | `false` | Start each agent in its own Git worktree (`.agentmux/worktrees/<agent>`, branch `agent/<agent>`) to keep concurrent writes apart. |
+| `claudeTmux.notifyDone` | `true` | Native notification when an agent finishes in the background while its tab is not active. |
 
 ## Scope and limits
 
@@ -497,8 +505,8 @@ settings.
 - In a multi-root workspace, the first root is used.
 - A free-mode **mirror** tab is the one exception to workspace scoping, by
   design; it is also the one tab AgentMux will not create, restart or clean up.
-- The agent roster is assembled at activation, so a `claudeTmux.customAgents`
-  edit takes effect after a window reload.
+- The agent roster is assembled at activation, so an `enabledAgents` or
+  `customAgents` edit takes effect after a window reload.
 - With `stateHooks` off (or unmanaged launches), `working`, `finished` and
   `needs input` fall back to visual heuristics based on submitted input, pane
   changes and common prompts; they can occasionally be wrong.

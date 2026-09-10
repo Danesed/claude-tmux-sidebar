@@ -32,6 +32,8 @@
   const statusDot = document.getElementById('status-dot');
   const statusLabel = document.getElementById('status-label');
   const app = document.getElementById('app');
+  const hintEl = document.getElementById('hint');
+  const statusLive = document.getElementById('status-live');
   const recallEl = document.getElementById('prompt-recall');
   const recallFilter = document.getElementById('recall-filter');
   const recallList = document.getElementById('recall-list');
@@ -201,7 +203,11 @@
   }
 
   const ESC = '\x1b';
-  function esc(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+  // One pass instead of four: this runs on every changed row.
+  const ESCAPE_CHARS = /[&<>"]/g;
+  function esc(s) {
+    return String(s).replace(ESCAPE_CHARS, (c) => (c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;' : '&quot;'));
+  }
 
   // Hot path: every changed row goes through here. Text is copied out in
   // slices between escapes rather than one character at a time, CSI final
@@ -238,6 +244,20 @@
           css = styleToCss(st);
         }
         i = j;
+      } else if (line.charCodeAt(i + 1) === 93 || line.charCodeAt(i + 1) === 80) { // ']' OSC, 'P' DCS
+        // Hyperlinks (OSC 8) and other string sequences end at BEL or ST. An
+        // unterminated one means the sequence continues on the next line, so
+        // swallow the rest of this one instead of printing payload as text.
+        let j = i + 2;
+        while (j < n) {
+          const cc = line.charCodeAt(j);
+          if (cc === 7 || (cc === 27 && line.charCodeAt(j + 1) === 92)) break;
+          j++;
+        }
+        if (j >= n) i = n - 1;
+        else i = line.charCodeAt(j) === 7 ? j : j + 1;
+      } else if (line.charCodeAt(i + 1) >= 0x28 && line.charCodeAt(i + 1) <= 0x2f) {
+        i += 2; // ESC ( B and friends: a two-byte intermediate then a final
       } else {
         i += 1;
       }
@@ -301,6 +321,18 @@
     screen.replaceChildren();
   }
 
+  // Emptying the mirror must also drop the virtualized-history state and any
+  // frame held back while a selection was active: leaving the spacers behind
+  // made the next scroll throw, and a stale pending frame could resurrect a
+  // dead session's output.
+  function clearScreen() {
+    exitVirtual();
+    screen.replaceChildren();
+    pendingFrame = null;
+    liveLines = null;
+    renderedLineCount = 0;
+  }
+
   function updateVirtualWindow(force) {
     if (!virt) return;
     const total = virt.lines.length;
@@ -337,7 +369,9 @@
   function render(frame) {
     const lines = Array.isArray(frame) ? frame.slice() : frame.split('\n');
     if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
-    if (lines.length > VIRT_MIN && scrollState[activeAgent].historyMode) {
+    const st = scrollState[activeAgent];
+    const seam = st.pendingHistory && st.historyMode;
+    if (lines.length > VIRT_MIN && st.historyMode) {
       screen.replaceChildren();
       virt = {
         lines, start: -1, end: -1,
@@ -347,15 +381,6 @@
       screen.appendChild(virt.spacerTop);
       screen.appendChild(virt.spacerBottom);
       renderedLineCount = lines.length;
-      const st = scrollState[activeAgent];
-      if (st.pendingHistory) {
-        // Land at the history/pane seam BEFORE the window is computed, so the
-        // first paint already shows the right rows instead of flashing the
-        // top of a thousand-line capture and jumping a frame later.
-        st.pendingHistory = false;
-        st.follow = false;
-        setScrollTop(wrap.scrollHeight - wrap.clientHeight * 1.8);
-      }
       updateVirtualWindow(true);
     } else {
       exitVirtual();
@@ -375,15 +400,24 @@
       while (screen.children.length > lines.length) screen.lastElementChild.remove();
       renderedLineCount = lines.length;
     }
+    // The seam write has to wait until the scrollable height is real: fresh
+    // spacers are heightless until updateVirtualWindow splits them, so a
+    // scrollTop written earlier clamps to the top and the capture opens on
+    // its oldest rows. Frames too short to scroll (e.g. the cached live frame
+    // a fresh webview paints while its history capture is in flight) leave
+    // pendingHistory armed for the capture it belongs to.
+    if (seam && wrap.scrollHeight > wrap.clientHeight + charH) {
+      st.pendingHistory = false;
+      st.follow = false;
+      setScrollTop(wrap.scrollHeight - wrap.clientHeight * 1.8);
+      if (virt) updateVirtualWindow(true); // paint the window the seam selected
+      st.top = wrap.scrollTop;
+    }
     const agentAtRender = activeAgent;
     const state = scrollState[agentAtRender];
     requestAnimationFrame(() => {
       if (agentAtRender === activeAgent) {
-        if (state.pendingHistory && state.historyMode) {
-          state.pendingHistory = false;
-          state.follow = false;
-          setScrollTop(wrap.scrollHeight - wrap.clientHeight * 1.8);
-        } else if (state.follow) {
+        if (state.follow) {
           setScrollTop(wrap.scrollHeight);
         }
         // Not following: never write the saved position back. The browser
@@ -541,12 +575,15 @@
   }
 
   // ---- status footer -------------------------------------------------------
-  let lastSeen = 0;
-  function setStatus(name, cls, label) {
+  function setStatus(name, cls, label, announce) {
     if (name) statusName.textContent = name;
     const dotClass = 'dot ' + cls + (statusDot.classList.contains('lag') ? ' lag' : '');
     if (statusDot.className !== dotClass) statusDot.className = dotClass;
     if (statusLabel.textContent !== label) statusLabel.textContent = label;
+    // The visual label ticks with the uptime; the live region only speaks when
+    // the state itself changes, or a screen reader announces every second.
+    const spoken = announce === undefined ? label : announce;
+    if (statusLive.textContent !== spoken) statusLive.textContent = spoken;
   }
   function clearMeta() {
     if (statusMeta.dataset.text === undefined && !statusMeta.firstChild) return;
@@ -606,7 +643,7 @@
       if (ap.statusSince) label += ' ' + fmtUptime((Date.now() - ap.statusSince) / 1000);
       if (ap.lastTool) label += ' · ' + ap.lastTool;
     }
-    setStatus(name, agentStatus, label);
+    setStatus(name, agentStatus, label, STATE_LABELS[agentStatus] || agentStatus);
   }
   // ---- input ---------------------------------------------------------------
   const graphemeSegmenter = Intl.Segmenter
@@ -623,6 +660,9 @@
   function keyToBytes(e) {
     const k = e.key;
     const altGraph = e.getModifierState && e.getModifierState('AltGraph');
+    // Ctrl/Cmd+Tab belongs to the workbench, never to the agent: consuming it
+    // was one more way the mirror could trap focus.
+    if (k === 'Tab' && (e.ctrlKey || e.metaKey)) return null;
     if (e.ctrlKey && !e.altKey && !altGraph && k.length === 1) {
       const lc = k.toLowerCase().charCodeAt(0);
       if (lc >= 97 && lc <= 122) return String.fromCharCode(lc - 96);
@@ -656,7 +696,16 @@
       case 'PageDown': return '\x1b[6~';
       case 'Delete': return '\x1b[3~';
     }
-    if (isTextKey(k) && !e.metaKey && (!e.ctrlKey || altGraph)) return k;
+    if (isTextKey(k) && !e.metaKey && (!e.ctrlKey || altGraph)) {
+      // Alt/Option is Meta in a terminal: send ESC plus the physical key, or
+      // macOS mangles Option+a into 'å' and Windows/Linux drop the modifier.
+      if (e.altKey && !altGraph) {
+        const physical = /^Key([A-Z])$/.exec(e.code || '');
+        if (physical) return ESC + (e.shiftKey ? physical[1] : physical[1].toLowerCase());
+        if (e.code === 'Space') return ESC + ' ';
+      }
+      return k;
+    }
     return null;
   }
 
@@ -674,15 +723,16 @@
   }
 
   // ---- prompt recall (Alt+Up) --------------------------------------------------
+  const RECALL_MAX = 30; // only this many rows are rendered
   let recallItems = [];
   let recallFiltered = [];
   let recallIndex = 0;
   function renderRecall() {
     const q = (recallFilter.value || '').toLowerCase().trim();
     recallFiltered = q ? recallItems.filter((t) => t.toLowerCase().includes(q)) : recallItems.slice();
-    recallIndex = Math.max(0, Math.min(recallIndex, recallFiltered.length - 1));
+    recallIndex = Math.max(0, Math.min(recallIndex, Math.min(recallFiltered.length, RECALL_MAX) - 1));
     recallList.innerHTML = recallFiltered.length
-      ? recallFiltered.slice(0, 30).map((t, i) =>
+      ? recallFiltered.slice(0, RECALL_MAX).map((t, i) =>
           `<button class="recall-item${i === recallIndex ? ' sel' : ''}" data-i="${i}">${esc(t)}</button>`).join('')
       : '<div class="sess-empty">No prompts recorded yet.</div>';
   }
@@ -698,12 +748,30 @@
   recallFilter.addEventListener('input', () => { recallIndex = 0; renderRecall(); });
   recallEl.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') { e.preventDefault(); closeRecall(); return; }
-    if (e.key === 'Enter') { e.preventDefault(); pickRecall(recallFiltered[recallIndex]); return; }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      // Tab may have moved focus to a row without updating recallIndex; the
+      // focused row is what the user means, never the remembered index.
+      const focused = document.activeElement?.closest?.('.recall-item');
+      pickRecall(focused ? recallFiltered[parseInt(focused.dataset.i, 10)] : recallFiltered[recallIndex]);
+      return;
+    }
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
       e.preventDefault();
-      recallIndex = Math.max(0, Math.min(recallFiltered.length - 1, recallIndex + (e.key === 'ArrowDown' ? 1 : -1)));
+      const limit = Math.min(recallFiltered.length, RECALL_MAX) - 1;
+      recallIndex = Math.max(0, Math.min(limit, recallIndex + (e.key === 'ArrowDown' ? 1 : -1)));
       renderRecall();
+      recallList.querySelector('.recall-item.sel')?.scrollIntoView({ block: 'nearest' });
     }
+  });
+  // Keyboard focus (Tab) and the highlighted row must not disagree: track
+  // focus without re-rendering, which would drop the focus itself.
+  recallList.addEventListener('focusin', (e) => {
+    const item = e.target.closest('.recall-item');
+    if (!item) return;
+    recallIndex = parseInt(item.dataset.i, 10) || 0;
+    for (const el of recallList.querySelectorAll('.recall-item.sel')) el.classList.remove('sel');
+    item.classList.add('sel');
   });
   recallList.addEventListener('click', (e) => {
     const item = e.target.closest('.recall-item');
@@ -714,6 +782,15 @@
     // Ctrl+C and paste with Ctrl+V; otherwise Ctrl combinations reach tmux.
     const key = e.key.toLowerCase();
     if (isAltDigit(e)) return; // tab chord: handled at the document level, never typed
+    // F6 is the standard workbench "focus next part" and the documented way out
+    // of the mirror: without it, Tab — which the agent needs — was a keyboard
+    // trap for anyone without a pointer.
+    if (e.key === 'F6' && !e.altKey && !e.ctrlKey && !e.metaKey) {
+      e.preventDefault();
+      const target = TAB_EL[activeAgent];
+      (target && !target.classList.contains('hidden') ? target : tabAdd).focus();
+      return;
+    }
     if (isMac && e.metaKey && ['c', 'v', 'a', 'x'].includes(key)) return;
     if (!isMac && e.ctrlKey && ((key === 'c' && hasSelection()) || key === 'v')) return;
     if (!isMac && e.ctrlKey && e.shiftKey && ['c', 'v'].includes(key)) return;
@@ -820,8 +897,7 @@
       render(cached.frame);
       applyFrameMeta(cached.meta, cached.name, cached.latencyMs);
     } else {
-      screen.replaceChildren();
-      renderedLineCount = 0;
+      clearScreen();
       setStatus('', 'idle', 'connecting…');
     }
     setScrollTop(scrollState[agent].top);
@@ -884,19 +960,40 @@
     idle: 'idle',
   };
 
+  // Transient input failures must not be wiped by the next `agents` tick
+  // (~900 ms), or the feedback is invisible exactly when it matters.
+  let hintOverrideUntil = 0;
+  let hintOverrideTimer = null;
+  let lastHint = null;
+  function setHintOverride(text, ms) {
+    if (hintEl.textContent !== text) hintEl.textContent = text;
+    lastHint = null;
+    hintOverrideUntil = Date.now() + ms;
+    if (hintOverrideTimer !== null) clearTimeout(hintOverrideTimer);
+    hintOverrideTimer = setTimeout(() => {
+      hintOverrideTimer = null;
+      hintOverrideUntil = 0;
+      applyPairLock();
+    }, ms);
+  }
   function applyPairLock() {
     const transactionLocked = ['drafting', 'delivering', 'awaitingAck', 'ackTimeout'].includes(handoffPhase);
     const locked = isInputLocked();
     screen.classList.toggle('input-locked', locked);
     screen.setAttribute('aria-readonly', locked ? 'true' : 'false');
+    btnUnlock.classList.toggle('hidden', !writerAgent);
+    if (Date.now() < hintOverrideUntil) return;
     const inHistory = scrollState[activeAgent].historyMode;
-    document.getElementById('hint').textContent = transactionLocked
+    const hint = transactionLocked
       ? 'handoff in progress'
       : locked ? `Pair Mode · ${cap(writerAgent)} is writer`
         : inHistory ? 'scrollback — wheel down at the end returns to live'
           : paneMode ? `pane is in tmux ${paneMode} · typing here leaves it`
-            : (tabs.filter((t) => !t.classList.contains('hidden')).length > 1 ? 'click to type · Alt+1…9 switch agent' : 'click to type');
-    btnUnlock.classList.toggle('hidden', !writerAgent);
+            : (tabs.filter((t) => !t.classList.contains('hidden')).length > 1
+              ? 'click to type · Alt+1…9 switch · F6 leaves' : 'click to type · F6 leaves');
+    if (hint === lastHint) return;
+    lastHint = hint;
+    hintEl.textContent = hint;
   }
 
   // Install hints come from the host registry (roster), so a missing agent just
@@ -976,7 +1073,7 @@
     btnPair.disabled = !agentPresence[activeAgent].present || !!handoffPhase;
     applyPairLock();
     if (!hasWorkspace) {
-      screen.replaceChildren();
+      clearScreen();
       overlay.classList.remove('hidden');
       overlayTitle.textContent = 'Open a workspace folder';
       overlayFolder.textContent = 'Agent tmux sessions are never created outside a workspace.';
@@ -990,7 +1087,7 @@
       return;
     }
     if (!presentAgents.length) {
-      screen.replaceChildren();
+      clearScreen();
       overlay.classList.remove('hidden');
       overlayTitle.textContent = 'Start a workspace agent';
       overlayFolder.textContent = 'Tabs appear only after their tmux session exists.';
@@ -1197,10 +1294,19 @@
   });
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Tab' && !handoffModal.classList.contains('hidden')) {
-      const focusable = [...handoffModal.querySelectorAll('select, textarea, button')].filter((item) => !item.disabled);
+      // Hidden-but-enabled controls (the mode select in the details step) are
+      // not focusable: including them made Tab land on nothing and stop.
+      const focusable = [...handoffModal.querySelectorAll('select, textarea, button')]
+        .filter((item) => !item.disabled && !item.hidden && !item.classList.contains('hidden')
+          && item.getClientRects().length > 0);
       if (!focusable.length) return;
       const index = focusable.indexOf(document.activeElement);
-      if (e.shiftKey && index <= 0) { e.preventDefault(); focusable.at(-1).focus(); }
+      if (index === -1) {
+        e.preventDefault();
+        (e.shiftKey ? focusable.at(-1) : focusable[0]).focus();
+        return;
+      }
+      if (e.shiftKey && index === 0) { e.preventDefault(); focusable.at(-1).focus(); }
       else if (!e.shiftKey && index === focusable.length - 1) { e.preventDefault(); focusable[0].focus(); }
       return;
     }
@@ -1298,7 +1404,10 @@
   }
   function setSessions(list) {
     allSessions = list || [];
-    sessionFilter.classList.toggle('hidden', allSessions.length < 6);
+    const showFilter = allSessions.length >= 6;
+    sessionFilter.classList.toggle('hidden', !showFilter);
+    // A filter you can no longer see must not keep filtering the list.
+    if (!showFilter) sessionFilter.value = '';
     renderSessions(true);
   }
   sessionFilter.addEventListener('input', () => renderSessions());
@@ -1320,10 +1429,19 @@
       frameCache[m.agent] = {
         frame: m.cachedFrame ?? null, meta: m.cachedMeta || '', name: m.cachedName || '', latencyMs: 0,
       };
-      if (m.historyMode === false && scrollState[m.agent].historyMode) {
-        scrollState[m.agent].historyMode = false;
-        scrollState[m.agent].pendingHistory = false;
-        scrollState[m.agent].follow = true;
+      const history = scrollState[m.agent];
+      if (m.historyMode === true) {
+        // The host is holding this agent in scrollback; a content frame only
+        // follows when its historyPending is set, which the `ready` handler
+        // re-arms for a fresh webview. Without adopting the mode here the
+        // switch painted the cached live frame and then froze.
+        history.historyMode = true;
+        history.pendingHistory = true;
+        history.follow = false;
+      } else if (history.historyMode) {
+        history.historyMode = false;
+        history.pendingHistory = false;
+        history.follow = true;
       }
       setActiveAgent(m.agent);
     } else if (m.type === 'agents') {
@@ -1423,26 +1541,21 @@
     } else if (m.type === 'inputLocked') {
       applyPairLock();
     } else if (m.type === 'inputSuspended') {
-      document.getElementById('hint').textContent = m.reason === 'handoff' ? 'handoff in progress' : 'session operation in progress';
-      setTimeout(applyPairLock, 1200);
+      setHintOverride(m.reason === 'handoff' ? 'handoff in progress' : 'session operation in progress', 1200);
     } else if (m.type === 'inputError') {
       if (m.reason === 'workspace') {
-        document.getElementById('hint').textContent = 'workspace changed · unsent text discarded';
+        setHintOverride('workspace changed · unsent text discarded', 2500);
       } else if (m.reason === 'too-large') {
-        document.getElementById('hint').textContent = 'paste too large (limit 100 KB) · not sent';
+        setHintOverride('paste too large (limit 100 KB) · not sent', 2500);
       } else {
         const why = m.reason ? ` (${m.reason})` : '';
-        document.getElementById('hint').textContent = m.pendingBytes
+        setHintOverride(m.pendingBytes
           ? `input not delivered${why} · later keys discarded, retype`
-          : `input not delivered${why} · retype`;
+          : `input not delivered${why} · retype`, 2500);
         setStatus('', 'dead', 'input failed');
       }
-      setTimeout(applyPairLock, 2500);
     } else if (m.type === 'agentStalled') {
-      if (m.agent === activeAgent) {
-        document.getElementById('hint').textContent = 'agent stalled (no response to prompt)';
-        setTimeout(applyPairLock, 4000);
-      }
+      if (m.agent === activeAgent) setHintOverride('agent stalled (no response to prompt)', 4000);
     } else if (m.type === 'handoffCreateError') {
       if (!handoffDraft || handoffDraft.id !== m.id) return;
       handoffDraft.phase = 'collecting';
@@ -1529,7 +1642,6 @@
       }
     } else if (m.type === 'frame') {
       if (m.agent !== activeAgent) return;
-      lastSeen = Date.now();
       overlay.classList.add('hidden');
       const state = scrollState[activeAgent];
       const histChanged = state.historyMode !== !!m.historyMode;
@@ -1567,17 +1679,18 @@
       if (frameCache[m.agent] && m.agent !== activeAgent) {
         frameCache[m.agent].frame = m.frame;
         if (m.meta) frameCache[m.agent].meta = m.meta;
+        if (m.name) frameCache[m.agent].name = m.name;
       }
     } else if (m.type === 'timeline') {
       renderTimeline(m.events);
       timelineEl.classList.remove('hidden');
     } else if (m.type === 'arbiterPrompt') {
       arbiterState = { id: m.id, phase: 'collecting' };
-      arbiterMeta.textContent = 'One question, two independent answers, no file changes. The winner becomes Pair Mode writer.';
+      arbiterMeta.textContent = 'One question to every running agent, no file changes. The winner becomes Pair Mode writer.';
       arbiterBody.innerHTML = '<textarea id="arbiter-text" spellcheck="false" placeholder="Design question, bug diagnosis, \'which approach is right\'…"></textarea>';
       arbiterError.classList.add('hidden');
       arbiterSend.disabled = false;
-      arbiterSend.textContent = 'Ask both';
+      arbiterSend.textContent = 'Ask the agents';
       arbiterSend.classList.remove('hidden');
       arbiterCancel.disabled = false;
       arbiterModal.classList.remove('hidden');
@@ -1585,8 +1698,8 @@
     } else if (m.type === 'arbiterGathering') {
       if (!arbiterState || arbiterState.id !== m.id) return;
       arbiterState.phase = 'gathering';
-      arbiterMeta.textContent = 'Both agents are answering… input is paused until the round finishes.';
-      arbiterBody.innerHTML = '<div class="sess-empty">Waiting for both marked answers (up to 3 minutes)…</div>';
+      arbiterMeta.textContent = 'Every running agent is answering… input is paused until the round finishes.';
+      arbiterBody.innerHTML = '<div class="sess-empty">Waiting for every marked answer (up to 3 minutes)…</div>';
       arbiterSend.disabled = true;
       arbiterSend.textContent = 'Gathering…';
     } else if (m.type === 'arbiterVerdict') {
@@ -1606,7 +1719,7 @@
       if (!arbiterState || arbiterState.id !== m.id) return;
       if (arbiterState.phase === 'collecting') {
         arbiterSend.disabled = false;
-        arbiterSend.textContent = 'Ask both';
+        arbiterSend.textContent = 'Ask the agents';
         arbiterError.textContent = m.error || 'Arbiter round failed.';
         arbiterError.classList.remove('hidden');
       } else {
@@ -1629,17 +1742,13 @@
     } else if (m.type === 'nosession') {
       if (m.agent !== activeAgent) return;
       frameCache[m.agent] = { frame: null, meta: '', name: '', latencyMs: 0 };
-      exitVirtual();
-      screen.replaceChildren();
-      renderedLineCount = 0;
-      liveLines = null;
+      clearScreen();
       scrollState[activeAgent] = { top: 0, follow: true, historyMode: false, historyAvailable: 0, pendingHistory: false };
       setScrollTop(0);
       overlay.classList.remove('hidden');
       overlayFolder.textContent = m.folder || '';
       clearMeta();
       setStatus(m.name, 'dead', 'stopped');
-      lastSeen = 0;
       if (paneMode) { paneMode = ''; applyPairLock(); }
     } else if (m.type === 'sessions') {
       if (m.agent !== activeAgent) return;
@@ -1659,12 +1768,13 @@
       } else {
         overlayTitle.textContent = `Start or resume ${label}`;
         sessionFilter.classList.add('hidden');
+        sessionFilter.value = '';
         sessionList.innerHTML = `<div class="sess-empty">${esc(label)} keeps no per-folder conversation list here; “Resume previous session” continues its most recent one.</div>`;
       }
       btnResume.classList.toggle('hidden', !m.canResumeLatest);
     } else if (m.type === 'noWorkspace') {
       if (m.agent !== activeAgent) return;
-      screen.replaceChildren();
+      clearScreen();
       overlay.classList.remove('hidden');
       overlayTitle.textContent = 'Open a workspace folder';
       overlayFolder.textContent = 'Agent tmux sessions are never created outside a workspace.';

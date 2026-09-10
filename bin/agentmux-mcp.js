@@ -4,6 +4,11 @@ const path = require('path');
 const net = require('net');
 const readline = require('readline');
 
+// Keep the MCP server version in step with the extension it ships inside; the
+// literal is only a fallback for a copy run outside the VSIX tree.
+let EXTENSION_VERSION = '0.16.3';
+try { EXTENSION_VERSION = require('../package.json').version || EXTENSION_VERSION; } catch { /* keep the fallback */ }
+
 function findSocketPath() {
   if (process.env.AGENTMUX_SOCK && fs.existsSync(process.env.AGENTMUX_SOCK)) {
     return process.env.AGENTMUX_SOCK;
@@ -71,7 +76,7 @@ function queryIpc(req) {
 const TOOLS = [
   {
     name: 'list_agents',
-    description: 'List all active coding agents in AgentMux and their live lifecycle status (idle, working, blocked, done)',
+    description: 'List all active coding agents in AgentMux and their live lifecycle status (idle, working, blocked, done). Only agents enabled in claudeTmux.enabledAgents are managed; a disabled agent is not listed and cannot be prompted.',
     inputSchema: {
       type: 'object',
       properties: {},
@@ -111,6 +116,7 @@ const TOOLS = [
         wait: { type: 'boolean', description: 'Wait until the agent finishes processing (default: true)' },
         until: { type: 'string', description: "Target state to wait for ('done' or 'blocked'; default: 'done')" },
         timeout: { type: 'number', description: 'Timeout in ms (default: 60000)' },
+        raw: { type: 'boolean', description: "Type the prompt without submitting it, like the CLI's --raw (default: false — the prompt is submitted)" },
       },
       required: ['agent', 'prompt'],
     },
@@ -148,7 +154,7 @@ async function handleToolCall(name, args = {}) {
       const wait = args.wait !== false;
       const until = args.until || 'done';
       const timeout = args.timeout || 60000;
-      const raw = args.raw !== false;
+      const raw = args.raw === true;
       const res = await queryIpc({
         action: 'prompt',
         agent: args.agent,
@@ -198,7 +204,7 @@ rl.on('line', async (line) => {
       result: {
         protocolVersion: '2024-11-05',
         capabilities: { tools: {} },
-        serverInfo: { name: 'agentmux-mcp', version: '0.16.0' },
+        serverInfo: { name: 'agentmux-mcp', version: EXTENSION_VERSION },
       },
     };
     process.stdout.write(JSON.stringify(res) + '\n');

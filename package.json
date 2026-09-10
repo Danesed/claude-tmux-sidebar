@@ -2,7 +2,7 @@
   "name": "claude-tmux-sidebar",
   "displayName": "AgentMux — Claude, Codex, OpenCode, Hermes, Pi, Antigravity & Devin in tmux",
   "description": "Seven agents, one terminal flow — plus free mode, which mirrors any tmux session you already have: switch fast and hand off work intelligently between Claude Code, Codex, OpenCode, Hermes, Pi, Google Antigravity and Devin in tmux.",
-  "version": "0.16.2",
+  "version": "0.16.3",
   "publisher": "Danesed",
   "license": "MIT",
   "icon": "icon.png",
@@ -108,7 +108,7 @@
       },
       {
         "command": "claudeTmux.arbiter",
-        "title": "Ask both agents (arbiter)…",
+        "title": "Ask the agents (arbiter)…",
         "category": "AgentMux",
         "icon": "$(law)"
       },
@@ -580,6 +580,39 @@
                 }
               }
             }
+          }
+        },
+        "claudeTmux.enabledAgents": {
+          "type": "array",
+          "default": [
+            "claude",
+            "codex",
+            "opencode",
+            "antigravity",
+            "devin"
+          ],
+          "uniqueItems": true,
+          "markdownDescription": "Which built-in agents AgentMux shows and manages. Every enabled agent gets a tab, presence probing and status reporting; an agent left off the list is invisible everywhere — no tab, no status bar entry, no prompts. Hermes and pi are off by default because their CLIs are often not installed; add them here to bring their tabs back. Tab order follows the built-in order below, not the order written here, and free-mode agents from `claudeTmux.customAgents` are always shown. Changing this needs a window reload; an empty list (or one containing no known agent) falls back to the default. Old tmux sessions of a disabled agent are not killed — **Clean up this project's leftover tmux sessions** still finds them.",
+          "items": {
+            "type": "string",
+            "enum": [
+              "claude",
+              "codex",
+              "opencode",
+              "hermes",
+              "pi",
+              "antigravity",
+              "devin"
+            ],
+            "enumDescriptions": [
+              "Claude Code",
+              "OpenAI Codex CLI",
+              "OpenCode",
+              "Nous Research Hermes",
+              "Earendil pi",
+              "Google Antigravity",
+              "Cognition Devin CLI"
+            ]
           }
         },
         "claudeTmux.customAgents": {

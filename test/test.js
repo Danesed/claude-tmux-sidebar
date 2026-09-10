@@ -187,7 +187,7 @@ const vscode = {
 };
 
 const source = fs.readFileSync(path.join(root, 'extension.js'), 'utf8')
-  + '\nmodule.exports.__test = { ClaudeTmuxView, sessionName, accentChannels, derivedAccent, derivedMark, decodeEscapes, AGENT_DETECTION, paneIdentity, identityMatches, STATE_HOOK_SCRIPT, setStateHookDir, codexHookArgs, tomlString, listPiSessions, piSessionDir, piExtensionPath, ensurePiExtension, removePiExtension, PI_EXTENSION, customAgentSpecs, registerCustomAgents, freeAgentId, mirroredSessionNames, baseSessionName, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions, AGENTS, AGENT_IDS, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, listDevinSessions, devinLaunchArgs, hermesProfileSlug, hermesProfileHome, ensureHermesProfile, launchEnvPrefix, detectionRules, detectState, detectionContext, isRuleLine, explainDetection, DETECTION_REGIONS, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath, AGENT_PRESETS, promptAddAgentPreset, setTmuxTimeouts };';
+  + '\nmodule.exports.__test = { ClaudeTmuxView, sessionName, accentChannels, derivedAccent, derivedMark, decodeEscapes, AGENT_DETECTION, paneIdentity, identityMatches, STATE_HOOK_SCRIPT, setStateHookDir, codexHookArgs, tomlString, listPiSessions, piSessionDir, piExtensionPath, ensurePiExtension, removePiExtension, PI_EXTENSION, customAgentSpecs, registerCustomAgents, freeAgentId, mirroredSessionNames, baseSessionName, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions, AGENTS, AGENT_IDS, BUILTIN_AGENTS, BUILTIN_AGENT_IDS, DEFAULT_ENABLED_AGENTS, normalizedEnabledAgents, rebuildAgentRegistry, enabledAgentsChanged, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, listDevinSessions, devinLaunchArgs, hermesProfileSlug, hermesProfileHome, ensureHermesProfile, launchEnvPrefix, detectionRules, detectState, detectionContext, isRuleLine, explainDetection, DETECTION_REGIONS, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath, AGENT_PRESETS, promptAddAgentPreset, setTmuxTimeouts };';
 const moduleUnderTest = { exports: {} };
 const sandbox = {
   module: moduleUnderTest,
@@ -208,7 +208,7 @@ const sandbox = {
   clearInterval,
 };
 vm.runInNewContext(source, sandbox, { filename: 'extension.js' });
-const { ClaudeTmuxView, sessionName, accentChannels, derivedAccent, derivedMark, decodeEscapes, AGENT_DETECTION, paneIdentity, identityMatches, STATE_HOOK_SCRIPT, setStateHookDir, codexHookArgs, tomlString, listPiSessions, piSessionDir, piExtensionPath, ensurePiExtension, removePiExtension, PI_EXTENSION, customAgentSpecs, registerCustomAgents, freeAgentId, mirroredSessionNames, baseSessionName, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions, AGENTS, AGENT_IDS, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, listDevinSessions, devinLaunchArgs, hermesProfileSlug, hermesProfileHome, ensureHermesProfile, launchEnvPrefix, detectionRules, detectState, detectionContext, isRuleLine, explainDetection, DETECTION_REGIONS, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath, AGENT_PRESETS, promptAddAgentPreset, setTmuxTimeouts } = moduleUnderTest.exports.__test;
+const { ClaudeTmuxView, sessionName, accentChannels, derivedAccent, derivedMark, decodeEscapes, AGENT_DETECTION, paneIdentity, identityMatches, STATE_HOOK_SCRIPT, setStateHookDir, codexHookArgs, tomlString, listPiSessions, piSessionDir, piExtensionPath, ensurePiExtension, removePiExtension, PI_EXTENSION, customAgentSpecs, registerCustomAgents, freeAgentId, mirroredSessionNames, baseSessionName, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions, AGENTS, AGENT_IDS, BUILTIN_AGENTS, BUILTIN_AGENT_IDS, DEFAULT_ENABLED_AGENTS, normalizedEnabledAgents, rebuildAgentRegistry, enabledAgentsChanged, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, listDevinSessions, devinLaunchArgs, hermesProfileSlug, hermesProfileHome, ensureHermesProfile, launchEnvPrefix, detectionRules, detectState, detectionContext, isRuleLine, explainDetection, DETECTION_REGIONS, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath, AGENT_PRESETS, promptAddAgentPreset, setTmuxTimeouts } = moduleUnderTest.exports.__test;
 
 function makeProvider() {
   const provider = new ClaudeTmuxView({
@@ -1831,6 +1831,32 @@ async function run() {
   assert.match(webviewSource, /XTERM/, 'the original-terminal palette is available');
   assert.match(webviewSource, /deleteSession/, 'conversations can be deleted from the resume list');
   assert.doesNotMatch(webviewSource, /notePredict|drawSpark|xtermWriteFull/, 'removed features must not linger in the webview');
+  // Webview robustness fixes: each is a freeze or a trap in the old code.
+  assert.match(webviewSource, /const ESCAPE_CHARS = \/\[&<>"\]\/g/,
+    'esc() must escape quotes before values reach HTML attributes');
+  assert.match(webviewSource, /function clearScreen\(\)/,
+    'clearing the mirror must drop virtual spacers and buffered frames');
+  assert.match(webviewSource, /if \(m\.historyMode === true\)/,
+    'a fresh webview adopts the host scrollback instead of freezing on the cached frame');
+  assert.match(webviewSource, /e\.key === 'F6'/,
+    'F6 releases the keyboard focus from the mirror');
+  assert.match(webviewSource, /k === 'Tab' && \(e\.ctrlKey \|\| e\.metaKey\)/,
+    'Ctrl/Cmd+Tab stays a workbench shortcut');
+  assert.doesNotMatch(webviewSource, /lastSeen/, 'dead staleness counter is gone');
+  assert.match(webviewSource, /setHintOverride/,
+    'input failures survive the next roster tick instead of being wiped');
+  assert.match(webviewSource, /statusLive/,
+    'the live region is separate from the label that ticks with uptime');
+  assert.match(webviewSource, /line\.charCodeAt\(i \+ 1\) === 93/,
+    'OSC/DCS sequences are swallowed instead of rendered as text');
+  assert.match(webviewSource, /pendingFrame = null/,
+    'a buffered frame is dropped when the screen is cleared');
+  assert.match(source, /if \(state\?\.historyMode\) state\.historyPending = true;/,
+    'the ready handler re-arms the history capture for a fresh webview');
+  assert.match(source, /type: 'bgFrame', agent, frame: bgFrame, meta: bgMeta, name/,
+    'a background frame carries its session name, so the footer never shows a stale one');
+  assert.match(source, /id="status-live" class="sr-only"/,
+    'announcements have their own live region');
 
   // ---- navigation: go to the agent that needs you ---------------------------------------
   {
@@ -2361,6 +2387,141 @@ async function run() {
     assert.strictEqual(provider.agentState.claude.paneMode, '', 'leaving the mode in tmux clears the flag on the next probe');
     agentInfoOutput = null;
     provider.closeIpcServer();
+  }
+
+  // ---- enabled agents: the roster is a setting ------------------------------------
+  // The built-ins AgentMux shows come from claudeTmux.enabledAgents; hermes and
+  // pi are off by default. A disabled agent must be absent everywhere at once
+  // (tab, presence, status), while custom agents stay explicit choices and an
+  // empty or misspelled list must never leave the view with nothing to show.
+  {
+    const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+    assert.strictEqual(
+      JSON.stringify(pkg.contributes.configuration.properties['claudeTmux.enabledAgents'].default),
+      JSON.stringify(DEFAULT_ENABLED_AGENTS),
+      'package.json and the code must agree on the default roster');
+
+    settings.set('customAgents', []);
+    settings.set('enabledAgents', ['claude', 'codex', 'opencode', 'antigravity', 'devin']);
+    rebuildAgentRegistry();
+    assert.ok(!AGENT_IDS.includes('hermes') && !AGENT_IDS.includes('pi'),
+      'the default roster is everything except hermes and pi');
+    assert.strictEqual(AGENT_IDS.join(','), 'claude,codex,opencode,antigravity,devin',
+      'tab order follows the built-in registry, not the setting order');
+    assert.strictEqual(enabledAgentsChanged(), false, 'the reload snapshot matches the rebuilt registry');
+    settings.set('enabledAgents', [...DEFAULT_ENABLED_AGENTS, 'hermes']);
+    assert.strictEqual(enabledAgentsChanged(), true, 'a different list asks for a reload');
+    settings.set('enabledAgents', [...DEFAULT_ENABLED_AGENTS]);
+
+    // The markup and the per-agent structures follow the filtered roster.
+    const filtered = makeProvider();
+    const filteredMarkup = filtered.html({ asWebviewUri: (u) => u, cspSource: 'vscode-resource:' });
+    assert.doesNotMatch(filteredMarkup, /data-agent="hermes"/, 'a disabled agent gets no tab');
+    assert.doesNotMatch(filteredMarkup, /Start Hermes/);
+    assert.doesNotMatch(filteredMarkup, /data-agent="pi"/);
+    assert.doesNotMatch(filteredMarkup, /Start Pi/);
+    assert.match(filteredMarkup, /data-agent="devin"/, 'the enabled agent keeps its tab');
+    assert.ok(!('hermes' in filtered.agentState) && !('pi' in filtered.agentState),
+      'no per-agent structure exists for a disabled agent');
+    assert.strictEqual((filteredMarkup.match(/class="agent-tab/g) || []).length, AGENT_IDS.length);
+    filtered.closeIpcServer();
+
+    // A saved tab that is now disabled falls back to the first enabled agent.
+    state.set('claudeTmux.activeAgent', 'hermes');
+    const fallback = makeProvider();
+    assert.strictEqual(fallback.activeAgent, 'claude',
+      'a disabled saved tab falls back to the first enabled agent');
+    fallback.closeIpcServer();
+    state.delete('claudeTmux.activeAgent');
+
+    // Unknown ids are dropped, matching is forgiving, order stays canonical.
+    settings.set('enabledAgents', [' DEVIN ', 'nope', 'claude']);
+    rebuildAgentRegistry();
+    assert.strictEqual(AGENT_IDS.join(','), 'claude,devin',
+      'unknown ids are dropped and ids are matched case-insensitively');
+
+    // An empty or all-unknown list falls back to the default.
+    settings.set('enabledAgents', ['gpt-9']);
+    rebuildAgentRegistry();
+    assert.strictEqual(AGENT_IDS.join(','), DEFAULT_ENABLED_AGENTS.join(','),
+      'an all-unknown list falls back to the default');
+    settings.set('enabledAgents', []);
+    rebuildAgentRegistry();
+    assert.strictEqual(AGENT_IDS.join(','), DEFAULT_ENABLED_AGENTS.join(','),
+      'an empty list falls back to the default');
+
+    // Custom agents are explicit choices and are never filtered; a disabled
+    // built-in id stays reserved so a custom agent cannot take it.
+    settings.set('customAgents', [{ id: 'solo', label: 'Solo', command: 'solo' }]);
+    settings.set('enabledAgents', ['claude']);
+    rebuildAgentRegistry();
+    assert.strictEqual(AGENT_IDS.join(','), 'claude,solo', 'free-mode agents survive the filter');
+    settings.set('customAgents', [{ id: 'hermes', label: 'Not Hermes', command: 'nope' }]);
+    rebuildAgentRegistry();
+    assert.strictEqual(AGENT_IDS.join(','), 'claude', 'a built-in id stays reserved even while disabled');
+
+    // Functions that name an agent must refuse an unknown/disabled one rather
+    // than fall back to the active tab and type there.
+    const api = makeProvider();
+    api.activeAgent = 'claude';
+    assert.strictEqual((await api.sendToAgent({ agent: 'hermes', text: 'hi' })).reason, 'unknown-agent');
+    assert.strictEqual((await api.captureAgent({ agent: 'hermes', quiet: true })).reason, 'unknown-agent');
+    assert.strictEqual((await api.waitForAgent({ agent: 'hermes', status: 'done', timeoutMs: 1000 })).reason,
+      'unknown-agent');
+    const refused = api.agentStatus('hermes');
+    assert.strictEqual(refused.error, 'unknown-agent');
+    assert.strictEqual(refused.agent, 'hermes');
+    api.closeIpcServer();
+
+    // ---- a disabled integration is hidden unless it is already installed --------
+    const fakeHome2 = fs.mkdtempSync(path.join(os.tmpdir(), 'agentmux-enabled-'));
+    const priorXdg = process.env.XDG_CONFIG_HOME;
+    const priorPiDir = process.env.PI_CODING_AGENT_DIR;
+    process.env.XDG_CONFIG_HOME = path.join(fakeHome2, 'config');
+    process.env.PI_CODING_AGENT_DIR = path.join(fakeHome2, 'pi');
+    try {
+      settings.set('enabledAgents', ['claude']);
+      rebuildAgentRegistry();
+      const catalogProvider = makeProvider();
+      const catalog = catalogProvider.integrationCatalog();
+      assert.ok(!catalog.some((entry) => entry.id === 'codex-hooks'),
+        'the integrations menu does not offer hooks for a disabled agent');
+      assert.ok(!catalog.some((entry) => entry.id === 'pi-extension'),
+        'the integrations menu does not offer a plugin for a disabled agent');
+      catalogProvider.closeIpcServer();
+    } finally {
+      if (priorXdg == null) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = priorXdg;
+      if (priorPiDir == null) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = priorPiDir;
+      fs.rmSync(fakeHome2, { recursive: true, force: true });
+    }
+
+    // Restore the full registry: the test host is one process.
+    settings.set('enabledAgents', [...BUILTIN_AGENT_IDS]);
+    settings.set('customAgents', []);
+    rebuildAgentRegistry();
+    assert.strictEqual(AGENT_IDS.join(','), BUILTIN_AGENT_IDS.join(','));
+    settings.delete('enabledAgents');
+  }
+
+  // ---- MCP bridge: reports the real version and documents raw ----------------
+  // The bridge is a separate process serving JSON-RPC on stdio; the two defects
+  // this guards against were invisible from the extension side.
+  {
+    const { execFileSync } = require('child_process');
+    const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+    const out = execFileSync(process.execPath, [path.join(root, 'bin', 'agentmux-mcp.js')], {
+      input: '{"jsonrpc":"2.0","id":1,"method":"initialize"}\n'
+        + '{"jsonrpc":"2.0","id":2,"method":"tools/list"}\n',
+      encoding: 'utf8',
+      timeout: 10000,
+    });
+    const replies = out.trim().split('\n').map((line) => JSON.parse(line));
+    const init = replies.find((m) => m.id === 1);
+    const tools = replies.find((m) => m.id === 2);
+    assert.strictEqual(init.result.serverInfo.version, pkg.version,
+      'the MCP server reports the extension version, not a baked-in patch level');
+    const prompt = tools.result.tools.find((tool) => tool.name === 'prompt_agent');
+    assert.ok(prompt.inputSchema.properties.raw, 'raw is declared in the prompt_agent schema');
   }
 
   console.log('All extension tests passed.');

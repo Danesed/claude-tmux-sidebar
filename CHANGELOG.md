@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.16.3
+
+### Added
+
+- **`claudeTmux.enabledAgents` — choose which built-in agents AgentMux shows.** A list in Settings with every shipped agent; hermes and pi are off by default, and adding them back brings their tab, presence probing and status reporting with them (a window reload applies the change). Free-mode agents from `claudeTmux.customAgents` are always shown. Tab order stays the built-in order however the list is written, and an empty or all-unknown list falls back to the default rather than leaving the side bar with no agent at all. Disabling an agent never kills anything: **Clean up this project's leftover tmux sessions** still recognizes its old sessions, and the integrations menu stops offering plugins for agents you have turned off (an already-installed integration stays listed so it can still be removed).
+
+### Fixed
+
+- **MCP `prompt_agent` submits by default again.** The `raw` flag reached the extension with an inverted default, so every MCP prompt was typed into the pane without pressing Enter and a default `wait` timed out in front of an unsubmitted prompt. `raw` now defaults to false, matching `agentmux prompt` and its `--raw` flag (which is now documented in `agentmux help`), and is declared in the tool schema.
+- **The MCP server reports the extension's real version**, read from `package.json`, instead of a hardcoded 0.16.0.
+- **Commands that name an agent refuse unknown or disabled ids** (`send`, `capture`, `wait`, `status`) instead of falling back silently to the active tab — a script asking for hermes while hermes is off would have typed into whatever tab was focused.
+- **A disabled built-in id can no longer be taken by a custom agent**, and its marked panes stay claimed, so another agent's pane pattern can never adopt them.
+- **Scrollback no longer freezes after the side bar is re-created.** The host now re-arms the history capture when a fresh webview reports ready, and the webview adopts an incoming `historyMode: true` instead of ignoring it — the mirror used to paint the cached live frame and then receive nothing, because content frames stop while history mode is on.
+- **Entering scrollback actually lands near the live edge.** The seam write ran while the virtual spacers were still heightless, so `scrollTop` clamped to the top and a long capture opened on its oldest rows — hundreds of lines above the pane. The position is now written once the scrollable height is real, and the pending flag survives short frames so a fresh webview's cached live frame cannot consume it before the capture arrives.
+- **`Alt+Shift+letter` keeps its case** (`ESC`+`A`, not `ESC`+`a` — the two are different Meta chords), the integrations menu no longer offers Claude's hook settings while claude is disabled, and the session listers read the built-in registry so a disabled agent can never turn a lookup into a throw.
+- **Clearing the mirror can no longer throw on the next scroll.** Emptying the screen left the virtualized-history spacers detached; the next scroll event called `insertBefore` on an orphan and raised an uncaught error. Every clear path now drops the virtual state and any frame held back during a selection.
+- **The mirror is no longer a keyboard trap.** `F6` moves focus from the terminal to the active tab (and is advertised in the hint line), `Ctrl/Cmd+Tab` is left to the workbench instead of being typed into the agent, `Alt`+letter now sends the terminal Meta sequence (`ESC` + the physical key) instead of losing the modifier, the handoff dialog's Tab loop skips hidden controls, and Enter in prompt recall picks the row that actually has focus. Recall's arrow keys are bounded to the 30 rows that are rendered.
+- **Input failures stay visible.** The hint line carrying `input not delivered (reason)` was wiped by the next roster tick, ~900 ms later; transient hints now survive their advertised duration, and the hint is only rewritten when its text changes.
+- **A hidden session filter no longer keeps filtering.** Switching from an agent with many conversations to one with few left the typed filter active behind a hidden input, showing "No match." with no way to clear it.
+- **`esc()` escapes double quotes**, so a value reaching an HTML attribute (a custom agent's install command) can no longer break out of it.
+- **The status live region stops announcing uptime every second.** The visible label still ticks; screen readers hear only real state changes, through a separate `aria-live` element.
+- **OSC/DCS sequences (hyperlinks, window titles) are swallowed** instead of being rendered as stray text.
+- **A background frame now carries its session name**, so switching to a warm-cached tab cannot show the previous agent's session in the footer.
+- **Arbiter wording matches the behaviour** (every running agent, not "both agents") in the footer, the modal and the webview.
+- **Docs:** the 0.16.0 VSIX references, the six-agent lists missing Devin, the status bar description, the `worktrees`/`notifyDone` settings and two settings that never existed (`showSparklines`, `predictiveEcho`).
+
 ## 0.16.2
 
 A visual polish pass — still no new dependencies, still a flat stylesheet and one script file.
