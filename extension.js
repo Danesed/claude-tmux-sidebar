@@ -2671,9 +2671,110 @@ async function launchEnvPrefix(agent) {
   return `HERMES_HOME=${shellQuote(hermesProfileHome(slug))} HERMES_PROFILE=${slug} `;
 }
 
+// Read a JSONL file's first line up to its newline, in chunks, and parse it.
+// Never assume a fixed size: Codex 0.157 put base_instructions into
+// session_meta and the line grew past 20KB, which silently emptied every
+// listing that read a fixed 16KB head. Past maxBytes the file is skipped.
+// Resolves { ok, value } — ok:false means unreadable/unparseable, not "other cwd".
+async function readFirstJsonLine(file, maxBytes = 1024 * 1024) {
+  let handle;
+  try {
+    handle = await fs.promises.open(file, 'r');
+    const chunks = [];
+    let total = 0;
+    const buf = Buffer.alloc(64 * 1024);
+    while (total < maxBytes) {
+      const { bytesRead } = await handle.read(buf, 0, buf.length, total);
+      if (!bytesRead) break;
+      const nl = buf.subarray(0, bytesRead).indexOf(0x0a);
+      chunks.push(Buffer.from(buf.subarray(0, nl >= 0 ? nl : bytesRead)));
+      total += bytesRead;
+      if (nl >= 0) break;
+    }
+    if (total >= maxBytes) return { ok: false };
+    return { ok: true, value: JSON.parse(Buffer.concat(chunks).toString('utf8')) };
+  } catch {
+    return { ok: false };
+  } finally {
+    if (handle) await handle.close().catch(() => {});
+  }
+}
+
+// Codex's own conversation names (what its native picker shows), one JSON
+// line per thread in ~/.codex/session_index.jsonl; a later line for the same
+// id is a rename, so the last one wins. Missing or unreadable → empty map.
+async function loadCodexThreadNames() {
+  const names = new Map();
+  let text;
+  try {
+    text = await fs.promises.readFile(path.join(os.homedir(), '.codex', 'session_index.jsonl'), 'utf8');
+  } catch { return names; }
+  for (const line of text.split('\n')) {
+    if (!line) continue;
+    try {
+      const obj = JSON.parse(line);
+      if (obj && obj.id && typeof obj.thread_name === 'string' && obj.thread_name.trim()) {
+        names.set(obj.id, obj.thread_name.trim());
+      }
+    } catch { /* torn line */ }
+  }
+  return names;
+}
+
+// Text Codex injects as a "user" message ahead of the real prompt: AGENTS.md
+// instructions and <environment_context>/<user_instructions>-style blocks.
+function isCodexContextInjection(text) {
+  const t = String(text || '').trimStart();
+  return t.startsWith('# AGENTS.md') || /^<[a-z_][\w-]*>/i.test(t);
+}
+
+// First real user prompt of a rollout, streamed line by line up to a cap.
+// Handles both shapes: event_msg/user_message (Codex < 0.157) and
+// response_item message with role 'user' (0.157+, where the first few are
+// context injections and the prompt sits tens of KB into the file).
+async function codexRolloutTitle(file, maxBytes = 512 * 1024) {
+  let handle;
+  try {
+    handle = await fs.promises.open(file, 'r');
+    const buf = Buffer.alloc(64 * 1024);
+    let offset = 0;
+    let pending = '';
+    let first = true;
+    while (offset < maxBytes) {
+      const { bytesRead } = await handle.read(buf, 0, buf.length, offset);
+      if (!bytesRead) break;
+      offset += bytesRead;
+      pending += buf.toString('utf8', 0, bytesRead);
+      const lines = pending.split('\n');
+      pending = lines.pop();
+      for (const line of lines) {
+        if (first) { first = false; continue; } // session_meta
+        if (!line) continue;
+        let obj;
+        try { obj = JSON.parse(line); } catch { continue; }
+        const p = obj.payload || {};
+        let text = null;
+        if (p.type === 'user_message' || obj.type === 'user_message') {
+          text = typeof p.message === 'string' ? p.message : (typeof p.text === 'string' ? p.text : null);
+        } else if (obj.type === 'response_item' && p.type === 'message' && p.role === 'user' && Array.isArray(p.content)) {
+          text = p.content.map((c) => (c && typeof c.text === 'string' ? c.text : '')).join('');
+        }
+        if (text && text.trim().length > 5 && !isCodexContextInjection(text)) {
+          return text.trim().replace(/\s+/g, ' ').slice(0, 80);
+        }
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  } finally {
+    if (handle) await handle.close().catch(() => {});
+  }
+}
+
 // Codex rollouts live at ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl; the
 // first line's session_meta carries the conversation id and cwd. Best-effort
-// and version-tolerant: only the first lines of each candidate are read.
+// and version-tolerant: the first line is read whole, the title is streamed.
 async function listCodexSessions(cwd) {
   const root = path.join(os.homedir(), '.codex', 'sessions');
   try { await fs.promises.access(root); } catch { return []; }
@@ -2701,33 +2802,18 @@ async function listCodexSessions(cwd) {
     }
   } catch { return []; }
   files.sort((a, b) => b[0] - a[0]);
+  const threadNames = await loadCodexThreadNames();
   const sessions = [];
   for (const [mtime, full] of files.slice(0, 120)) {
     if (sessions.length >= 30) break;
     try {
-      const handle = await fs.promises.open(full, 'r');
-      const buf = Buffer.alloc(16384);
-      const { bytesRead } = await handle.read(buf, 0, buf.length, 0);
-      await handle.close();
-      const lines = buf.toString('utf8', 0, bytesRead).split('\n');
-      const meta = JSON.parse(lines[0]);
-      const payload = meta?.payload || meta || {};
+      const head = await readFirstJsonLine(full);
+      if (!head.ok) continue;
+      const payload = head.value?.payload || head.value || {};
       const id = payload.id || payload.session_id || null;
       const sessionCwd = payload.cwd || '';
       if (!id || !sessionCwd || normalizedPath(sessionCwd) !== wanted) continue;
-      let name = null;
-      for (const line of lines.slice(1)) {
-        if (!line) continue;
-        try {
-          const obj = JSON.parse(line);
-          const p = obj.payload || {};
-          const text = typeof p.message === 'string' ? p.message : (typeof p.text === 'string' ? p.text : null);
-          if ((p.type === 'user_message' || obj.type === 'user_message') && text && text.length > 5) {
-            name = text.slice(0, 80);
-            break;
-          }
-        } catch { /* partial line at buffer end */ }
-      }
+      const name = threadNames.get(id) || await codexRolloutTitle(full);
       // `file` stays host-side (pushSessions only forwards id/name/lastTs); the
       // delete path needs the rollout it came from.
       sessions.push({ id, name: name || id, lastTs: new Date(mtime).toISOString(), file: full });
@@ -2848,20 +2934,13 @@ class TranscriptTail {
     const wanted = normalizedPath(cwd);
     for (const [, full] of candidates.slice(0, 10)) {
       if (this._cwdMismatch.has(full)) continue;
-      try {
-        const handle = await fs.promises.open(full, 'r');
-        try {
-          const buf = Buffer.alloc(4096);
-          const { bytesRead } = await handle.read(buf, 0, 4096, 0);
-          const first = buf.toString('utf8', 0, bytesRead).split('\n')[0];
-          const meta = JSON.parse(first);
-          const sessionCwd = meta?.payload?.cwd || meta?.cwd || '';
-          if (sessionCwd && normalizedPath(sessionCwd) === wanted) return full;
-          this._cwdMismatch.add(full);
-        } finally {
-          await handle.close();
-        }
-      } catch { this._cwdMismatch.add(full); }
+      // A parse failure (torn write, oversized line) is not "another cwd":
+      // only a readable session_meta naming a different folder is remembered.
+      const head = await readFirstJsonLine(full);
+      if (!head.ok) continue;
+      const sessionCwd = head.value?.payload?.cwd || head.value?.cwd || '';
+      if (sessionCwd && normalizedPath(sessionCwd) === wanted) return full;
+      this._cwdMismatch.add(full);
     }
     return null;
   }

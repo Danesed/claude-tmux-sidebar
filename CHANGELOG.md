@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.16.4
+
+### Fixed
+
+- **Fix: "No existing Codex sessions found for this folder" with Codex ≥ 0.157.** Codex 0.157 put `base_instructions` into the rollout's first line (`session_meta`), which grew past 20KB, while the listing read a fixed 16KB head (the telemetry tail only 4KB) and silently dropped every file whose first line did not parse. The first line is now read up to its newline (capped at 1MB). Titles come from Codex's own `~/.codex/session_index.jsonl` thread names, then from the first real user prompt (0.157 stores it as a `response_item` after AGENTS.md and `<environment_context>` injections, which are skipped), then from the id. The telemetry tail no longer blacklists a rollout whose first line failed to parse as if it belonged to another folder.
+
 ## 0.16.3
 
 ### Added

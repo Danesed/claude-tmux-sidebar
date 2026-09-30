@@ -187,7 +187,7 @@ const vscode = {
 };
 
 const source = fs.readFileSync(path.join(root, 'extension.js'), 'utf8')
-  + '\nmodule.exports.__test = { ClaudeTmuxView, sessionName, accentChannels, derivedAccent, derivedMark, decodeEscapes, AGENT_DETECTION, paneIdentity, identityMatches, STATE_HOOK_SCRIPT, setStateHookDir, codexHookArgs, tomlString, listPiSessions, piSessionDir, piExtensionPath, ensurePiExtension, removePiExtension, PI_EXTENSION, customAgentSpecs, registerCustomAgents, freeAgentId, mirroredSessionNames, baseSessionName, setMirrorStore, mirroredAgentEntries, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions, AGENTS, AGENT_IDS, BUILTIN_AGENTS, BUILTIN_AGENT_IDS, DEFAULT_ENABLED_AGENTS, normalizedEnabledAgents, rebuildAgentRegistry, enabledAgentsChanged, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, listDevinSessions, devinLaunchArgs, hermesProfileSlug, hermesProfileHome, ensureHermesProfile, launchEnvPrefix, detectionRules, detectState, detectionContext, isRuleLine, explainDetection, DETECTION_REGIONS, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath, AGENT_PRESETS, promptAddAgentPreset, setTmuxTimeouts };';
+  + '\nmodule.exports.__test = { ClaudeTmuxView, sessionName, accentChannels, derivedAccent, derivedMark, decodeEscapes, AGENT_DETECTION, paneIdentity, identityMatches, STATE_HOOK_SCRIPT, setStateHookDir, codexHookArgs, tomlString, listPiSessions, piSessionDir, piExtensionPath, ensurePiExtension, removePiExtension, PI_EXTENSION, customAgentSpecs, registerCustomAgents, freeAgentId, mirroredSessionNames, baseSessionName, setMirrorStore, mirroredAgentEntries, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, readFirstJsonLine, TranscriptTail, listSessions, AGENTS, AGENT_IDS, BUILTIN_AGENTS, BUILTIN_AGENT_IDS, DEFAULT_ENABLED_AGENTS, normalizedEnabledAgents, rebuildAgentRegistry, enabledAgentsChanged, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, listDevinSessions, devinLaunchArgs, hermesProfileSlug, hermesProfileHome, ensureHermesProfile, launchEnvPrefix, detectionRules, detectState, detectionContext, isRuleLine, explainDetection, DETECTION_REGIONS, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath, AGENT_PRESETS, promptAddAgentPreset, setTmuxTimeouts };';
 const moduleUnderTest = { exports: {} };
 const sandbox = {
   module: moduleUnderTest,
@@ -208,7 +208,7 @@ const sandbox = {
   clearInterval,
 };
 vm.runInNewContext(source, sandbox, { filename: 'extension.js' });
-const { ClaudeTmuxView, sessionName, accentChannels, derivedAccent, derivedMark, decodeEscapes, AGENT_DETECTION, paneIdentity, identityMatches, STATE_HOOK_SCRIPT, setStateHookDir, codexHookArgs, tomlString, listPiSessions, piSessionDir, piExtensionPath, ensurePiExtension, removePiExtension, PI_EXTENSION, customAgentSpecs, registerCustomAgents, freeAgentId, mirroredSessionNames, baseSessionName, setMirrorStore, mirroredAgentEntries, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, listSessions, AGENTS, AGENT_IDS, BUILTIN_AGENTS, BUILTIN_AGENT_IDS, DEFAULT_ENABLED_AGENTS, normalizedEnabledAgents, rebuildAgentRegistry, enabledAgentsChanged, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, listDevinSessions, devinLaunchArgs, hermesProfileSlug, hermesProfileHome, ensureHermesProfile, launchEnvPrefix, detectionRules, detectState, detectionContext, isRuleLine, explainDetection, DETECTION_REGIONS, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath, AGENT_PRESETS, promptAddAgentPreset, setTmuxTimeouts } = moduleUnderTest.exports.__test;
+const { ClaudeTmuxView, sessionName, accentChannels, derivedAccent, derivedMark, decodeEscapes, AGENT_DETECTION, paneIdentity, identityMatches, STATE_HOOK_SCRIPT, setStateHookDir, codexHookArgs, tomlString, listPiSessions, piSessionDir, piExtensionPath, ensurePiExtension, removePiExtension, PI_EXTENSION, customAgentSpecs, registerCustomAgents, freeAgentId, mirroredSessionNames, baseSessionName, setMirrorStore, mirroredAgentEntries, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, readFirstJsonLine, TranscriptTail, listSessions, AGENTS, AGENT_IDS, BUILTIN_AGENTS, BUILTIN_AGENT_IDS, DEFAULT_ENABLED_AGENTS, normalizedEnabledAgents, rebuildAgentRegistry, enabledAgentsChanged, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, listDevinSessions, devinLaunchArgs, hermesProfileSlug, hermesProfileHome, ensureHermesProfile, launchEnvPrefix, detectionRules, detectState, detectionContext, isRuleLine, explainDetection, DETECTION_REGIONS, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath, AGENT_PRESETS, promptAddAgentPreset, setTmuxTimeouts } = moduleUnderTest.exports.__test;
 
 function makeProvider() {
   const provider = new ClaudeTmuxView({
@@ -825,6 +825,43 @@ async function run() {
   assert.strictEqual(codexSessions.length, 1, 'codex listing must be cwd-scoped');
   assert.strictEqual(codexSessions[0].id, 'sess-abc');
   assert.strictEqual(codexSessions[0].name, 'refactor the tick loop');
+
+  // Codex >= 0.157: session_meta carries base_instructions (> 16KB on one
+  // line), there is no user_message, and the user prompt is a response_item
+  // preceded by context injections. Must list, title, and tail correctly.
+  const bigMeta = JSON.stringify({ type: 'session_meta', payload: {
+    id: 'sess-157', cwd: workspace, base_instructions: { text: 'b'.repeat(20000) } } });
+  assert.ok(bigMeta.length > 16384);
+  const userItem = (text) => JSON.stringify({ type: 'response_item', payload: {
+    type: 'message', role: 'user', content: [{ type: 'input_text', text }] } });
+  const rollout157 = path.join(dayDir, 'rollout-157.jsonl');
+  fs.writeFileSync(rollout157, bigMeta + '\n'
+    + JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'developer', content: [{ type: 'input_text', text: 'd'.repeat(30000) }] } }) + '\n'
+    + userItem('# AGENTS.md instructions for /x\n\n<INSTRUCTIONS>rules</INSTRUCTIONS>') + '\n'
+    + userItem('<environment_context>\n  <cwd>/x</cwd>\n</environment_context>') + '\n'
+    + userItem('fix the   resume\nlisting for codex') + '\n');
+  const later = new Date(Date.now() + 5000);
+  fs.utimesSync(rollout157, later, later);
+  process.env.HOME = fakeHome;
+  let listed = await listCodexSessions(workspace);
+  const s157 = listed.find((s) => s.id === 'sess-157');
+  assert.ok(s157, 'a >16KB session_meta line must not hide the session');
+  assert.strictEqual(s157.name, 'fix the resume listing for codex', 'title skips context injections and reads response_item user text');
+  // Codex's own thread name wins; the last line for an id is a rename.
+  fs.writeFileSync(path.join(fakeHome, '.codex', 'session_index.jsonl'),
+    JSON.stringify({ id: 'sess-157', thread_name: 'Old name' }) + '\n'
+    + JSON.stringify({ id: 'sess-157', thread_name: 'Resume listing fix' }) + '\n');
+  listed = await listCodexSessions(workspace);
+  assert.strictEqual(listed.find((s) => s.id === 'sess-157').name, 'Resume listing fix');
+  assert.strictEqual(listed.find((s) => s.id === 'sess-abc').name, 'refactor the tick loop', 'old rollouts keep the user_message title');
+  const newest = await new TranscriptTail('codex').newestCodex(workspace);
+  process.env.HOME = oldHome;
+  assert.strictEqual(newest, rollout157, 'the telemetry tail must find a >4KB session_meta rollout');
+  // Unparseable first line: skipped, and never cached as a cwd mismatch.
+  const torn = path.join(dayDir, 'rollout-torn.jsonl');
+  fs.writeFileSync(torn, '{"type":"session_meta","payload":{"id":"t"');
+  assert.strictEqual((await readFirstJsonLine(torn)).ok, false);
+  assert.strictEqual((await readFirstJsonLine(rollout157)).value.payload.id, 'sess-157');
   fs.rmSync(fakeHome, { recursive: true, force: true });
 
   // ---- claude transcript listing (chunked reads) ---------------------------------------

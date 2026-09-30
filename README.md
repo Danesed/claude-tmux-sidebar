@@ -99,7 +99,7 @@ From this repository:
 ```bash
 npm run check
 npm run package
-code --install-extension claude-tmux-sidebar-0.16.3.vsix --force
+code --install-extension claude-tmux-sidebar-0.16.4.vsix --force
 ```
 
 Alternatively use VS Code: **Extensions → … → Install from VSIX…**, select the
