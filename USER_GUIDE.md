@@ -219,6 +219,13 @@ scope (user settings = every window). **Remove a custom agent…** appears next
 to it once you have one, and lists each entry with its scope. Both are also in
 the palette, as **AgentMux: Mirror an existing tmux session (free mode)…**.
 
+A terminal-side equivalent exists: `tmux set-option @agentmux_adopt 1` on a
+session is picked up within seconds and remembered for this window only — the
+flag is cleared on adoption, so no second window claims the session. Set the
+option to any other string to choose the tab label
+(`tmux set-option @agentmux_adopt "Build server"`). Sessions AgentMux already
+drives or mirrors are never re-adopted.
+
 If that list is empty, nothing is broken — sessions AgentMux already drives are
 filtered out of it, so if the only tmux session on the machine is already an
 agent tab there is nothing left to mirror. Start the session first:
@@ -266,8 +273,15 @@ The same compact footer shows pane size and tmux uptime. When available it adds
 `hist` for scrollback lines, attached tmux client count, `lag` only when a
 capture takes at least 200 ms, token/turn chips tailed from the CLI's local
 transcript, the current tool while working, and the last turn's git delta.
-These fields reuse existing snapshots and local file reads and do not add
-another tmux process. A single status bar item mirrors the same state across
+Alongside the chips, two tiny fill bars per provider track the account's
+rate-limit windows (percentages and reset times in the tooltip): Codex's come
+from its local rollout logs, Claude's only reach the status line — so a no-op
+status line is installed for it, but never over one you configured yourself.
+If the CodexBar CLI is installed it becomes the source for every provider it
+is configured for — devin, antigravity, opencode and the ~100 more it
+supports — refreshed every five minutes. `claudeTmux.usageLimits` switches
+the bars off. These fields reuse existing snapshots and local file
+reads and do not add another tmux process. A single status bar item mirrors the same state across
 all of VS Code: all present agents are listed in its tooltip, and clicking it
 jumps to whichever needs you, otherwise it cycles focus. A hidden agent asking
 a numbered question raises a notification whose buttons answer it — after

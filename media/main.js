@@ -29,6 +29,7 @@
   const handoffMeta = document.getElementById('handoff-meta');
   const statusName = document.getElementById('status-name');
   const statusMeta = document.getElementById('status-meta');
+  const statusLimits = document.getElementById('status-limits');
   const statusDot = document.getElementById('status-dot');
   const statusLabel = document.getElementById('status-label');
   const app = document.getElementById('app');
@@ -590,6 +591,47 @@
     delete statusMeta.dataset.text;
     statusMeta.replaceChildren();
     statusMeta.title = '';
+  }
+  // Account rate limits as two tiny bars per provider (5h window, week). The
+  // number sits beside its bar; the tooltip explains which is which.
+  function fmtReset(ms) {
+    const d = new Date(ms);
+    const today = new Date();
+    if (d.toDateString() === today.toDateString()) {
+      return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    }
+    return d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric' });
+  }
+  // A window's tag comes from its length: providers report anything from 5h
+  // to monthly, so the label follows the data, not the slot.
+  function limitTag(w) {
+    const m = w && w.minutes;
+    if (!m) return '';
+    if (m >= 43200) return 'mo';
+    if (m >= 10080) return 'wk';
+    if (m >= 1440) return 'day';
+    if (m >= 300) return '5h';
+    return `${Math.round(m / 60)}h`;
+  }
+  function renderLimits(limits) {
+    const sig = JSON.stringify(limits || {});
+    if (statusLimits.dataset.sig === sig) return;
+    statusLimits.dataset.sig = sig;
+    const parts = [];
+    const tips = [];
+    for (const [who, l] of Object.entries(limits || {})) {
+      const bars = [];
+      [l.primary, l.secondary].forEach((w) => {
+        if (!w) return;
+        const pct = Math.max(0, Math.min(100, Math.round(w.pct)));
+        bars.push(`<span class="lbar${pct >= 80 ? ' hot' : ''}"><i><i style="width:${pct}%"></i></i><b>${pct}</b></span>`);
+        tips.push(`${who} ${limitTag(w)}: ${pct}%${w.label ? ` · ${w.label}` : w.resetsAt ? ` · resets ${fmtReset(w.resetsAt)}` : ''}`);
+      });
+      for (const tip of l.tips || []) tips.push(`${who} ${tip}`);
+      if (bars.length) parts.push(`<span class="lchip">${esc(who)}${bars.join('')}</span>`);
+    }
+    statusLimits.innerHTML = parts.join('');
+    statusLimits.title = tips.join('\n');
   }
   function fmtK(n) {
     n = n || 0;
@@ -1737,6 +1779,8 @@
       renderRecall();
       recallEl.classList.remove('hidden');
       recallFilter.focus();
+    } else if (m.type === 'limits') {
+      renderLimits(m.limits);
     } else if (m.type === 'preflight') {
       renderPreflight(m);
     } else if (m.type === 'nosession') {

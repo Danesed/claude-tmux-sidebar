@@ -443,7 +443,10 @@ The easy path is the **＋** button at the end of the tab strip. Its menu lists
 the agents you can start or resume, then below a rule:
 
 - **Mirror a tmux session…** — pick from your running tmux sessions and AgentMux
-  remembers it for this window.
+  remembers it for this window. From a terminal the same thing is
+  `tmux set-option @agentmux_adopt 1` on the session — the flag is consumed on
+  adoption so a second window cannot claim it; any other value
+  (`@agentmux_adopt "Build server"`) becomes the tab label.
 - **Remove a custom agent…** — shown only once you have one; lists every scope
   (this window, workspace, user settings), removes the entry and leaves the
   tmux session running.
@@ -498,6 +501,7 @@ settings.
 | `claudeTmux.notifyPrompts` | `true` | Notification with answer buttons when a background agent asks. |
 | `claudeTmux.stateHooks` | `true` | Ground-truth state via Claude hooks, Codex notify, the OpenCode plugin and the pi extension. |
 | `claudeTmux.telemetry` | `true` | Token/turn/tool chips tailed from local CLI transcripts. |
+| `claudeTmux.usageLimits` | `true` | Footer bars for account rate limits: Codex rollout logs, Claude's status line payload (a no-op statusLine only when yours defines none), and every configured provider via `codexbar usage --json` when the CodexBar CLI is installed. |
 | `claudeTmux.eventLog` | `true` | Timeline ledger at `.claude/agentmux/ledger.jsonl`. |
 | `claudeTmux.tmuxStatusBar` | `true` | AgentMux facts on the tmux status line of agent sessions. |
 | `claudeTmux.fileChannel` | `true` | Handoffs/ACKs/arbiter answers travel as `.claude/agentmux` files. |

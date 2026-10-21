@@ -1767,19 +1767,56 @@ tool=""
 session=""
 # Claude and Codex both deliver the hook payload as JSON on stdin. Read it ONCE
 # (bounded) and pull both fields from the copy: a second read would find the
-# pipe already drained. A hook with no payload simply leaves them empty.
+# pipe already drained. A hook with no payload simply leaves them empty. 24k
+# leaves room for Stop's background_tasks list; a truncated read just leaves
+# fields empty, which is the same behaviour as no payload at all.
 if [ ! -t 0 ]; then
-  payload=$(head -c 4000 2>/dev/null)
+  payload=$(head -c 24000 2>/dev/null)
   tool=$(printf '%s' "$payload" | sed -n 's/.*"tool_name"[[:space:]]*:[[:space:]]*"\\([^"]\\{1,40\\}\\)".*/\\1/p' | head -n 1)
   session=$(printf '%s' "$payload" | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\\([^"]\\{1,64\\}\\)".*/\\1/p' | head -n 1)
 fi
 [ -n "$session" ] && tmux set-option -p -t "$TMUX_PANE" @agentmux_session_id "$session" 2>/dev/null
 if [ "$state" != "register" ]; then
+  # A turn end is not "done" while background tasks still run. Claude Code
+  # puts the live list into background_tasks on Stop and SubagentStop; when
+  # the field is absent the claimed state stands. Monitor tasks run for good,
+  # so they never count. tr splits the array into one object per line, the
+  # greps keep running non-monitor entries.
+  if [ "$state" = "done" ] && [ -n "$payload" ]; then
+    running=$(printf '%s' "$payload" | sed -n 's/.*"background_tasks"[[:space:]]*:[[:space:]]*\\[\\([^]]*\\)\\].*/\\1/p' \\
+      | tr '{' '\\n' \\
+      | grep '"status"[[:space:]]*:[[:space:]]*"running"' \\
+      | grep -v '"type"[[:space:]]*:[[:space:]]*"monitor"' \\
+      | wc -l | tr -d ' ')
+    if [ "\${running:-0}" -gt 0 ] 2>/dev/null; then state="working"; fi
+  fi
   tmux set-option -p -t "$TMUX_PANE" @agentmux_state "$state" 2>/dev/null
   tmux set-option -p -t "$TMUX_PANE" @agentmux_tool "$tool" 2>/dev/null
 fi
 exit 0
 `;
+
+// Claude's usage limits only reach the status line payload, so the bars in the
+// footer need a status line installed. Ours is a pure sink: it stashes the JSON
+// and prints nothing, and it is only added to the generated settings when the
+// user's own settings do not already define a status line (theirs would win
+// otherwise, and hijacking a configured one is worse than no bars).
+const STATUSLINE_SCRIPT = `#!/bin/sh
+# AgentMux: stash Claude Code's status line payload for the usage-limit bars.
+# Generated file - do not edit. Prints nothing on purpose.
+cat > "$(dirname "$0")/claude-statusline.json" 2>/dev/null || true
+printf ''
+`;
+
+function userHasClaudeStatusline(home = os.homedir()) {
+  for (const name of ['settings.json', 'settings.local.json']) {
+    try {
+      const file = path.join(home, '.claude', name);
+      if (fs.existsSync(file) && JSON.parse(fs.readFileSync(file, 'utf8'))?.statusLine) return true;
+    } catch { /* unreadable or non-JSON settings: do not guess */ }
+  }
+  return false;
+}
 
 // OpenCode has no hook flag, but it does load plugins from its config dir, and
 // its plugin API emits exactly the lifecycle events we need. The plugin is the
@@ -2047,6 +2084,8 @@ function stateHookPaths() {
   if (!stateHookDir) return null;
   return {
     script: path.join(stateHookDir, 'agentmux-state.sh'),
+    statusline: path.join(stateHookDir, 'agentmux-statusline.sh'),
+    statuslineData: path.join(stateHookDir, 'claude-statusline.json'),
     settings: path.join(stateHookDir, 'claude-hooks.json'),
   };
 }
@@ -2058,6 +2097,15 @@ function ensureStateHookAssets() {
     fs.mkdirSync(stateHookDir, { recursive: true });
     const current = fs.existsSync(paths.script) ? fs.readFileSync(paths.script, 'utf8') : '';
     if (current !== STATE_HOOK_SCRIPT) fs.writeFileSync(paths.script, STATE_HOOK_SCRIPT, { mode: 0o755 });
+    const wantStatusline = cfg().get('usageLimits') !== false && !userHasClaudeStatusline();
+    if (wantStatusline) {
+      const existing = fs.existsSync(paths.statusline) ? fs.readFileSync(paths.statusline, 'utf8') : '';
+      if (existing !== STATUSLINE_SCRIPT) fs.writeFileSync(paths.statusline, STATUSLINE_SCRIPT, { mode: 0o755 });
+    } else if (fs.existsSync(paths.statusline)) {
+      // Bars off or a user's own status line: the sink is unreferenced, so the
+      // file should not linger as an unexplained leftover either.
+      fs.unlinkSync(paths.statusline);
+    }
     const hook = (state) => [{ hooks: [{ type: 'command', command: `${shellQuote(paths.script)} ${state}` }] }];
     const settings = JSON.stringify({
       hooks: {
@@ -2065,7 +2113,10 @@ function ensureStateHookAssets() {
         PreToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: `${shellQuote(paths.script)} working` }] }],
         Notification: hook('needs-input'),
         Stop: hook('done'),
+        SubagentStop: hook('done'),
       },
+      // See STATUSLINE_SCRIPT: sink only, never installed over a user's own.
+      ...(wantStatusline ? { statusLine: { type: 'command', command: shellQuote(paths.statusline) } } : {}),
     }, null, 2);
     const existing = fs.existsSync(paths.settings) ? fs.readFileSync(paths.settings, 'utf8') : '';
     if (existing !== settings) fs.writeFileSync(paths.settings, settings);
@@ -2822,6 +2873,182 @@ async function listCodexSessions(cwd) {
   return sessions;
 }
 
+// ---- usage-limit bars ------------------------------------------------------------
+// Account-level rate limits shown as two tiny bars per provider in the footer.
+// Codex writes a rate_limits object into every token_count entry of its
+// rollout JSONL files; Claude only hands the data to the status line, which
+// STATUSLINE_SCRIPT stashes for us. Everything here is local file reads — no
+// credentials, no network — and every failure just means "no bars".
+async function tailText(file, bytes = 65536) {
+  let handle;
+  try {
+    handle = await fs.promises.open(file, 'r');
+    const { size } = await handle.stat();
+    const start = Math.max(0, size - bytes);
+    const buf = Buffer.alloc(size - start);
+    await handle.read(buf, 0, buf.length, start);
+    return buf.toString('utf8');
+  } catch {
+    return '';
+  } finally {
+    if (handle) await handle.close().catch(() => {});
+  }
+}
+
+async function newestCodexRolloutFile() {
+  const root = path.join(os.homedir(), '.codex', 'sessions');
+  let newest = null;
+  try {
+    const years = (await fs.promises.readdir(root)).sort().reverse().slice(0, 2);
+    for (const y of years) {
+      const months = (await fs.promises.readdir(path.join(root, y))).sort().reverse().slice(0, 2);
+      for (const mo of months) {
+        const days = (await fs.promises.readdir(path.join(root, y, mo))).sort().reverse().slice(0, 7);
+        for (const d of days) {
+          for (const f of await fs.promises.readdir(path.join(root, y, mo, d))) {
+            if (!f.startsWith('rollout-') || !f.endsWith('.jsonl')) continue;
+            const full = path.join(root, y, mo, d, f);
+            try {
+              const { mtimeMs } = await fs.promises.stat(full);
+              if (!newest || mtimeMs > newest[0]) newest = [mtimeMs, full];
+            } catch { /* file raced the read */ }
+          }
+        }
+      }
+    }
+  } catch {
+    return null;
+  }
+  return newest ? newest[1] : null;
+}
+
+// One window object → normalized { pct, resetsAt (ms), minutes }, or null.
+// A reset far in the past means the snapshot is stale, not informative.
+function limitWindow(node) {
+  if (!node || typeof node !== 'object') return null;
+  const pct = node.used_percent ?? node.used_pct ?? node.percent ?? node.pct_used ?? node.pct;
+  if (typeof pct !== 'number' || isNaN(pct)) return null;
+  let resetsAt = node.resets_at ?? node.reset_at ?? node.resetsAt ?? null;
+  if (typeof resetsAt === 'number') resetsAt = resetsAt > 1e12 ? resetsAt : resetsAt * 1000;
+  else if (typeof resetsAt === 'string') resetsAt = Date.parse(resetsAt) || null;
+  else resetsAt = null;
+  if (resetsAt && resetsAt < Date.now() - 7200000) return null;
+  const minutes = typeof (node.window_minutes ?? node.minutes) === 'number' ? (node.window_minutes ?? node.minutes) : null;
+  return { pct, resetsAt, minutes };
+}
+
+// Claude's status line schema is not a stable API, so after trying the shapes
+// we know (rate_limits.primary/secondary) the fallback collects every
+// window-looking object and picks the two smallest windows — 5h ≈ 300min,
+// week ≈ 10080min.
+function extractLimitWindows(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+  const rl = payload.rate_limits || payload.rateLimits || payload.limits;
+  if (rl) {
+    const primary = limitWindow(rl.primary) || limitWindow(rl.five_hour) || limitWindow(rl.fiveHour);
+    const secondary = limitWindow(rl.secondary) || limitWindow(rl.seven_day) || limitWindow(rl.sevenDay) || limitWindow(rl.weekly);
+    if (primary || secondary) return { primary: primary || null, secondary: secondary || null };
+  }
+  const found = [];
+  const seen = new Set();
+  const walk = (node, depth) => {
+    if (!node || typeof node !== 'object' || depth > 6 || found.length > 12 || seen.has(node)) return;
+    seen.add(node);
+    const w = limitWindow(node);
+    if (w) found.push(w);
+    for (const v of Object.values(node)) if (v && typeof v === 'object') walk(v, depth + 1);
+  };
+  walk(payload, 0);
+  found.sort((a, b) => (a.minutes ?? 1e9) - (b.minutes ?? 1e9));
+  return found.length ? { primary: found[0] || null, secondary: found[1] || null } : null;
+}
+
+// The newest rate_limits entry in a rollout tail wins; older ones scroll away.
+function rateLimitsFromRollout(text) {
+  const lines = String(text || '').split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (!line.includes('rate_limits')) continue;
+    try {
+      const entry = JSON.parse(line);
+      const rl = entry?.payload?.rate_limits || entry?.rate_limits;
+      const windows = { primary: limitWindow(rl?.primary), secondary: limitWindow(rl?.secondary) };
+      if (windows.primary || windows.secondary) return windows;
+    } catch { /* the tail can cut a line in half */ }
+  }
+  return null;
+}
+
+async function readCodexRateLimits() {
+  const file = await newestCodexRolloutFile();
+  if (!file) return null;
+  return rateLimitsFromRollout(await tailText(file));
+}
+
+async function readClaudeStatusLimits() {
+  const paths = stateHookPaths();
+  if (!paths) return null;
+  try {
+    if (!fs.existsSync(paths.statuslineData)) return null;
+    return extractLimitWindows(JSON.parse(await fs.promises.readFile(paths.statuslineData, 'utf8')));
+  } catch {
+    return null;
+  }
+}
+
+// ---- CodexBar (optional, universal backend) --------------------------------------
+// CodexBar (github.com/steipete/CodexBar) already owns what we could never
+// reimplement lightly: OAuth flows, browser cookies, API keys and ~100
+// provider fetchers. When its CLI is on PATH, `codexbar usage --json` is one
+// subprocess that covers devin, antigravity, opencode and friends too. It
+// does real network calls — hence the slower timer and the in-flight guard.
+const CODEXBAR_LABELS = { antigravity: 'agy', opencodego: 'oc-go', opencode: 'opencode' };
+
+function codexbarWindow(w) {
+  if (!w || typeof w.usedPercent !== 'number' || isNaN(w.usedPercent)) return null;
+  return {
+    pct: w.usedPercent,
+    resetsAt: Date.parse(w.resetsAt || '') || null,
+    minutes: typeof w.windowMinutes === 'number' ? w.windowMinutes : null,
+    label: typeof w.resetDescription === 'string' ? w.resetDescription : '',
+  };
+}
+
+// [{provider, usage:{primary, secondary, tertiary, extraRateWindows:[{window,title}]}}]
+// → { label: { primary, secondary, tips } }. Windows are sorted by size so a
+// provider reporting weekly-as-primary still renders the short window first.
+function limitsFromCodexbar(text) {
+  let arr;
+  try { arr = JSON.parse(text); } catch { return null; }
+  if (!Array.isArray(arr)) return null;
+  const out = {};
+  for (const entry of arr) {
+    const who = String(entry?.provider || '');
+    if (!who) continue;
+    const u = entry?.usage || {};
+    const wins = [u.primary, u.secondary, u.tertiary].map(codexbarWindow).filter(Boolean);
+    wins.sort((a, b) => (a.minutes ?? 1e9) - (b.minutes ?? 1e9));
+    const tips = (Array.isArray(u.extraRateWindows) ? u.extraRateWindows : [])
+      .map((e) => `${e?.title || 'extra'}: ${Math.round(e?.window?.usedPercent ?? NaN)}%`)
+      .filter((s) => !s.includes('NaN'));
+    if (!wins.length && !tips.length) continue;
+    if (u.primary?.resetDescription && wins[0]) wins[0].label = u.primary.resetDescription;
+    out[CODEXBAR_LABELS[who] || who] = { primary: wins[0] || null, secondary: wins[1] || null, tips };
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+function execCodexbarJson() {
+  return new Promise((resolve) => {
+    try {
+      execFile('codexbar', ['usage', '--json'], { timeout: 45000, maxBuffer: 8 * 1024 * 1024 },
+        (err, stdout) => resolve(err ? '' : stdout));
+    } catch {
+      resolve('');
+    }
+  });
+}
+
 // ---- transcript telemetry ------------------------------------------------------
 // Ground-truth session stats the pane can never show, tailed incrementally
 // (offset reads only) from the CLIs' own JSONL transcripts. Pure fs work on the
@@ -3454,7 +3681,9 @@ class ClaudeTmuxView {
 
     view.webview.onDidReceiveMessage((m) => this.onMessage(m));
     view.onDidChangeVisibility(() => {
-      if (view.visible) { this.clearBadge(); this.tick(true); }
+      // Revealing the sidebar re-arms the slow background checks so an
+      // adoption flag or new limit data lands on the next presence pass.
+      if (view.visible) { this.clearBadge(); this.tick(true); this._adoptCheckedAt = 0; this._limitsPolledAt = 0; }
     });
     view.onDidDispose(() => { this.stopLoops(); this.view = null; });
 
@@ -3984,6 +4213,20 @@ class ClaudeTmuxView {
       }
       if (force || changed) this.postAgents();
       if (changed && this.agentState[this.activeAgent].present) this.tick(true);
+      // Background checks piggyback on this loop's visibility gating: an
+      // adoption flag or a fresh usage snapshot only matters to a viewer that
+      // can see it. Each is fire-and-forget on its own slow timer.
+      if (this.view.visible) {
+        const now = Date.now();
+        if (now - (this._adoptCheckedAt || 0) > 15000) {
+          this._adoptCheckedAt = now;
+          this.adoptFlaggedSessions();
+        }
+        if (now - (this._limitsPolledAt || 0) > 60000) {
+          this._limitsPolledAt = now;
+          this.pollLimits();
+        }
+      }
       await this.ensureEventSources();
     } finally {
       this._presenceRunning = false;
@@ -4105,6 +4348,9 @@ class ClaudeTmuxView {
         // live frame (historyPending was consumed by the previous webview).
         const state = this.agentState[this.activeAgent];
         if (state?.historyMode) state.historyPending = true;
+        // The limit bars' sig dedup would skip reposting to a fresh webview.
+        this._limitsSig = null;
+        this._limitsPolledAt = 0;
         this.postActiveAgent();
         this.postAgents();
         this.postHandoffState();
@@ -5615,6 +5861,75 @@ class ClaudeTmuxView {
     this.offerReload(`"${picked.session}" is now a free-mode agent.`);
   }
 
+  // `tmux set-option @agentmux_adopt 1` on a session is a request for a mirror
+  // tab — the CLI-side way to do what "Mirror a tmux session…" does from the
+  // + menu. Anything but 1/on is taken as the tab label. The flag is consumed
+  // after adopting so a second window cannot pick the same session up: a
+  // mirror belongs to the window that claimed it (same store the picker uses).
+  async adoptFlaggedSessions() {
+    const listed = await tmux(['list-sessions', '-F', '#{session_name}\t#{@agentmux_adopt}'], TMUX_PROBE_TIMEOUT_MS);
+    if (!listed.ok || !listed.out.trim()) return;
+    const driven = mirroredSessionNames();
+    for (const e of mirroredAgentEntries()) if (e.session) driven.add(e.session);
+    for (const agent of AGENT_IDS) {
+      const name = this.sessionCache[agent]?.name;
+      if (name) driven.add(name);
+    }
+    const adopted = [];
+    for (const line of listed.out.split('\n')) {
+      const [name, flag = ''] = line.split('\t');
+      if (!name || !flag || flag === '0' || flag === 'off' || driven.has(name)) continue;
+      driven.add(name);
+      const settingsAgents = cfg().get('customAgents');
+      const existing = [...(Array.isArray(settingsAgents) ? settingsAgents : []), ...mirroredAgentEntries()];
+      const label = (flag === '1' || flag === 'on' ? name : flag).slice(0, 24);
+      const mirrors = [...mirroredAgentEntries(), { id: freeAgentId(name, existing), label, session: name }];
+      if (mirrorStore) await mirrorStore.update(MIRROR_STORE_KEY, mirrors);
+      adopted.push(label);
+      tmux(['set-option', '-u', '-t', name, '@agentmux_adopt']).catch(() => {});
+    }
+    if (adopted.length) {
+      this.eventLog.append({ type: 'session', agent: 'tmux', action: 'adopted' });
+      this.offerReload(`${adopted.length === 1 ? `"${adopted[0]}" is` : `${adopted.length} sessions are`} now mirrored.`);
+    }
+  }
+
+  // Usage-limit bars: account-level facts, not per-agent state, so one message
+  // covers every provider that reported. Codex logs rate_limits into its
+  // rollout files; Claude exposes them only through the status line payload
+  // our sink script stashes. Each source fails silently — the bars simply do
+  // not appear for a provider that has nothing to say.
+  async pollLimits() {
+    if (cfg().get('usageLimits') === false || !this.view) return;
+    const limits = {};
+    const [codex, claude] = await Promise.all([readCodexRateLimits(), readClaudeStatusLimits()]);
+    if (codex) limits.codex = codex;
+    if (claude) limits.claude = claude;
+    // CodexBar, when installed, is the universal source: its data is fresher
+    // (real API calls) and covers providers the local readers never can. It
+    // runs on its own slow timer with an in-flight guard — one call took ~30s.
+    const now = Date.now();
+    if (now - (this._codexbarAt || 0) > 300000 && !this._codexbarBusy) {
+      this._codexbarAt = now;
+      this._codexbarBusy = true;
+      execCodexbarJson()
+        .then((text) => {
+          this._codexbarBusy = false;
+          const parsed = limitsFromCodexbar(text);
+          if (parsed) this._codexbarLimits = parsed; // keep last good on failure
+          this.pollLimits();
+        })
+        .catch(() => { this._codexbarBusy = false; });
+    }
+    if (this._codexbarLimits) Object.assign(limits, this._codexbarLimits);
+    const capped = Object.fromEntries(Object.entries(limits).slice(0, 8));
+    const sig = JSON.stringify(capped);
+    if (sig !== this._limitsSig) {
+      this._limitsSig = sig;
+      this.view.webview.postMessage({ type: 'limits', limits: capped });
+    }
+  }
+
   // Custom agents can live in three places: this window's mirror store, and
   // the settings scopes customAgents can be defined in. Listing all of them —
   // with the scope labelled — is also the only way a user can remove a mirror
@@ -5818,7 +6133,7 @@ class ClaudeTmuxView {
     if (removeOpencodePlugin()) removed.push(opencodePluginPath());
     if (removePiExtension()) removed.push(piExtensionPath());
     const paths = stateHookPaths();
-    for (const file of [paths?.script, paths?.settings]) {
+    for (const file of [paths?.script, paths?.settings, paths?.statusline, paths?.statuslineData]) {
       if (!file) continue;
       try { fs.unlinkSync(file); removed.push(file); } catch { /* already gone */ }
     }
@@ -6941,6 +7256,7 @@ class ClaudeTmuxView {
         <button id="btn-findings" class="footer-action hidden" title="Request findings and hand back" aria-label="Request findings and hand back">↩</button>
         <button id="btn-pair" class="footer-action" title="Hand off to the other agent" aria-label="Hand off to the other agent">⇄</button>
         <button id="btn-unlock" class="footer-action hidden" title="Release Pair Mode lock" aria-label="Release Pair Mode lock">◇</button>
+        <span id="status-limits" title=""></span>
         <span id="status-meta"></span>
         <span id="status-state"><span class="dot" id="status-dot"></span><span id="status-label">connecting…</span><span id="status-live" class="sr-only" role="status" aria-live="polite"></span></span>
       </span>

@@ -499,6 +499,11 @@
           "default": true,
           "description": "Tail the CLIs' local JSONL transcripts for tokens, model, turn count and current tool (footer chips and status bar tooltips). Local file reads only; nothing leaves your machine."
         },
+        "claudeTmux.usageLimits": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show account rate-limit bars in the footer. Sources: Codex's local rollout logs and Claude's status line payload (a no-op statusLine is added to the generated --settings only when your own Claude settings define none), plus `codexbar usage --json` when the CodexBar CLI is installed — which covers every provider it is configured for (devin, antigravity, opencode, …)."
+        },
         "claudeTmux.eventLog": {
           "type": "boolean",
           "default": true,

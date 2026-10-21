@@ -40,11 +40,28 @@ then:
 6. **Needs input** — trigger an approval dialog on a *background* agent: its
    tab turns amber, the VS Code badge counts it, hovering the tab previews the
    question, the notification offers the numbered answers.
-7. **CLI** — in a terminal inside the workspace:
+7. **Adopt flag** — `tmux new-session -d -s pickme`, then
+   `tmux set-option @agentmux_adopt "Pick me"`: within ~15 s a toast offers a
+   reload, the flag is cleared (`tmux show -v -t pickme @agentmux_adopt` →
+   empty) and after the reload a "Pick me" tab mirrors the session — in this
+   window only. `@agentmux_adopt 1` labels the tab with the session name.
+8. **Usage bars** — with a Codex session having emitted `token_count` entries,
+   the footer shows `codex` followed by two thin bars with percentages (5h and
+   weekly; tooltip names them and the resets). Claude's bar appears only when
+   its status line payload was captured — check it did not replace a status
+   line you configured yourself in `~/.claude/settings.json`. With the
+   CodexBar CLI installed, every provider it reports gains bars within ~5 min
+   (devin, agy, opencode…), labelled by window length (`day`/`wk`, not just
+   `5h`/`wk`), extra windows in the tooltip.
+9. **Background-task done** — ask Claude to run a Task subagent or a
+   `run_in_background` shell, then let the turn end: the tab must stay
+   `working` while the background task runs and flip to `done` when the last
+   one finishes — not the instant the main turn stops.
+10. **CLI** — in a terminal inside the workspace:
    `agentmux list`, `agentmux read claude --lines 20`,
    `agentmux prompt codex "say hi" --wait --until done`. The wait returns on
    `done`, or immediately with `blocked: true` if the agent stops to ask.
-8. **Resilience** — `tmux kill-server`. One notification lists every stopped
+11. **Resilience** — `tmux kill-server`. One notification lists every stopped
    agent; the sidebar shows the launcher, nothing hangs, no tab flickers back.
-9. **Remote** — repeat 1–3 over Remote-SSH: typing must stay responsive and
+12. **Remote** — repeat 1–3 over Remote-SSH: typing must stay responsive and
    the footer `lag` chip should stay under a few hundred ms.

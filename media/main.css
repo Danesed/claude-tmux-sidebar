@@ -698,6 +698,25 @@ button.primary:hover { background: var(--vscode-button-hoverBackground, #1177bb)
 @keyframes chipTick {
   0% { background-color: rgba(var(--agent-accent, 128,128,128), .3); }
 }
+/* Usage-limit bars: deliberately quieter than the telemetry chips — a thin
+   fill plus a bare number, since they are ambient account info, not session
+   state. .hot is the only colour cue, at 80%+. */
+#status-limits { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+.lchip {
+  display: inline-flex; align-items: center; gap: 3px;
+  font-size: 9px; color: var(--vscode-descriptionForeground, #9aa0a6); opacity: .8;
+}
+.lbar { display: inline-flex; align-items: center; gap: 2px; }
+.lbar > i {
+  display: inline-block; width: 20px; height: 3px; border-radius: 2px;
+  background: var(--surface-2, rgba(127,127,127,.25)); overflow: hidden;
+}
+.lbar > i > i {
+  display: block; height: 100%; border-radius: 2px;
+  background: var(--vscode-descriptionForeground, #9aa0a6);
+}
+.lbar.hot > i > i { background: var(--vscode-errorForeground, #f14c4c); }
+.lbar b { font-weight: 400; font-variant-numeric: tabular-nums; min-width: 15px; }
 #status-state { display: flex; align-items: center; gap: 5px; flex: 0 0 auto; }
 .dot {
   position: relative;

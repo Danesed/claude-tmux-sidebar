@@ -22,6 +22,7 @@ let warningAnswer;
 let quickPickAnswer;
 let quickPickItems = null;
 let sessionListOutput = null;
+let adoptListOutput = null;
 const outputLines = [];
 const settings = new Map([
   ['codexArgs', '--no-alt-screen'],
@@ -114,8 +115,14 @@ function execFile(command, args, options, callback) {
     }
     return callback(null, '2,3,80,24,1700000000,240,0\n', '');
   }
-  if (args[0] === 'list-sessions' && sessionListOutput != null) {
-    return callback(null, sessionListOutput, '');
+  if (args[0] === 'list-sessions') {
+    // The adopt probe asks for a different format than the cleanup/mirror
+    // listing; answering it with the other format's columns would feed paths
+    // into the flag field.
+    if (args.some((a) => a.includes('@agentmux_adopt'))) {
+      return callback(null, adoptListOutput || '', '');
+    }
+    if (sessionListOutput != null) return callback(null, sessionListOutput, '');
   }
   if (args[0] === 'capture-pane') {
     // Live ticks fuse the meta display-message into the same invocation.
@@ -187,7 +194,7 @@ const vscode = {
 };
 
 const source = fs.readFileSync(path.join(root, 'extension.js'), 'utf8')
-  + '\nmodule.exports.__test = { ClaudeTmuxView, sessionName, accentChannels, derivedAccent, derivedMark, decodeEscapes, AGENT_DETECTION, paneIdentity, identityMatches, STATE_HOOK_SCRIPT, setStateHookDir, codexHookArgs, tomlString, listPiSessions, piSessionDir, piExtensionPath, ensurePiExtension, removePiExtension, PI_EXTENSION, customAgentSpecs, registerCustomAgents, freeAgentId, mirroredSessionNames, baseSessionName, setMirrorStore, mirroredAgentEntries, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, readFirstJsonLine, TranscriptTail, listSessions, AGENTS, AGENT_IDS, BUILTIN_AGENTS, BUILTIN_AGENT_IDS, DEFAULT_ENABLED_AGENTS, normalizedEnabledAgents, rebuildAgentRegistry, enabledAgentsChanged, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, listDevinSessions, devinLaunchArgs, hermesProfileSlug, hermesProfileHome, ensureHermesProfile, launchEnvPrefix, detectionRules, detectState, detectionContext, isRuleLine, explainDetection, DETECTION_REGIONS, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath, AGENT_PRESETS, promptAddAgentPreset, setTmuxTimeouts };';
+  + '\nmodule.exports.__test = { ClaudeTmuxView, sessionName, accentChannels, derivedAccent, derivedMark, decodeEscapes, AGENT_DETECTION, paneIdentity, identityMatches, STATE_HOOK_SCRIPT, setStateHookDir, codexHookArgs, tomlString, listPiSessions, piSessionDir, piExtensionPath, ensurePiExtension, removePiExtension, PI_EXTENSION, customAgentSpecs, registerCustomAgents, freeAgentId, mirroredSessionNames, baseSessionName, setMirrorStore, mirroredAgentEntries, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, readFirstJsonLine, TranscriptTail, listSessions, AGENTS, AGENT_IDS, BUILTIN_AGENTS, BUILTIN_AGENT_IDS, DEFAULT_ENABLED_AGENTS, normalizedEnabledAgents, rebuildAgentRegistry, enabledAgentsChanged, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, listDevinSessions, devinLaunchArgs, hermesProfileSlug, hermesProfileHome, ensureHermesProfile, launchEnvPrefix, detectionRules, detectState, detectionContext, isRuleLine, explainDetection, DETECTION_REGIONS, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath, AGENT_PRESETS, promptAddAgentPreset, setTmuxTimeouts, limitWindow, extractLimitWindows, rateLimitsFromRollout, STATUSLINE_SCRIPT, userHasClaudeStatusline, ensureStateHookAssets, limitsFromCodexbar };';
 const moduleUnderTest = { exports: {} };
 const sandbox = {
   module: moduleUnderTest,
@@ -208,7 +215,7 @@ const sandbox = {
   clearInterval,
 };
 vm.runInNewContext(source, sandbox, { filename: 'extension.js' });
-const { ClaudeTmuxView, sessionName, accentChannels, derivedAccent, derivedMark, decodeEscapes, AGENT_DETECTION, paneIdentity, identityMatches, STATE_HOOK_SCRIPT, setStateHookDir, codexHookArgs, tomlString, listPiSessions, piSessionDir, piExtensionPath, ensurePiExtension, removePiExtension, PI_EXTENSION, customAgentSpecs, registerCustomAgents, freeAgentId, mirroredSessionNames, baseSessionName, setMirrorStore, mirroredAgentEntries, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, readFirstJsonLine, TranscriptTail, listSessions, AGENTS, AGENT_IDS, BUILTIN_AGENTS, BUILTIN_AGENT_IDS, DEFAULT_ENABLED_AGENTS, normalizedEnabledAgents, rebuildAgentRegistry, enabledAgentsChanged, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, listDevinSessions, devinLaunchArgs, hermesProfileSlug, hermesProfileHome, ensureHermesProfile, launchEnvPrefix, detectionRules, detectState, detectionContext, isRuleLine, explainDetection, DETECTION_REGIONS, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath, AGENT_PRESETS, promptAddAgentPreset, setTmuxTimeouts } = moduleUnderTest.exports.__test;
+const { ClaudeTmuxView, sessionName, accentChannels, derivedAccent, derivedMark, decodeEscapes, AGENT_DETECTION, paneIdentity, identityMatches, STATE_HOOK_SCRIPT, setStateHookDir, codexHookArgs, tomlString, listPiSessions, piSessionDir, piExtensionPath, ensurePiExtension, removePiExtension, PI_EXTENSION, customAgentSpecs, registerCustomAgents, freeAgentId, mirroredSessionNames, baseSessionName, setMirrorStore, mirroredAgentEntries, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, readFirstJsonLine, TranscriptTail, listSessions, AGENTS, AGENT_IDS, BUILTIN_AGENTS, BUILTIN_AGENT_IDS, DEFAULT_ENABLED_AGENTS, normalizedEnabledAgents, rebuildAgentRegistry, enabledAgentsChanged, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, listDevinSessions, devinLaunchArgs, hermesProfileSlug, hermesProfileHome, ensureHermesProfile, launchEnvPrefix, detectionRules, detectState, detectionContext, isRuleLine, explainDetection, DETECTION_REGIONS, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath, AGENT_PRESETS, promptAddAgentPreset, setTmuxTimeouts, limitWindow, extractLimitWindows, rateLimitsFromRollout, STATUSLINE_SCRIPT, userHasClaudeStatusline, ensureStateHookAssets, limitsFromCodexbar } = moduleUnderTest.exports.__test;
 
 function makeProvider() {
   const provider = new ClaudeTmuxView({
@@ -329,7 +336,8 @@ async function run() {
     'needs-input');
 
   // The shared hook script reads its JSON payload once and serves both CLIs.
-  assert.match(STATE_HOOK_SCRIPT, /head -c 4000/, 'the payload is read once, bounded');
+  assert.match(STATE_HOOK_SCRIPT, /head -c 24000/, 'the payload is read once, bounded, with room for the task list');
+  assert.match(STATE_HOOK_SCRIPT, /background_tasks/, 'a "done" is re-checked against running background tasks');
   assert.match(STATE_HOOK_SCRIPT, /"session_id"/, 'the conversation id is captured for exact resume');
   assert.match(STATE_HOOK_SCRIPT, /if \[ "\$state" != "register" \]/,
     'register records identity without claiming a state');
@@ -1884,6 +1892,166 @@ async function run() {
       quickPickItems = null;
       quickPickAnswer = undefined;
       inputBoxAnswer = undefined;
+    }
+  }
+
+  // ---- @agentmux_adopt: a tmux session flag asks for a window-local mirror ----
+  {
+    const memento = { get: (k) => state.get(k), update: async (k, v) => { state.set(k, v); } };
+    setMirrorStore(memento);
+    const adoptProvider = makeProvider();
+    try {
+      adoptListOutput = 'flagged\t1\nlabelled\tBuild server\nplain\t\noff-flag\t0\n';
+      await adoptProvider.adoptFlaggedSessions();
+      const stored = state.get('claudeTmux.mirrorAgents') || [];
+      const flagged = stored.find((e) => e.session === 'flagged');
+      const labelled = stored.find((e) => e.session === 'labelled');
+      assert.ok(flagged, 'a flagged session is adopted into this window');
+      assert.strictEqual(flagged.label, 'flagged', 'a bare 1 flag labels the tab with the session name');
+      assert.strictEqual(labelled.label, 'Build server', 'a non-flag value becomes the tab label');
+      assert.ok(!stored.some((e) => e.session === 'plain' || e.session === 'off-flag'),
+        'empty and off flags are ignored');
+      assert.ok(!(settings.get('customAgents') || []).some((e) => e.session === 'flagged'),
+        'adoption goes to window state, never shared settings');
+      const consumed = calls.filter((c) => c.command === 'tmux'
+        && c.args[0] === 'set-option' && c.args.includes('@agentmux_adopt'));
+      assert.ok(consumed.some((c) => c.args.includes('flagged'))
+        && consumed.some((c) => c.args.includes('labelled')),
+        'the flag is consumed so no other window adopts the same session');
+      // A second pass sees the flag cleared and adopts nothing again.
+      calls.length = 0;
+      adoptListOutput = 'flagged\t\nlabelled\t\n';
+      await adoptProvider.adoptFlaggedSessions();
+      assert.strictEqual((state.get('claudeTmux.mirrorAgents') || []).length, 2,
+        'a consumed flag does not adopt twice');
+      // A session this window already mirrors is driven, not adopted.
+      adoptListOutput = 'flagged\t1\n';
+      await adoptProvider.adoptFlaggedSessions();
+      assert.strictEqual((state.get('claudeTmux.mirrorAgents') || []).filter((e) => e.session === 'flagged').length, 1,
+        'an already-driven session is never re-adopted');
+    } finally {
+      adoptProvider.closeIpcServer();
+      setMirrorStore(null);
+      state.delete('claudeTmux.mirrorAgents');
+      adoptListOutput = null;
+      calls.length = 0;
+    }
+  }
+
+  // ---- usage-limit readers -------------------------------------------------------
+  {
+    const soon = Math.floor(Date.now() / 1000) + 3600;
+    const week = Math.floor(Date.now() / 1000) + 86400;
+    const rollout = [
+      `{"type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":4,"window_minutes":300,"resets_at":${soon}},"secondary":{"used_percent":1,"window_minutes":10080,"resets_at":${week}}}}}`,
+      `{"type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":37,"window_minutes":300,"resets_at":${soon}},"secondary":{"used_percent":12,"window_minutes":10080,"resets_at":${week}}}}}`,
+      '{"partial', // a torn tail line must not break the scan
+    ].join('\n');
+    const windows = rateLimitsFromRollout(rollout);
+    assert.strictEqual(windows.primary.pct, 37, 'the newest rate_limits entry wins');
+    assert.strictEqual(windows.secondary.pct, 12);
+    assert.strictEqual(windows.primary.minutes, 300);
+    assert.strictEqual(windows.primary.resetsAt, soon * 1000, 'epoch seconds are normalised to ms');
+
+    assert.strictEqual(rateLimitsFromRollout('{"type":"token_count"}'), null,
+      'a rollout without rate_limits reports nothing');
+    assert.strictEqual(rateLimitsFromRollout(
+      `{"rate_limits":{"primary":{"used_percent":9,"resets_at":${Math.floor(Date.now() / 1000) - 7201}}}}`
+    ), null, 'a snapshot whose reset passed long ago is stale, not shown');
+
+    // The module runs in a vm realm, so its object literals fail
+    // deepStrictEqual's prototype check — spread rebuilds them in this realm.
+    assert.deepStrictEqual({ ...limitWindow({ used_percent: 42 }) }, { pct: 42, resetsAt: null, minutes: null },
+      'a bare percentage is a usable window — the bar shows, the tooltip just lacks a reset');
+    assert.strictEqual(limitWindow({ used_percent: '42' }), null, 'non-numeric percent is ignored');
+
+    // extractLimitWindows walks unknown status line schemas: window-looking
+    // objects are ranked by window size, smallest first (5h ~ 300, week ~ 10080).
+    const extracted = extractLimitWindows({
+      model: { id: 'x' },
+      limits: null,
+      deep: { five: { used_percent: 33, window_minutes: 300, resets_at: soon },
+              week: { used_percent: 12, window_minutes: 10080, resets_at: week } },
+    });
+    assert.strictEqual(extracted.primary.pct, 33, 'the smallest window becomes the 5h bar');
+    assert.strictEqual(extracted.secondary.pct, 12);
+    assert.strictEqual(extractLimitWindows({ hello: 'world' }), null);
+
+    // The statusline gate never hijacks a status line the user configured.
+    const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'agentmux-home-'));
+    try {
+      assert.strictEqual(userHasClaudeStatusline(fakeHome), false, 'no Claude settings -> free to install ours');
+      fs.mkdirSync(path.join(fakeHome, '.claude'), { recursive: true });
+      fs.writeFileSync(path.join(fakeHome, '.claude', 'settings.json'), '{"statusLine":{"type":"command","command":"mine"}}');
+      assert.strictEqual(userHasClaudeStatusline(fakeHome), true, 'a user statusLine wins');
+      fs.writeFileSync(path.join(fakeHome, '.claude', 'settings.json'), 'not json');
+      assert.strictEqual(userHasClaudeStatusline(fakeHome), false, 'unparseable settings do not block ours');
+    } finally {
+      fs.rmSync(fakeHome, { recursive: true, force: true });
+    }
+
+    // `codexbar usage --json`, real output shape: providers report windows as
+    // primary/secondary/tertiary + extraRateWindows; labels come from the map
+    // and windows are sorted by length so weekly-as-primary still orders right.
+    const cb = limitsFromCodexbar(JSON.stringify([
+      { provider: 'devin', source: 'web', usage: {
+        primary: { windowMinutes: 1440, usedPercent: 0, resetsAt: '2030-10-22T08:00:00Z' },
+        secondary: { windowMinutes: 10080, usedPercent: 100, resetsAt: '2030-10-25T08:00:00Z' } } },
+      { provider: 'antigravity', source: 'cli', usage: {
+        primary: { windowMinutes: 10080, usedPercent: 100, resetsAt: '2030-10-24T20:55:09Z' },
+        secondary: { windowMinutes: 300, usedPercent: 0, resetsAt: '2030-10-21T22:17:51Z' },
+        extraRateWindows: [
+          { title: 'Gemini weekly', window: { windowMinutes: 10080, usedPercent: 100 } },
+          { title: 'Claude/GPT weekly', window: { windowMinutes: 10080, usedPercent: 0.09 } }] } },
+      { provider: 'empty', usage: {} },
+    ]));
+    assert.strictEqual(cb.devin.primary.minutes, 1440, 'devin daily window is the short bar');
+    assert.strictEqual(cb.devin.secondary.pct, 100);
+    assert.strictEqual(cb.agy.primary.minutes, 300, 'antigravity is shortened to agy and windows sort by size');
+    assert.strictEqual(cb.agy.secondary.pct, 100);
+    assert.deepStrictEqual([...cb.agy.tips.map((t) => t.split(':')[0])], ['Gemini weekly', 'Claude/GPT weekly'],
+      'extra rate windows land in the tooltip');
+    assert.ok(!cb.empty, 'a provider with no windows is dropped');
+    assert.strictEqual(limitsFromCodexbar('not json'), null);
+    assert.strictEqual(limitsFromCodexbar('[]'), null);
+  }
+
+  // ---- the generated state hook keeps "done" honest about background tasks ----
+  // This runs the real generated script under real sh with a stub tmux, because
+  // the counting is sed/grep inside a shell string — the exact place a mock
+  // could drift from reality.
+  {
+    const hookDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentmux-hook-'));
+    const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentmux-bin-'));
+    const log = path.join(hookDir, 'tmux.log');
+    fs.writeFileSync(path.join(binDir, 'tmux'),
+      '#!/bin/sh\necho "$@" >> "$TMUX_LOG"\n', { mode: 0o755 });
+    setStateHookDir(hookDir);
+    try {
+      const paths = ensureStateHookAssets();
+      const { execFileSync } = require('child_process');
+      const env = { ...process.env, TMUX_PANE: '%1', TMUX_LOG: log, PATH: `${binDir}:/usr/bin:/bin` };
+      const run = (state, json) => {
+        fs.writeFileSync(log, '');
+        execFileSync('sh', [paths.script, state], { input: json, env, encoding: 'utf8' });
+        return fs.readFileSync(log, 'utf8');
+      };
+      let out = run('done', '{"session_id":"s","hook_event_name":"Stop"}');
+      assert.ok(out.includes('@agentmux_state done'), 'no task list -> done stands');
+      out = run('done', '{"session_id":"s","background_tasks":[{"id":"a","status":"running","type":"subagent"}]}');
+      assert.ok(out.includes('@agentmux_state working'), 'a running subagent keeps the turn working');
+      out = run('done', '{"background_tasks":[{"id":"a","status":"running","type":"monitor"},{"id":"b","status":"completed","type":"subagent"}]}');
+      assert.ok(out.includes('@agentmux_state done'), 'monitors and finished tasks never count');
+      out = run('done', '{"background_tasks":[{"id":"a","status":"running","type":"shell"},{"id":"b","status":"running","type":"subagent"}]}');
+      assert.ok(out.includes('@agentmux_state working'), 'shells still running hold the state');
+      out = run('working', '{"background_tasks":[{"id":"a","status":"running","type":"subagent"}]}');
+      assert.ok(out.includes('@agentmux_state working'), 'non-done states pass through untouched');
+      const settingsJson = JSON.parse(fs.readFileSync(paths.settings, 'utf8'));
+      assert.ok(settingsJson.hooks.SubagentStop, 'SubagentStop is hooked so the last task can close the turn');
+    } finally {
+      setStateHookDir(null);
+      fs.rmSync(hookDir, { recursive: true, force: true });
+      fs.rmSync(binDir, { recursive: true, force: true });
     }
   }
 
