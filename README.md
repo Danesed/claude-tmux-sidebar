@@ -501,7 +501,7 @@ settings.
 | `claudeTmux.notifyPrompts` | `true` | Notification with answer buttons when a background agent asks. |
 | `claudeTmux.stateHooks` | `true` | Ground-truth state via Claude hooks, Codex notify, the OpenCode plugin and the pi extension. |
 | `claudeTmux.telemetry` | `true` | Token/turn/tool chips tailed from local CLI transcripts. |
-| `claudeTmux.usageLimits` | `true` | Footer bars for account rate limits: Codex rollout logs, Claude's status line payload (a no-op statusLine only when yours defines none), and every configured provider via `codexbar usage --json` when the CodexBar CLI is installed. |
+| `claudeTmux.usageLimits` | `true` | Footer bars for account rate limits: Codex rollout logs, Claude's status line payload (a no-op statusLine only when yours defines none) or Anthropic's OAuth endpoint on a fresh credential, `agy -p /usage` for Antigravity — plus whatever providers the optional CodexBar CLI adds. |
 | `claudeTmux.eventLog` | `true` | Timeline ledger at `.claude/agentmux/ledger.jsonl`. |
 | `claudeTmux.tmuxStatusBar` | `true` | AgentMux facts on the tmux status line of agent sessions. |
 | `claudeTmux.fileChannel` | `true` | Handoffs/ACKs/arbiter answers travel as `.claude/agentmux` files. |

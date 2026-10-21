@@ -47,12 +47,14 @@ then:
    window only. `@agentmux_adopt 1` labels the tab with the session name.
 8. **Usage bars** — with a Codex session having emitted `token_count` entries,
    the footer shows `codex` followed by two thin bars with percentages (5h and
-   weekly; tooltip names them and the resets). Claude's bar appears only when
-   its status line payload was captured — check it did not replace a status
-   line you configured yourself in `~/.claude/settings.json`. With the
-   CodexBar CLI installed, every provider it reports gains bars within ~5 min
-   (devin, agy, opencode…), labelled by window length (`day`/`wk`, not just
-   `5h`/`wk`), extra windows in the tooltip.
+   weekly; tooltip names them and the resets). Claude's bar appears when its
+   status line payload was captured (check it did not replace a status line
+   you configured yourself in `~/.claude/settings.json`) or — a minute or two
+   after `claude` refreshed its login — via the OAuth endpoint. `agy` gains
+   bars within ~5 min from its own `agy -p /usage` report — the most-used
+   model group takes the bars, other groups are lines in the tooltip. With the
+   CodexBar CLI installed, providers nothing else reached (devin, opencode…)
+   gain bars too — CodexBar is additive, never required.
 9. **Background-task done** — ask Claude to run a Task subagent or a
    `run_in_background` shell, then let the turn end: the tab must stay
    `working` while the background task runs and flip to `done` when the last

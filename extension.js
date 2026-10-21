@@ -2,6 +2,7 @@ const vscode = require('vscode');
 const { execFile, spawn } = require('child_process');
 const crypto = require('crypto');
 const fs = require('fs');
+const https = require('https');
 const os = require('os');
 const path = require('path');
 const net = require('net');
@@ -2996,12 +2997,140 @@ async function readClaudeStatusLimits() {
   }
 }
 
-// ---- CodexBar (optional, universal backend) --------------------------------------
-// CodexBar (github.com/steipete/CodexBar) already owns what we could never
-// reimplement lightly: OAuth flows, browser cookies, API keys and ~100
-// provider fetchers. When its CLI is on PATH, `codexbar usage --json` is one
-// subprocess that covers devin, antigravity, opencode and friends too. It
-// does real network calls — hence the slower timer and the in-flight guard.
+// ---- provider-native limit readers -------------------------------------------
+// CodexBar's techniques, reimplemented at our scale: each provider's own CLI
+// or the user's own credential file answers the question — we never handle
+// browser cookies or run OAuth flows. Nothing leaves the machine except the
+// provider's own API call; an absent binary or stale credential means no bar.
+
+// agy's buckets name their window ("5h", "weekly", ...); map to minutes, else
+// derive it from the reset timestamp so unknown labels still sort sensibly.
+function agyWindowMinutes(window, resetsAt) {
+  const w = String(window || '');
+  if (/5\s*h|five.?hour/i.test(w)) return 300;
+  if (/week/i.test(w)) return 10080;
+  if (/day|daily/i.test(w)) return 1440;
+  if (/month|mo\b/i.test(w)) return 43200;
+  if (resetsAt) return Math.max(1, Math.round((resetsAt - Date.now()) / 60000));
+  return null;
+}
+
+// `agy -p /usage --output-format json` (agy ≥1.1.11) returns
+// {command:{data:{groups:[{name,buckets:[{name,window,remaining_fraction,
+// reset_time}]}]}}}. Each group shares one weekly + one 5h limit across its
+// models. Two bars can't carry every group, so the most-used group takes the
+// bars and the rest land in the tooltip — the bottleneck is what matters.
+function limitsFromAgy(text) {
+  let doc;
+  try { doc = JSON.parse(text); } catch { return null; }
+  const groups = doc?.command?.data?.groups;
+  if (!Array.isArray(groups)) return null;
+  const parsed = [];
+  for (const g of groups) {
+    const wins = [];
+    for (const b of g?.buckets || []) {
+      const rem = b?.remaining_fraction;
+      if (typeof rem !== 'number' || isNaN(rem)) continue;
+      const resetsAt = Date.parse(b?.reset_time || '') || null;
+      if (resetsAt && resetsAt < Date.now() - 7200000) continue;
+      wins.push({ pct: Math.max(0, Math.min(100, (1 - rem) * 100)), resetsAt,
+        minutes: agyWindowMinutes(b?.window, resetsAt), name: b?.name || b?.window || 'limit' });
+    }
+    if (wins.length) parsed.push({ name: g?.name || 'quota', wins, max: Math.max(...wins.map((w) => w.pct)) });
+  }
+  if (!parsed.length) return null;
+  parsed.sort((a, b) => b.max - a.max); // binding constraint first, stable
+  const main = parsed[0];
+  main.wins.sort((a, b) => (a.minutes ?? 1e9) - (b.minutes ?? 1e9));
+  const tips = parsed.slice(1).flatMap((g) =>
+    g.wins.map((w) => `${g.name} · ${w.name}: ${Math.round(w.pct)}%`));
+  return { primary: main.wins[0] || null, secondary: main.wins[1] || null, tips };
+}
+
+function execAgyUsage() {
+  return new Promise((resolve) => {
+    try {
+      execFile('agy', ['-p', '/usage', '--output-format', 'json'],
+        { timeout: 60000, maxBuffer: 2 * 1024 * 1024, cwd: os.tmpdir() },
+        (err, stdout) => resolve(err ? '' : stdout));
+    } catch {
+      resolve('');
+    }
+  });
+}
+
+// One small GET to the provider's own API, JSON out or null. 64 KB cap — a
+// usage payload is a few hundred bytes; anything bigger is a redirect or an
+// error page we don't want in the parser.
+function httpsGetJson(urlStr, headers) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v) => { if (!settled) { settled = true; resolve(v); } };
+    try {
+      const req = https.get(urlStr, { headers, timeout: 12000 }, (res) => {
+        if (res.statusCode !== 200) { res.resume(); return done(null); }
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (c) => { body += c; if (body.length > 65536) { res.destroy(); done(null); } });
+        res.on('end', () => { try { done(JSON.parse(body)); } catch { done(null); } });
+      });
+      req.on('timeout', () => { req.destroy(); done(null); });
+      req.on('error', () => done(null));
+    } catch {
+      done(null);
+    }
+  });
+}
+
+// Anthropic's OAuth usage endpoint: five_hour is the session window,
+// seven_day the weekly one; per-model weeklies go to the tooltip. utilization
+// is a 0-100 percent. Stale resets mean the credential is long expired.
+function limitsFromClaudeOauth(json) {
+  if (!json || typeof json !== 'object') return null;
+  const win = (node, minutes) => {
+    const u = node?.utilization;
+    if (typeof u !== 'number' || isNaN(u)) return null;
+    const resetsAt = Date.parse(node?.resets_at || '') || null;
+    if (resetsAt && resetsAt < Date.now() - 7200000) return null;
+    return { pct: Math.max(0, Math.min(100, u)), resetsAt, minutes };
+  };
+  const tips = ['seven_day_sonnet', 'seven_day_opus']
+    .map((k) => ({ k, w: win(json[k], 10080) }))
+    .filter((e) => e.w)
+    .map((e) => `${e.k === 'seven_day_sonnet' ? 'Sonnet' : 'Opus'} wk: ${Math.round(e.w.pct)}%`);
+  const primary = win(json.five_hour, 300);
+  const secondary = win(json.seven_day, 10080);
+  if (!primary && !secondary && !tips.length) return null;
+  return { primary, secondary, tips };
+}
+
+// ~/.claude/.credentials.json is Claude Code's file credential store (Linux;
+// macOS keeps it in the Keychain — out of reach without a prompt we must
+// never trigger). An expired access token would just 401, but checking
+// expiresAt spares the round trip. We never refresh the token ourselves:
+// rotating the refresh token could log the user out of the claude CLI.
+async function readClaudeOauthLimits(homeDir = os.homedir()) {
+  try {
+    const creds = JSON.parse(await fs.promises.readFile(path.join(homeDir, '.claude', '.credentials.json'), 'utf8'));
+    const oauth = creds?.claudeAiOauth;
+    if (!oauth?.accessToken) return null;
+    if (typeof oauth.expiresAt === 'number' && oauth.expiresAt < Date.now() + 60000) return null;
+    return limitsFromClaudeOauth(await httpsGetJson('https://api.anthropic.com/api/oauth/usage', {
+      Authorization: `Bearer ${oauth.accessToken}`,
+      'anthropic-beta': 'oauth-2025-04-20',
+    }));
+  } catch {
+    return null;
+  }
+}
+
+// ---- CodexBar (optional gap-filler) ----------------------------------------
+// CodexBar (github.com/steipete/CodexBar) owns what stays deliberately out of
+// scope here: OAuth flows, browser cookies and ~100 provider fetchers. When
+// its CLI happens to be installed, `codexbar usage --json` fills in providers
+// the native readers can't reach (devin, opencode subscriptions, ...). It is
+// strictly additive — every provider works without it, and nothing depends on
+// it being present.
 const CODEXBAR_LABELS = { antigravity: 'agy', opencodego: 'oc-go', opencode: 'opencode' };
 
 function codexbarWindow(w) {
@@ -5896,32 +6025,43 @@ class ClaudeTmuxView {
 
   // Usage-limit bars: account-level facts, not per-agent state, so one message
   // covers every provider that reported. Codex logs rate_limits into its
-  // rollout files; Claude exposes them only through the status line payload
-  // our sink script stashes. Each source fails silently — the bars simply do
-  // not appear for a provider that has nothing to say.
+  // rollout files; Claude's status line payload reaches our sink on managed
+  // sessions; agy answers its own /usage print report; a fresh Claude OAuth
+  // credential unlocks the provider's usage API; CodexBar, when installed,
+  // fills any remaining provider gap. Each source fails silently — the bars
+  // simply do not appear for a provider that has nothing to say.
   async pollLimits() {
     if (cfg().get('usageLimits') === false || !this.view) return;
     const limits = {};
     const [codex, claude] = await Promise.all([readCodexRateLimits(), readClaudeStatusLimits()]);
     if (codex) limits.codex = codex;
     if (claude) limits.claude = claude;
-    // CodexBar, when installed, is the universal source: its data is fresher
-    // (real API calls) and covers providers the local readers never can. It
-    // runs on its own slow timer with an in-flight guard — one call took ~30s.
+    // The slower sources share one five-minute tick and one in-flight guard:
+    // the agy print probe is a subprocess, the Claude OAuth call is real
+    // network, and CodexBar does both under the hood. Native readers override
+    // the local file data (fresher); CodexBar then fills only the provider
+    // gaps nothing else reached.
     const now = Date.now();
-    if (now - (this._codexbarAt || 0) > 300000 && !this._codexbarBusy) {
-      this._codexbarAt = now;
-      this._codexbarBusy = true;
-      execCodexbarJson()
-        .then((text) => {
-          this._codexbarBusy = false;
-          const parsed = limitsFromCodexbar(text);
+    if (now - (this._externalAt || 0) > 300000 && !this._externalBusy) {
+      this._externalAt = now;
+      this._externalBusy = true;
+      Promise.all([execAgyUsage().then(limitsFromAgy), readClaudeOauthLimits(), execCodexbarJson()])
+        .then(([agy, claudeOauth, codexbarText]) => {
+          this._externalBusy = false;
+          const native = {};
+          if (agy) native.agy = agy;
+          if (claudeOauth) native.claude = claudeOauth;
+          this._nativeLimits = native; // empty map still clears stale bars
+          const parsed = limitsFromCodexbar(codexbarText);
           if (parsed) this._codexbarLimits = parsed; // keep last good on failure
           this.pollLimits();
         })
-        .catch(() => { this._codexbarBusy = false; });
+        .catch(() => { this._externalBusy = false; });
     }
-    if (this._codexbarLimits) Object.assign(limits, this._codexbarLimits);
+    if (this._nativeLimits) Object.assign(limits, this._nativeLimits);
+    for (const [key, val] of Object.entries(this._codexbarLimits || {})) {
+      if (!(key in limits)) limits[key] = val;
+    }
     const capped = Object.fromEntries(Object.entries(limits).slice(0, 8));
     const sig = JSON.stringify(capped);
     if (sig !== this._limitsSig) {

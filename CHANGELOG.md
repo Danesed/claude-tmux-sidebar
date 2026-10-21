@@ -1,12 +1,17 @@
 # Changelog
 
-## 0.16.4
+## 0.16.5
+
+Three small ideas lifted from harp, reimplemented light — plus usage-limit
+bars that read each provider's own data, no extra app required.
 
 ### Added
 
 - **`tmux set-option @agentmux_adopt 1` — a session can ask for a tab.** Setting the flag from a terminal or a script does what *Mirror a tmux session…* does from the + menu: the next presence pass picks it up, stores the mirror in this window's workspace state, and clears the flag so no second window can claim the same session. Any other value becomes the tab label (`@agentmux_adopt "Build server"`). Sessions AgentMux already drives or mirrors are never re-adopted.
-- **Usage-limit bars in the footer** (`claudeTmux.usageLimits`, on by default). Two tiny fill bars with numbers per provider — the 5-hour window and the weekly one — next to the telemetry chips; the tooltip says which is which and when each resets. Codex's `rate_limits` are read from the newest local rollout log; Claude only exposes them to the status line, so a no-op statusLine that stashes the payload is added to the generated `--settings` — but only when your own Claude settings do not already define one. When the [CodexBar](https://github.com/steipete/CodexBar) CLI is installed, `codexbar usage --json` becomes the source of truth for every provider it is configured for — devin, antigravity, opencode and the rest — refreshed every five minutes with an in-flight guard (its calls do real network I/O). Local reads win nothing over it and still cover codex/claude when CodexBar is absent; a provider with nothing to report simply shows no bars.
+- **Usage-limit bars in the footer** (`claudeTmux.usageLimits`, on by default). Two tiny fill bars with numbers per provider — the 5-hour window and the weekly one — next to the telemetry chips; the tooltip says which is which, when each resets, and lists every extra window a provider reports. Sources, all light and each optional by absence: Codex's `rate_limits` are read from the newest local rollout log; Claude's come from the status line payload our generated sink stashes on managed sessions, or from Anthropic's own OAuth usage endpoint when `~/.claude/.credentials.json` holds a fresh token (we never touch the Keychain and never rotate your refresh token — an expired credential just means no bar until `claude` next refreshes itself); Antigravity answers `agy -p /usage --output-format json` — its own signed-in CLI does the auth — with the most-used model group taking the bars and the rest listed in the tooltip. All of these run on one shared five-minute tick with an in-flight guard. If the [CodexBar](https://github.com/steipete/CodexBar) CLI happens to be installed, `codexbar usage --json` fills in whatever providers nothing else reached (devin, opencode subscriptions, …) — strictly additive, never required, and a provider with nothing to report simply shows no bars.
 - **"Done" now survives background work honestly.** Claude Code's `Stop`/`SubagentStop` hook payload carries `background_tasks`; the generated state hook counts the running ones (monitor tasks never count — they run for good) and keeps the tab `working` until the last one closes, instead of announcing done while subagents and shells still run. A session without the field behaves exactly as before.
+
+## 0.16.4
 
 ### Fixed
 

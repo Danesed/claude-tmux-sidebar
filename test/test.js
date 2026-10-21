@@ -194,7 +194,7 @@ const vscode = {
 };
 
 const source = fs.readFileSync(path.join(root, 'extension.js'), 'utf8')
-  + '\nmodule.exports.__test = { ClaudeTmuxView, sessionName, accentChannels, derivedAccent, derivedMark, decodeEscapes, AGENT_DETECTION, paneIdentity, identityMatches, STATE_HOOK_SCRIPT, setStateHookDir, codexHookArgs, tomlString, listPiSessions, piSessionDir, piExtensionPath, ensurePiExtension, removePiExtension, PI_EXTENSION, customAgentSpecs, registerCustomAgents, freeAgentId, mirroredSessionNames, baseSessionName, setMirrorStore, mirroredAgentEntries, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, readFirstJsonLine, TranscriptTail, listSessions, AGENTS, AGENT_IDS, BUILTIN_AGENTS, BUILTIN_AGENT_IDS, DEFAULT_ENABLED_AGENTS, normalizedEnabledAgents, rebuildAgentRegistry, enabledAgentsChanged, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, listDevinSessions, devinLaunchArgs, hermesProfileSlug, hermesProfileHome, ensureHermesProfile, launchEnvPrefix, detectionRules, detectState, detectionContext, isRuleLine, explainDetection, DETECTION_REGIONS, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath, AGENT_PRESETS, promptAddAgentPreset, setTmuxTimeouts, limitWindow, extractLimitWindows, rateLimitsFromRollout, STATUSLINE_SCRIPT, userHasClaudeStatusline, ensureStateHookAssets, limitsFromCodexbar };';
+  + '\nmodule.exports.__test = { ClaudeTmuxView, sessionName, accentChannels, derivedAccent, derivedMark, decodeEscapes, AGENT_DETECTION, paneIdentity, identityMatches, STATE_HOOK_SCRIPT, setStateHookDir, codexHookArgs, tomlString, listPiSessions, piSessionDir, piExtensionPath, ensurePiExtension, removePiExtension, PI_EXTENSION, customAgentSpecs, registerCustomAgents, freeAgentId, mirroredSessionNames, baseSessionName, setMirrorStore, mirroredAgentEntries, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, readFirstJsonLine, TranscriptTail, listSessions, AGENTS, AGENT_IDS, BUILTIN_AGENTS, BUILTIN_AGENT_IDS, DEFAULT_ENABLED_AGENTS, normalizedEnabledAgents, rebuildAgentRegistry, enabledAgentsChanged, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, listDevinSessions, devinLaunchArgs, hermesProfileSlug, hermesProfileHome, ensureHermesProfile, launchEnvPrefix, detectionRules, detectState, detectionContext, isRuleLine, explainDetection, DETECTION_REGIONS, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath, AGENT_PRESETS, promptAddAgentPreset, setTmuxTimeouts, limitWindow, extractLimitWindows, rateLimitsFromRollout, STATUSLINE_SCRIPT, userHasClaudeStatusline, ensureStateHookAssets, limitsFromCodexbar, limitsFromAgy, limitsFromClaudeOauth, agyWindowMinutes };';
 const moduleUnderTest = { exports: {} };
 const sandbox = {
   module: moduleUnderTest,
@@ -215,7 +215,7 @@ const sandbox = {
   clearInterval,
 };
 vm.runInNewContext(source, sandbox, { filename: 'extension.js' });
-const { ClaudeTmuxView, sessionName, accentChannels, derivedAccent, derivedMark, decodeEscapes, AGENT_DETECTION, paneIdentity, identityMatches, STATE_HOOK_SCRIPT, setStateHookDir, codexHookArgs, tomlString, listPiSessions, piSessionDir, piExtensionPath, ensurePiExtension, removePiExtension, PI_EXTENSION, customAgentSpecs, registerCustomAgents, freeAgentId, mirroredSessionNames, baseSessionName, setMirrorStore, mirroredAgentEntries, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, readFirstJsonLine, TranscriptTail, listSessions, AGENTS, AGENT_IDS, BUILTIN_AGENTS, BUILTIN_AGENT_IDS, DEFAULT_ENABLED_AGENTS, normalizedEnabledAgents, rebuildAgentRegistry, enabledAgentsChanged, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, listDevinSessions, devinLaunchArgs, hermesProfileSlug, hermesProfileHome, ensureHermesProfile, launchEnvPrefix, detectionRules, detectState, detectionContext, isRuleLine, explainDetection, DETECTION_REGIONS, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath, AGENT_PRESETS, promptAddAgentPreset, setTmuxTimeouts, limitWindow, extractLimitWindows, rateLimitsFromRollout, STATUSLINE_SCRIPT, userHasClaudeStatusline, ensureStateHookAssets, limitsFromCodexbar } = moduleUnderTest.exports.__test;
+const { ClaudeTmuxView, sessionName, accentChannels, derivedAccent, derivedMark, decodeEscapes, AGENT_DETECTION, paneIdentity, identityMatches, STATE_HOOK_SCRIPT, setStateHookDir, codexHookArgs, tomlString, listPiSessions, piSessionDir, piExtensionPath, ensurePiExtension, removePiExtension, PI_EXTENSION, customAgentSpecs, registerCustomAgents, freeAgentId, mirroredSessionNames, baseSessionName, setMirrorStore, mirroredAgentEntries, codexLaunchArgs, CODEX_CLAUDE_RULES, agentSessionInfo, extractMarkedBlock, sourceHandoffPrompt, findingsPrompt, splitFusedCapture, diffFrameLines, TmuxControlClient, listCodexSessions, readFirstJsonLine, TranscriptTail, listSessions, AGENTS, AGENT_IDS, BUILTIN_AGENTS, BUILTIN_AGENT_IDS, DEFAULT_ENABLED_AGENTS, normalizedEnabledAgents, rebuildAgentRegistry, enabledAgentsChanged, launchArgs, paneLooksLikeAgent, listOpencodeSessions, listHermesSessions, listDevinSessions, devinLaunchArgs, hermesProfileSlug, hermesProfileHome, ensureHermesProfile, launchEnvPrefix, detectionRules, detectState, detectionContext, isRuleLine, explainDetection, DETECTION_REGIONS, OPENCODE_PLUGIN, ensureOpencodePlugin, removeOpencodePlugin, opencodePluginPath, AGENT_PRESETS, promptAddAgentPreset, setTmuxTimeouts, limitWindow, extractLimitWindows, rateLimitsFromRollout, STATUSLINE_SCRIPT, userHasClaudeStatusline, ensureStateHookAssets, limitsFromCodexbar, limitsFromAgy, limitsFromClaudeOauth, agyWindowMinutes } = moduleUnderTest.exports.__test;
 
 function makeProvider() {
   const provider = new ClaudeTmuxView({
@@ -2014,6 +2014,53 @@ async function run() {
     assert.ok(!cb.empty, 'a provider with no windows is dropped');
     assert.strictEqual(limitsFromCodexbar('not json'), null);
     assert.strictEqual(limitsFromCodexbar('[]'), null);
+  }
+
+  // ---- `agy -p /usage --output-format json` parser ---------------------------
+  // Real schema: command.data.groups[] of {name, buckets[{name, window,
+  // remaining_fraction, reset_time}]}. remaining is inverted to used; the
+  // most-used group takes the two bars, the rest go to the tooltip.
+  {
+    const future = (h) => new Date(Date.now() + h * 3600000).toISOString();
+    const agy = limitsFromAgy(JSON.stringify({ command: { data: { groups: [
+      { name: 'Gemini Models', buckets: [
+        { id: 'gemini-weekly', name: 'Weekly Limit Remaining', window: 'weekly', remaining_fraction: 0.5, reset_time: future(96) },
+        { id: 'gemini-5h', name: 'Five Hour Limit Remaining', window: '5h', remaining_fraction: 1, reset_time: future(3) }] },
+      { name: 'Claude and GPT models', buckets: [
+        { id: '3p-weekly', name: 'Weekly Limit Remaining', window: 'weekly', remaining_fraction: 0.1, reset_time: future(200) },
+        { id: '3p-5h', name: 'Five Hour Limit Remaining', window: '5h', remaining_fraction: 0.8, reset_time: future(4) }] },
+    ] } } }));
+    assert.strictEqual(agy.primary.minutes, 300, 'the binding (Claude/GPT) group wins the bars, 5h first');
+    assert.strictEqual(Math.round(agy.primary.pct), 20, 'remaining_fraction 0.8 → 20% used');
+    assert.strictEqual(Math.round(agy.secondary.pct), 90, 'remaining_fraction 0.1 → 90% used');
+    assert.ok(agy.tips.some((t) => t.includes('Gemini Models')), 'other groups land in the tooltip');
+    assert.strictEqual(limitsFromAgy('not json'), null);
+    assert.strictEqual(limitsFromAgy('{"command":{}}'), null);
+    assert.strictEqual(limitsFromAgy(JSON.stringify({ command: { data: { groups: [
+      { name: 'stale', buckets: [{ window: 'weekly', remaining_fraction: 0.5, reset_time: '2020-01-01T00:00:00Z' }] }] } } })), null,
+      'a long-past reset is stale, not informative');
+    assert.strictEqual(agyWindowMinutes('5h'), 300);
+    assert.strictEqual(agyWindowMinutes('weekly'), 10080);
+    assert.ok(agyWindowMinutes('strange', Date.now() + 3600000) >= 59, 'unknown windows derive minutes from reset');
+  }
+
+  // ---- Anthropic OAuth usage parser ----------------------------------------
+  // five_hour/seven_day are the two bars; model-specific weeklies go to the
+  // tooltip; stale resets and non-numeric utilization drop out.
+  {
+    const future = (h) => new Date(Date.now() + h * 3600000).toISOString();
+    const cl = limitsFromClaudeOauth({
+      five_hour: { utilization: 42.4, resets_at: future(2) },
+      seven_day: { utilization: 12, resets_at: future(100) },
+      seven_day_sonnet: { utilization: 66, resets_at: future(100) },
+    });
+    assert.strictEqual(Math.round(cl.primary.pct), 42);
+    assert.strictEqual(cl.primary.minutes, 300);
+    assert.strictEqual(cl.secondary.minutes, 10080);
+    assert.deepStrictEqual([...cl.tips], ['Sonnet wk: 66%']);
+    assert.strictEqual(limitsFromClaudeOauth({ five_hour: { utilization: 'high' } }), null);
+    assert.strictEqual(limitsFromClaudeOauth({ five_hour: { utilization: 10, resets_at: '2020-01-01T00:00:00Z' } }), null);
+    assert.strictEqual(limitsFromClaudeOauth(null), null);
   }
 
   // ---- the generated state hook keeps "done" honest about background tasks ----

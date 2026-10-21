@@ -274,12 +274,15 @@ The same compact footer shows pane size and tmux uptime. When available it adds
 capture takes at least 200 ms, token/turn chips tailed from the CLI's local
 transcript, the current tool while working, and the last turn's git delta.
 Alongside the chips, two tiny fill bars per provider track the account's
-rate-limit windows (percentages and reset times in the tooltip): Codex's come
-from its local rollout logs, Claude's only reach the status line — so a no-op
-status line is installed for it, but never over one you configured yourself.
-If the CodexBar CLI is installed it becomes the source for every provider it
-is configured for — devin, antigravity, opencode and the ~100 more it
-supports — refreshed every five minutes. `claudeTmux.usageLimits` switches
+rate-limit windows (percentages, reset times and any extra windows in the
+tooltip). Each provider answers through its own channel: Codex's come from
+its local rollout logs; Claude's reach the status line — so a no-op status
+line is installed for it, but never over one you configured yourself — or
+Anthropic's OAuth usage endpoint when a fresh `~/.claude/.credentials.json`
+token exists; Antigravity reports through `agy -p /usage` — its own signed-in
+CLI, no auth on our side. When the CodexBar CLI is installed it adds whatever
+providers nothing else reached — devin, opencode subscriptions and the ~100
+more it supports — but nothing requires it. `claudeTmux.usageLimits` switches
 the bars off. These fields reuse existing snapshots and local file
 reads and do not add another tmux process. A single status bar item mirrors the same state across
 all of VS Code: all present agents are listed in its tooltip, and clicking it
