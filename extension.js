@@ -2904,7 +2904,10 @@ async function newestCodexRolloutFile() {
     for (const y of years) {
       const months = (await fs.promises.readdir(path.join(root, y))).sort().reverse().slice(0, 2);
       for (const mo of months) {
-        const days = (await fs.promises.readdir(path.join(root, y, mo))).sort().reverse().slice(0, 7);
+        // A rate_limits snapshot older than a day is stale anyway (its reset
+        // windows rolled or the used% lies) — two day-dirs per month covers
+        // today, yesterday and the month boundary without scanning history.
+        const days = (await fs.promises.readdir(path.join(root, y, mo))).sort().reverse().slice(0, 2);
         for (const d of days) {
           for (const f of await fs.promises.readdir(path.join(root, y, mo, d))) {
             if (!f.startsWith('rollout-') || !f.endsWith('.jsonl')) continue;
@@ -3837,7 +3840,7 @@ class ClaudeTmuxView {
   postAgents() {
     if (!this.view) return;
     const agents = {};
-    for (const agent of Object.keys(AGENTS)) {
+    for (const agent of AGENT_IDS) {
       const state = this.agentState[agent];
       agents[agent] = {
         present: state.present,
@@ -3894,7 +3897,7 @@ class ClaudeTmuxView {
       this._statusItem.command = 'claudeTmux.statusBarCycle';
       this.context.subscriptions.push(this._statusItem);
     }
-    const present = Object.keys(AGENTS).filter((agent) => this.agentState[agent]?.present);
+    const present = AGENT_IDS.filter((agent) => this.agentState[agent]?.present);
     if (cfg().get('statusBarItems') === false || !present.length) {
       this._statusItem.hide();
       return;
@@ -3990,7 +3993,7 @@ class ClaudeTmuxView {
   updateBadge() {
     if (!this.view) return;
     if (this.view.visible) return;
-    const flagged = Object.keys(AGENTS).filter((a) => this.agentState[a].attention);
+    const flagged = AGENT_IDS.filter((a) => this.agentState[a].attention);
     const value = flagged.length || this.unseen;
     if (!value) { this.view.badge = undefined; return; }
     const tooltip = flagged.length
@@ -4234,7 +4237,7 @@ class ClaudeTmuxView {
         return;
       }
       const cwd = normalizedWorkspace();
-      const agentList = Object.keys(AGENTS);
+      const agentList = AGENT_IDS;
       const sessionInfos = await Promise.all(agentList.map(async (agent) => {
         const cached = this.sessionCache[agent];
         const name = cached?.cwd === cwd ? cached.name : await sessionName(agent);

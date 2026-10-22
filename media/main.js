@@ -277,10 +277,15 @@
     if (!text || text.indexOf('.') < 0 || text.length > 500) return;
     PATH_RE.lastIndex = 0;
     if (!PATH_RE.test(text)) return;
-    const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
+    // Text nodes in document order — a plain childNodes walk instead of a
+    // TreeWalker per changed row (this runs per streamed line containing '.').
     const nodes = [];
-    let node;
-    while ((node = walker.nextNode())) nodes.push(node);
+    const stack = [row];
+    while (stack.length) {
+      const n = stack.pop();
+      if (n.nodeType === 3) nodes.push(n);
+      else for (let i = n.childNodes.length - 1; i >= 0; i--) stack.push(n.childNodes[i]);
+    }
     for (const textNode of nodes) {
       const value = textNode.nodeValue;
       PATH_RE.lastIndex = 0;
