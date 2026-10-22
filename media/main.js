@@ -624,7 +624,7 @@
       [l.primary, l.secondary].forEach((w) => {
         if (!w) return;
         const pct = Math.max(0, Math.min(100, Math.round(w.pct)));
-        bars.push(`<span class="lbar${pct >= 80 ? ' hot' : ''}"><i><i style="width:${pct}%"></i></i><b>${pct}</b></span>`);
+        bars.push(`<span class="lnum${pct >= 80 ? ' hot' : ''}">${pct}%</span>`);
         tips.push(`${who} ${limitTag(w)}: ${pct}%${w.label ? ` · ${w.label}` : w.resetsAt ? ` · resets ${fmtReset(w.resetsAt)}` : ''}`);
       });
       for (const tip of l.tips || []) tips.push(`${who} ${tip}`);
