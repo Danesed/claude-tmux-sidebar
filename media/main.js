@@ -1031,13 +1031,16 @@
     btnUnlock.classList.toggle('hidden', !writerAgent);
     if (Date.now() < hintOverrideUntil) return;
     const inHistory = scrollState[activeAgent].historyMode;
+    const multi = tabs.filter((t) => !t.classList.contains('hidden')).length > 1;
+    const base = multi ? 'click to type · Alt+1…9 tabs' : 'click to type';
     const hint = transactionLocked
       ? 'handoff in progress'
       : locked ? `Pair Mode · ${cap(writerAgent)} is writer`
         : inHistory ? 'scrollback — wheel down at the end returns to live'
           : paneMode ? `pane is in tmux ${paneMode} · typing here leaves it`
-            : (tabs.filter((t) => !t.classList.contains('hidden')).length > 1
-              ? 'click to type · Alt+1…9 switch · F6 leaves' : 'click to type · F6 leaves');
+            // Advertise the two invisible shortcuts — scrollback and prompt
+            // recall — or nobody ever finds them.
+            : `${base} · ⇧PgUp scroll · ⌥↑ prompts · F6 out`;
     if (hint === lastHint) return;
     lastHint = hint;
     hintEl.textContent = hint;
@@ -1270,7 +1273,8 @@
     vscode.postMessage({ type: 'updateHandoffDraft', id: handoffDraft.id, mode: handoffCurrentMode, text: handoffText.value });
     handoffCurrentMode = handoffMode.value;
     handoffText.value = handoffDraft[handoffCurrentMode];
-    vscode.postMessage({ type: 'updateHandoffDraft', id: handoffDraft.id, mode: handoffCurrentMode, text: handoffText.value });
+    // No need to re-post the newly shown mode's text: the host already has it
+    // from the review message and the debounced edits sync.
   });
   // The host only needs the draft text at the next transition, not after every
   // keystroke; a 30 KB message per key was pure overhead. Debounced, and flushed
@@ -1697,7 +1701,11 @@
       if (m.frame != null) {
         liveSeq = m.seq || 0;
         liveLines = m.historyMode ? null : m.frame.split('\n');
-        frameCache[m.agent].frame = m.frame;
+        // History captures can be hundreds of KB — they belong to the virtual
+        // scroller while viewed, not to the per-agent cache that paints tab
+        // switches. Keeping the last live frame instead is also exactly what
+        // a switch back wants, since switching exits history mode.
+        if (!m.historyMode) frameCache[m.agent].frame = m.frame;
         if (hasSelection()) pendingFrame = { agent: m.agent, frame: m.frame }; // don't clobber a copy in progress
         else { render(m.frame); pendingFrame = null; }
       } else if (m.delta) {

@@ -1433,6 +1433,9 @@ function normalizedPath(value) {
   if (hit && now - hit.ts < REALPATH_TTL_MS) return hit.path;
   let resolved;
   try { resolved = fs.realpathSync.native(value); } catch { resolved = path.resolve(value); }
+  // Bound the cache: extension hosts live for weeks and every distinct path
+  // ever typed at would otherwise linger forever. FIFO drop of the oldest.
+  if (realpathCache.size >= 128) realpathCache.delete(realpathCache.keys().next().value);
   realpathCache.set(value, { path: resolved, ts: now });
   return resolved;
 }
@@ -2365,7 +2368,13 @@ async function agentSessionInfo(agent, name) {
   let direct = false;
   if (!claimedByOther) {
     direct = paneLooksLikeAgent(agent, command, title);
-    if (direct) paneIdentityCache.set(identityKey, agent);
+    if (direct) {
+      // Panes killed without a shell fallback (kill-pane, kill-server, reboot)
+      // never hit the delete above — cap the cache so weeks of session churn
+      // cannot accumulate stale identities. FIFO drop of the oldest.
+      if (paneIdentityCache.size >= 256) paneIdentityCache.delete(paneIdentityCache.keys().next().value);
+      paneIdentityCache.set(identityKey, agent);
+    }
     else if (!shell && paneIdentityCache.get(identityKey) === agent) direct = true;
   }
   return { exists: true, ready: direct, ...base };

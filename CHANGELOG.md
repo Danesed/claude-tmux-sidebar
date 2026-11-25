@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.16.6
+
+A memory-footprint pass and small UI flow polish — no new features.
+
+### Changed
+
+- **History captures no longer sit in the per-agent frame cache.** A deep scrollback capture can run to hundreds of KB; it now lives only in the virtual scroller while you look at it, instead of staying cached for tab switches — which never need it, since switching back to a tab returns to the live frame anyway.
+- **Bounded the two long-lived lookup caches** (path normalization, pane identities). Extension hosts run for weeks and panes killed without a shell fallback never hit their eviction path; both caches now FIFO-drop their oldest entry past a small cap.
+- **The hint line teaches the two invisible shortcuts** — `Shift+PgUp` for scrollback and `Alt+Up` for prompt recall — instead of leaving them to be discovered by accident.
+- Removed a redundant draft sync message on handoff mode switches.
+
 ## 0.16.5
 
 Three small ideas lifted from harp, reimplemented light — plus usage-limit
